@@ -35,6 +35,10 @@ TARGET=""
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--model | -m)
+		[[ $# -lt 2 ]] && {
+			echo "Error: --model requires a model ID" >&2
+			exit 1
+		}
 		MODEL="$2"
 		shift 2
 		;;
@@ -426,7 +430,12 @@ if [[ -n "${GH_PR_REVIEW_PI_EXTENSION:-}" && -f "$GH_PR_REVIEW_PI_EXTENSION" ]];
 	PI_ARGS+=(--extension "$GH_PR_REVIEW_PI_EXTENSION")
 fi
 
-pi "${PI_ARGS[@]}" "$(cat "$PROMPT_FILE")" >"$REVIEW_FILE" 2>&1
+if ! pi "${PI_ARGS[@]}" "$(cat "$PROMPT_FILE")" >"$REVIEW_FILE"; then
+	echo "" >&2
+	echo "Error: pi exited with a non-zero status." >&2
+	echo "    Check the session directory for details: ${SESSION_DIR}" >&2
+	exit 1
+fi
 
 REVIEW=$(cat "$REVIEW_FILE")
 
