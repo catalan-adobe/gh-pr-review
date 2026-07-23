@@ -1,0 +1,381 @@
+#!/usr/bin/env bash
+# gh pr-review — AI code review for any GitHub PR
+#
+# Usage:
+#   gh pr-review <PR-URL | PR-number> [options]
+#   gh pr-review --doctor
+#
+# Options:
+#   --model <id>    Pi model ID (default: github-copilot/gpt-5.6-sol)
+#   --no-post       Print review but don't post to GitHub
+#   -y, --yes       Skip confirmation prompt before posting
+#   --doctor        Check all prerequisites and exit
+#   -h, --help      Show this help
+#
+# Examples:
+#   gh pr-review https://github.com/owner/repo/pull/42
+#   gh pr-review 42                # infers repo from the current directory
+#   gh pr-review 42 --model github-copilot/claude-sonnet-5 -y
+#
+# Environment:
+#   GH_PR_REVIEW_MODEL          Default model override (same as --model)
+#   GH_PR_REVIEW_PI_EXTENSION   Path to a pi extension to load during the review
+#   GITHUB_TOKEN                For private repos (gh auth is usually sufficient)
+
+set -euo pipefail
+
+# ── defaults ────────────────────────────────────────────────────────────────
+MODEL="${GH_PR_REVIEW_MODEL:-github-copilot/gpt-5.6-sol}"
+POST_TO_PR=true
+YES=false
+PR_URL=""
+
+# ── arg parsing ──────────────────────────────────────────────────────────────
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--model | -m)
+		MODEL="$2"
+		shift 2
+		;;
+	--no-post)
+		POST_TO_PR=false
+		shift
+		;;
+	-y | --yes)
+		YES=true
+		shift
+		;;
+	-h | --help)
+		sed -n '2,${/^#/!q;s/^# \{0,1\}//p;}' "$0"
+		exit 0
+		;;
+	-*)
+		echo "Unknown option: $1  (try --help)" >&2
+		exit 1
+		;;
+	*)
+		[[ -n "$PR_URL" ]] && {
+			echo "Extra argument: $1" >&2
+			exit 1
+		}
+		PR_URL="$1"
+		shift
+		;;
+	esac
+done
+
+[[ -z "$PR_URL" ]] && {
+	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [-y] [--doctor]" >&2
+	exit 1
+}
+
+# ── parse URL ────────────────────────────────────────────────────────────────
+if [[ ! "$PR_URL" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+	echo "Error: not a GitHub PR URL: $PR_URL" >&2
+	exit 1
+fi
+OWNER="${BASH_REMATCH[1]}"
+REPO="${BASH_REMATCH[2]}"
+PR_NUM="${BASH_REMATCH[3]}"
+
+# ── check deps ───────────────────────────────────────────────────────────────
+for cmd in pi gh git jq; do
+	command -v "$cmd" &>/dev/null || {
+		echo "Missing dependency: $cmd" >&2
+		exit 1
+	}
+done
+
+# ── fetch PR metadata ────────────────────────────────────────────────────────
+echo "🔍  PR #${PR_NUM} — ${OWNER}/${REPO}"
+echo "    model: ${MODEL}"
+echo ""
+
+PR_JSON=$(gh pr view "$PR_NUM" --repo "$OWNER/$REPO" \
+	--json title,body,headRefName,baseRefName,author,additions,deletions,changedFiles 2>&1) ||
+	{
+		echo "Error fetching PR (check gh auth): $PR_JSON" >&2
+		exit 1
+	}
+
+PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
+PR_BODY=$(echo "$PR_JSON" | jq -r '.body // "(no description provided)"')
+PR_AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login')
+BASE_BRANCH=$(echo "$PR_JSON" | jq -r '.baseRefName')
+ADDITIONS=$(echo "$PR_JSON" | jq -r '.additions')
+DELETIONS=$(echo "$PR_JSON" | jq -r '.deletions')
+N_FILES=$(echo "$PR_JSON" | jq -r '.changedFiles')
+
+echo "    ${PR_TITLE}"
+echo "    @${PR_AUTHOR}  ·  +${ADDITIONS} -${DELETIONS}  ·  ${N_FILES} files changed"
+echo ""
+
+# ── clone + checkout ─────────────────────────────────────────────────────────
+SESSIONS_DIR="$(pwd)/pr-review-sessions"
+mkdir -p "$SESSIONS_DIR"
+SESSION_DIR=$(mktemp -d "${SESSIONS_DIR}/pr-review-XXXXX")
+REVIEW_DIR="${SESSION_DIR}/repo"
+PROMPT_FILE="${SESSION_DIR}/prompt.md"
+
+echo "⏳  Cloning ${OWNER}/${REPO}..."
+
+CLONE_URL="https://github.com/${OWNER}/${REPO}.git"
+[[ -n "${GITHUB_TOKEN:-}" ]] &&
+	CLONE_URL="https://${GITHUB_TOKEN}@github.com/${OWNER}/${REPO}.git"
+
+git clone --depth 50 --quiet "$CLONE_URL" "$REVIEW_DIR"
+
+cd "$REVIEW_DIR"
+git fetch origin "pull/${PR_NUM}/head:pr-branch" --depth 50 --quiet
+git checkout pr-branch --quiet
+
+HEAD_SHA=$(git rev-parse HEAD)
+BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}" 2>/dev/null ||
+	git rev-parse "HEAD~1")
+
+echo "    base: ${BASE_SHA:0:8}  head: ${HEAD_SHA:0:8}"
+echo ""
+
+# ── build review prompt (temp file — no quoting issues) ──────────────────────
+build_prompt() {
+	{
+		# Part 1: static header (quoted heredoc — zero expansion)
+		cat <<'PART1'
+You are a Senior Code Reviewer with expertise in software architecture,
+design patterns, and best practices. Your job is to review completed work against
+its PR description and identify issues before they are merged.
+
+## What Was Implemented
+
+PART1
+
+		# Part 2: dynamic PR metadata (printf — safe for any content)
+		printf 'PR #%s by @%s: %s\n\n' "$PR_NUM" "$PR_AUTHOR" "$PR_TITLE"
+		printf '## Requirements / Plan\n\n%s\n\n' "$PR_BODY"
+
+		# Part 3: git range (unquoted heredoc — expands $BASE_SHA/$HEAD_SHA only)
+		cat <<PART3
+## Git Range to Review
+
+**Base:** ${BASE_SHA}
+**Head:** ${HEAD_SHA}
+
+Run these commands to inspect the changes, then read every changed file in full:
+
+\`\`\`bash
+git diff --stat ${BASE_SHA}..${HEAD_SHA}
+git diff ${BASE_SHA}..${HEAD_SHA}
+\`\`\`
+
+PART3
+
+		# Part 4: all review instructions (quoted heredoc — zero expansion)
+		cat <<'PART4'
+## Read-Only Review
+
+Your review is read-only on this checkout. Do not mutate the working tree, the index,
+HEAD, or branch state. Use `git show`, `git diff`, `git log`, and `git blame` to inspect.
+
+## What to Check
+
+**Plan alignment:**
+- Does the implementation match the PR description?
+- Are any deviations justified or problematic?
+- Is all planned functionality present?
+
+**Code quality:**
+- Clean separation of concerns?
+- Proper error handling — errors propagated or logged, never silently swallowed?
+- Type safety where applicable?
+- DRY without premature abstraction?
+- Are functions and classes too complex? Could this be understood quickly by a new reader?
+- Over-engineering / YAGNI: is speculative generality added that isn't needed now?
+- Naming: do functions, variables, and types clearly communicate intent?
+- Comments explain WHY, not WHAT. No commented-out code.
+- Magic numbers or strings that should be named constants?
+- Dead code, unused variables, or imports?
+
+**Money and precision safety:**
+- Are `float`/`double`/bare JSON numbers used for monetary values? Must use integer minor-units
+  (cents), Decimal/BigDecimal, or string representation.
+- Check arithmetic on money for rounding-order bugs (multiply before divide, not after).
+
+**Batch and partial-failure resilience:**
+- When code processes multiple records (batch inserts, bulk API calls, list processing): what
+  happens if record N fails mid-batch? Are records 1…N-1 committed or rolled back?
+- Can processing resume from N+1? Is there a partial-result or dead-letter path?
+
+**Null and boundary safety** (most common real-world bug category):
+- Null/undefined dereferences on any input the code doesn't fully control?
+- Index/boundary conditions: off-by-one errors, empty collection access?
+- Data format and type conversion: silent truncation, locale-dependent parsing?
+
+**Architecture:**
+- Sound design decisions?
+- Reasonable scalability and performance (N+1 queries, unoptimized loops, excessive I/O)?
+- Security: injection, XSS, CSRF, insecure deserialization, secrets in code, broken auth?
+- Integrates cleanly with surrounding code?
+
+**Security — cryptography and data authenticity:**
+- IV/nonce reuse (AES-GCM nonce reuse is catastrophic — leaks plaintext).
+- `Math.random()` or non-CSPRNG used for tokens, keys, or codes.
+- String `==` instead of constant-time compare for secrets/HMACs (timing side-channel).
+- TLS certificate validation disabled, or legacy algorithms (MD5/SHA1/DES/RC4/ECB).
+- Webhook/callback payloads from external services: are they signature-verified over raw bytes
+  before being trusted? Never overwrite state directly from an unverified external payload.
+  (CWE-345 had a 100% escape rate in empirical code review studies — reviewers reliably miss it.)
+
+**Observability** (will we know when this breaks in production?):
+- New code paths have logging at appropriate levels?
+- Errors caught in try/catch are logged — not silently swallowed?
+- New endpoints, jobs, or queue consumers have a metric or trace attached?
+- New failure modes that should trigger an alert?
+- Metric label cardinality: flag labels derived from unbounded sets (user IDs, tenant IDs, raw
+  URLs, error message text). Labels must come from small, fixed enumerations.
+- Trace context propagation: does W3C traceparent survive queue messages, background jobs, and
+  fire-and-forget calls — not just synchronous HTTP?
+
+**Concurrency, idempotency, and timeouts**:
+- New POST/PUT/PATCH handlers: what happens if the request is retried with the same payload?
+- New background jobs or queue consumers: what happens if two run simultaneously?
+- New outbound calls: is there a timeout? What happens when it fires?
+- Race conditions or deadlocks possible in any concurrent code path?
+- Dual-write consistency: when a DB write is paired with an external side effect (queue publish,
+  webhook, email, cache update), is there a transactional guarantee? Without an outbox pattern
+  or change-data-capture, partial failure leaves DB and external system inconsistent.
+
+**Testing:**
+- Tests verify real behavior, not implementation details?
+- Edge cases covered (empty inputs, boundary values, missing data)?
+- Every error path the code handles has a test that triggers it?
+- Test weakening: did the PR make the suite pass by weakening assertions (removing checks,
+  broadening matchers, deleting cases, changing expected values) rather than fixing the code?
+  Verify test descriptions still match what they actually assert.
+
+**Dependencies:**
+- New packages added? Are they necessary and well-maintained?
+- Known CVEs in new or updated dependencies?
+- Lock file updated and committed?
+
+**Production readiness:**
+- Schema migrations: forward-only and backward compatible? Idempotent? Zero-downtime?
+- Backward compatibility: function signatures, env vars, JSON/queue payloads, config shapes?
+- Feature flags: new flags must have a safe default (off/conservative), a documented owner, and
+  a planned removal condition. Flag reuse of old flag names (Knight Capital lost $440M this way).
+- Documentation: if behavior changed, are README, API docs, or changelogs updated?
+- Obvious bugs?
+
+## Calibration and noise control
+
+Categorize issues by actual severity. Not everything is Critical.
+Acknowledge what was done well — accurate praise helps the author trust the rest.
+If you find issues with the plan itself rather than the implementation, say so.
+
+**Exclusion rule:** Do NOT flag things CI already catches — lint violations, type errors,
+formatting, or coverage percentages. Those are handled upstream. Focus on what static analysis
+cannot see: logic, design intent, operational correctness, and systemic risks.
+
+**Evidence rule:** Every Critical or Important finding MUST cite a specific file:line and
+describe the concrete failure scenario. A finding with no code reference gets dropped, not
+softened. Vague findings like "improve error handling" are not actionable and should not appear.
+
+## Output Format
+
+### Strengths
+[What is well done? Be specific with file:line references.]
+
+### Issues
+
+#### 🚨 Critical (Must Fix Before Merge)
+[Bugs, security vulnerabilities, data loss, broken functionality]
+
+#### ⚠️ Important (Should Fix)
+[Architecture problems, missing features, poor error handling, test gaps]
+
+#### 💡 Minor (Nice to Have)
+[Style, optimization opportunities, documentation polish]
+
+For each issue:
+- **[file:line]** — what's wrong
+  - Why it matters
+  - Suggested fix (code snippet if useful)
+
+If a section is empty, write: *(none found)*
+
+### Recommendations
+[Cross-cutting improvements for quality, architecture, or process]
+
+### Assessment
+
+**Ready to merge?** [Yes | No | Yes with fixes]
+
+**Reasoning:** [1-2 sentence honest technical assessment]
+
+PART4
+
+		# Part 5: footer with model name (unquoted heredoc for $MODEL)
+		cat <<PART5
+
+---
+*Review generated by gh pr-review · model: ${MODEL}*
+PART5
+	} >"$PROMPT_FILE"
+}
+
+build_prompt
+
+# ── run pi ───────────────────────────────────────────────────────────────────
+REVIEW_FILE="${SESSION_DIR}/review.md"
+
+echo "⏳  Running review (this may take a few minutes)..."
+echo "    session: ${SESSION_DIR}"
+echo ""
+
+cd "$REVIEW_DIR"
+
+PI_ARGS=(
+	--print
+	--model "$MODEL"
+	--no-context-files
+	--no-skills
+	--no-extensions
+	--approve
+	--thinking high
+	--name "pr-review #${PR_NUM} ${OWNER}/${REPO}"
+)
+
+# Optional: load one pi extension during the review (e.g. session archival).
+if [[ -n "${GH_PR_REVIEW_PI_EXTENSION:-}" && -f "$GH_PR_REVIEW_PI_EXTENSION" ]]; then
+	PI_ARGS+=(--extension "$GH_PR_REVIEW_PI_EXTENSION")
+fi
+
+pi "${PI_ARGS[@]}" "$(cat "$PROMPT_FILE")" >"$REVIEW_FILE" 2>&1
+
+REVIEW=$(cat "$REVIEW_FILE")
+
+# ── display ──────────────────────────────────────────────────────────────────
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+if [[ -n "$REVIEW" ]]; then
+	echo "$REVIEW"
+else
+	echo "⚠️  Review is empty — pi may have failed or timed out."
+	echo "    Try running with a different model: --model github-copilot/gpt-5.5"
+fi
+echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+echo ""
+
+# ── post ─────────────────────────────────────────────────────────────────────
+if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
+	if [[ "$YES" == "false" ]]; then
+		read -r -p "Post this review to PR #${PR_NUM}? [y/N] " confirm
+		[[ "$confirm" =~ ^[Yy]$ ]] || {
+			echo "Aborted — review not posted."
+			exit 0
+		}
+	fi
+
+	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s' "$REVIEW")
+
+	gh pr comment "$PR_NUM" --repo "$OWNER/$REPO" --body "$COMMENT"
+	echo "✓  Posted → https://github.com/${OWNER}/${REPO}/pull/${PR_NUM}"
+fi
