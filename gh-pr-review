@@ -29,7 +29,7 @@ MODEL="${GH_PR_REVIEW_MODEL:-github-copilot/gpt-5.6-sol}"
 POST_TO_PR=true
 YES=false
 DOCTOR=false
-PR_URL=""
+TARGET=""
 
 # ── arg parsing ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -59,17 +59,17 @@ while [[ $# -gt 0 ]]; do
 		exit 1
 		;;
 	*)
-		[[ -n "$PR_URL" ]] && {
+		[[ -n "$TARGET" ]] && {
 			echo "Extra argument: $1" >&2
 			exit 1
 		}
-		PR_URL="$1"
+		TARGET="$1"
 		shift
 		;;
 	esac
 done
 
-if [[ "$DOCTOR" == "false" && -z "$PR_URL" ]]; then
+if [[ "$DOCTOR" == "false" && -z "$TARGET" ]]; then
 	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [-y] [--doctor]" >&2
 	exit 1
 fi
@@ -144,14 +144,24 @@ if [[ "$PREFLIGHT_FAILURES" -gt 0 ]]; then
 	exit 1
 fi
 
-# ── parse URL ────────────────────────────────────────────────────────────────
-if [[ ! "$PR_URL" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
-	echo "Error: not a GitHub PR URL: $PR_URL" >&2
+# ── resolve owner/repo/PR number ─────────────────────────────────────────────
+if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
+	REPO_JSON=$(gh repo view --json owner,name 2>/dev/null) || {
+		echo "Error: a bare PR number only works inside a repo clone." >&2
+		echo "cd into the repository, or pass the full PR URL." >&2
+		exit 1
+	}
+	OWNER=$(echo "$REPO_JSON" | jq -r '.owner.login')
+	REPO=$(echo "$REPO_JSON" | jq -r '.name')
+	PR_NUM="$TARGET"
+elif [[ "$TARGET" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+	OWNER="${BASH_REMATCH[1]}"
+	REPO="${BASH_REMATCH[2]}"
+	PR_NUM="${BASH_REMATCH[3]}"
+else
+	echo "Error: expected a GitHub PR URL or PR number, got: $TARGET" >&2
 	exit 1
 fi
-OWNER="${BASH_REMATCH[1]}"
-REPO="${BASH_REMATCH[2]}"
-PR_NUM="${BASH_REMATCH[3]}"
 
 # ── fetch PR metadata ────────────────────────────────────────────────────────
 echo "🔍  PR #${PR_NUM} — ${OWNER}/${REPO}"
