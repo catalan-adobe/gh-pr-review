@@ -28,6 +28,7 @@ set -euo pipefail
 MODEL="${GH_PR_REVIEW_MODEL:-github-copilot/gpt-5.6-sol}"
 POST_TO_PR=true
 YES=false
+DOCTOR=false
 PR_URL=""
 
 # ── arg parsing ──────────────────────────────────────────────────────────────
@@ -43,6 +44,10 @@ while [[ $# -gt 0 ]]; do
 		;;
 	-y | --yes)
 		YES=true
+		shift
+		;;
+	--doctor)
+		DOCTOR=true
 		shift
 		;;
 	-h | --help)
@@ -64,10 +69,80 @@ while [[ $# -gt 0 ]]; do
 	esac
 done
 
-[[ -z "$PR_URL" ]] && {
+if [[ "$DOCTOR" == "false" && -z "$PR_URL" ]]; then
 	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [-y] [--doctor]" >&2
 	exit 1
+fi
+
+# ── preflight ────────────────────────────────────────────────────────────────
+PI_AUTH_FILE="${HOME}/.pi/agent/auth.json"
+PREFLIGHT_FAILURES=0
+
+pf_ok() {
+	[[ "$DOCTOR" == "true" ]] && echo "✓ $1"
+	return 0
 }
+
+pf_fail() {
+	echo "✗ $1" >&2
+	echo "  → $2" >&2
+	PREFLIGHT_FAILURES=$((PREFLIGHT_FAILURES + 1))
+}
+
+run_preflight() {
+	if command -v git &>/dev/null; then
+		pf_ok "git installed"
+	else
+		pf_fail "git not found" \
+			"macOS: xcode-select --install · Linux: install via your package manager"
+	fi
+
+	if command -v jq &>/dev/null; then
+		pf_ok "jq installed"
+	else
+		pf_fail "jq not found" "macOS: brew install jq · Linux: apt/dnf install jq"
+	fi
+
+	if gh auth status &>/dev/null; then
+		pf_ok "gh authenticated"
+	else
+		pf_fail "gh not authenticated" "run: gh auth login"
+	fi
+
+	if command -v pi &>/dev/null; then
+		pf_ok "pi installed"
+	else
+		pf_fail "pi (pi-coding-agent) not found" \
+			"run: npm install -g @earendil-works/pi-coding-agent  (requires Node 22+)"
+	fi
+
+	if [[ "$MODEL" == github-copilot/* ]]; then
+		if command -v jq &>/dev/null && [[ -f "$PI_AUTH_FILE" ]] &&
+			jq -e 'has("github-copilot")' "$PI_AUTH_FILE" &>/dev/null; then
+			pf_ok "pi has GitHub Copilot credentials"
+		else
+			pf_fail "pi is not logged in to GitHub Copilot (model: ${MODEL})" \
+				"run pi, then /login and pick GitHub Copilot — requires an active Copilot subscription"
+		fi
+	fi
+}
+
+run_preflight
+
+if [[ "$DOCTOR" == "true" ]]; then
+	if [[ "$PREFLIGHT_FAILURES" -eq 0 ]]; then
+		echo ""
+		echo "All checks passed — try: gh pr-review <PR-URL | PR-number>"
+		exit 0
+	fi
+	exit 1
+fi
+
+if [[ "$PREFLIGHT_FAILURES" -gt 0 ]]; then
+	echo "" >&2
+	echo "Fix the issues above, then re-check with: gh pr-review --doctor" >&2
+	exit 1
+fi
 
 # ── parse URL ────────────────────────────────────────────────────────────────
 if [[ ! "$PR_URL" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
@@ -77,14 +152,6 @@ fi
 OWNER="${BASH_REMATCH[1]}"
 REPO="${BASH_REMATCH[2]}"
 PR_NUM="${BASH_REMATCH[3]}"
-
-# ── check deps ───────────────────────────────────────────────────────────────
-for cmd in pi gh git jq; do
-	command -v "$cmd" &>/dev/null || {
-		echo "Missing dependency: $cmd" >&2
-		exit 1
-	}
-done
 
 # ── fetch PR metadata ────────────────────────────────────────────────────────
 echo "🔍  PR #${PR_NUM} — ${OWNER}/${REPO}"
