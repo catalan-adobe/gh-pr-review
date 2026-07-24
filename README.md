@@ -89,6 +89,14 @@ if you run it inside a repo.
 - **Private repo clone fails** — export `GITHUB_TOKEN` with repo read access.
 - **Update the extension** — `gh extension upgrade pr-review`.
 
+## Roadmap
+
+A GitHub Action mode (`/pr-review` comment on any PR, plus opt-in
+auto-review) is designed but not yet implemented — see
+[docs/github-action.md](docs/github-action.md) for the investigation:
+Copilot CLI in Actions, authentication routes, billing model, and the
+planned deployment story.
+
 ## License
 
 Apache-2.0
