@@ -44,11 +44,13 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `--model <id>` | `github-copilot/gpt-5.6-sol` | Any pi model ID |
+| `-u`, `--user <login>` | active `gh` account | Use another logged-in `gh` account for this run only; global `gh auth` is not changed |
 | `--no-post` | posting on (with confirm) | Print the review only |
 | `-y`, `--yes` | off | Skip the post confirmation |
 | `--doctor` | — | Check prerequisites and exit |
 
 Environment variables: `GH_PR_REVIEW_MODEL` (default model),
+`GH_PR_REVIEW_USER` (default `--user`),
 `GH_PR_REVIEW_PI_EXTENSION` (path to a pi extension to load during
 review), `GITHUB_TOKEN` (private repo clones; `gh` auth usually
 suffices).
