@@ -7,6 +7,7 @@
 #
 # Options:
 #   --model <id>    Pi model ID (default: github-copilot/gpt-5.6-sol)
+#   -u, --user <login>  gh account to use for this run only (global gh auth is untouched)
 #   --no-post       Print review but don't post to GitHub
 #   -y, --yes       Skip confirmation prompt before posting
 #   --doctor        Check all prerequisites and exit
@@ -20,6 +21,7 @@
 # Environment:
 #   GH_PR_REVIEW_MODEL          Default model override (same as --model)
 #   GH_PR_REVIEW_PI_EXTENSION   Path to a pi extension to load during the review
+#   GH_PR_REVIEW_USER           Default gh account (same as --user)
 #   GITHUB_TOKEN                For private repos (gh auth is usually sufficient)
 
 set -euo pipefail
@@ -30,6 +32,7 @@ POST_TO_PR=true
 YES=false
 DOCTOR=false
 TARGET=""
+GH_USER="${GH_PR_REVIEW_USER:-}"
 
 # ── arg parsing ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -40,6 +43,14 @@ while [[ $# -gt 0 ]]; do
 			exit 1
 		}
 		MODEL="$2"
+		shift 2
+		;;
+	--user | -u)
+		[[ $# -lt 2 ]] && {
+			echo "Error: --user requires a gh login" >&2
+			exit 1
+		}
+		GH_USER="$2"
 		shift 2
 		;;
 	--no-post)
@@ -76,6 +87,15 @@ done
 if [[ "$DOCTOR" == "false" && -z "$TARGET" ]]; then
 	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [-y] [--doctor]" >&2
 	exit 1
+fi
+
+# ── per-run gh account (env token only; never runs `gh auth switch`) ─────────
+if [[ -n "$GH_USER" ]]; then
+	GH_TOKEN=$(gh auth token --user "$GH_USER") || {
+		echo "Error: no gh login for '${GH_USER}' — see: gh auth status" >&2
+		exit 1
+	}
+	export GH_TOKEN GITHUB_TOKEN="$GH_TOKEN"
 fi
 
 # ── preflight ────────────────────────────────────────────────────────────────
