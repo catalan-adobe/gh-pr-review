@@ -178,10 +178,12 @@ if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
 	OWNER=$(echo "$REPO_JSON" | jq -r '.owner.login')
 	REPO=$(echo "$REPO_JSON" | jq -r '.name')
 	PR_NUM="$TARGET"
-elif [[ "$TARGET" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
-	OWNER="${BASH_REMATCH[1]}"
-	REPO="${BASH_REMATCH[2]}"
-	PR_NUM="${BASH_REMATCH[3]}"
+	GH_HOST_NAME=$(gh repo view --json url -q .url | awk -F/ '{print $3}')
+elif [[ "$TARGET" =~ ^https?://([^/]+)/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+	GH_HOST_NAME="${BASH_REMATCH[1]}"
+	OWNER="${BASH_REMATCH[2]}"
+	REPO="${BASH_REMATCH[3]}"
+	PR_NUM="${BASH_REMATCH[4]}"
 else
 	echo "Error: expected a GitHub PR URL or PR number, got: $TARGET" >&2
 	exit 1
@@ -192,7 +194,7 @@ echo "🔍  PR #${PR_NUM} — ${OWNER}/${REPO}"
 echo "    model: ${MODEL}"
 echo ""
 
-PR_JSON=$(gh pr view "$PR_NUM" --repo "$OWNER/$REPO" \
+PR_JSON=$(gh pr view "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" \
 	--json title,body,headRefName,baseRefName,author,additions,deletions,changedFiles 2>&1) ||
 	{
 		echo "Error fetching PR (check gh auth): $PR_JSON" >&2
@@ -220,9 +222,12 @@ PROMPT_FILE="${SESSION_DIR}/prompt.md"
 
 echo "⏳  Cloning ${OWNER}/${REPO}..."
 
-CLONE_URL="https://github.com/${OWNER}/${REPO}.git"
-[[ -n "${GITHUB_TOKEN:-}" ]] &&
-	CLONE_URL="https://${GITHUB_TOKEN}@github.com/${OWNER}/${REPO}.git"
+CLONE_URL="https://${GH_HOST_NAME}/${OWNER}/${REPO}.git"
+if [[ "$GH_HOST_NAME" == "github.com" ]]; then CLONE_TOKEN="${GITHUB_TOKEN:-}"; else
+	CLONE_TOKEN=$(gh auth token --hostname "$GH_HOST_NAME" 2>/dev/null || true)
+fi
+[[ -n "$CLONE_TOKEN" ]] &&
+	CLONE_URL="https://${CLONE_TOKEN}@${GH_HOST_NAME}/${OWNER}/${REPO}.git"
 
 git clone --depth 50 --quiet "$CLONE_URL" "$REVIEW_DIR"
 
@@ -482,6 +487,6 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 
 	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s' "$REVIEW")
 
-	gh pr comment "$PR_NUM" --repo "$OWNER/$REPO" --body "$COMMENT"
-	echo "✓  Posted → https://github.com/${OWNER}/${REPO}/pull/${PR_NUM}"
+	gh pr comment "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" --body "$COMMENT"
+	echo "✓  Posted → https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}"
 fi
