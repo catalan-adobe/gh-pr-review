@@ -170,7 +170,7 @@ fi
 
 # ── resolve owner/repo/PR number ─────────────────────────────────────────────
 if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
-	REPO_JSON=$(gh repo view --json owner,name 2>/dev/null) || {
+	REPO_JSON=$(gh repo view --json owner,name,url 2>/dev/null) || {
 		echo "Error: a bare PR number only works inside a repo clone." >&2
 		echo "cd into the repository, or pass the full PR URL." >&2
 		exit 1
@@ -178,10 +178,12 @@ if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
 	OWNER=$(echo "$REPO_JSON" | jq -r '.owner.login')
 	REPO=$(echo "$REPO_JSON" | jq -r '.name')
 	PR_NUM="$TARGET"
-elif [[ "$TARGET" =~ github\.com/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
-	OWNER="${BASH_REMATCH[1]}"
-	REPO="${BASH_REMATCH[2]}"
-	PR_NUM="${BASH_REMATCH[3]}"
+	GH_HOST_NAME=$(echo "$REPO_JSON" | jq -r '.url | split("/")[2]')
+elif [[ "$TARGET" =~ ^https?://([^/]+)/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
+	GH_HOST_NAME="${BASH_REMATCH[1]}"
+	OWNER="${BASH_REMATCH[2]}"
+	REPO="${BASH_REMATCH[3]}"
+	PR_NUM="${BASH_REMATCH[4]}"
 else
 	echo "Error: expected a GitHub PR URL or PR number, got: $TARGET" >&2
 	exit 1
@@ -192,7 +194,7 @@ echo "🔍  PR #${PR_NUM} — ${OWNER}/${REPO}"
 echo "    model: ${MODEL}"
 echo ""
 
-PR_JSON=$(gh pr view "$PR_NUM" --repo "$OWNER/$REPO" \
+PR_JSON=$(gh pr view "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" \
 	--json title,body,headRefName,baseRefName,author,additions,deletions,changedFiles 2>&1) ||
 	{
 		echo "Error fetching PR (check gh auth): $PR_JSON" >&2
@@ -220,14 +222,14 @@ PROMPT_FILE="${SESSION_DIR}/prompt.md"
 
 echo "⏳  Cloning ${OWNER}/${REPO}..."
 
-CLONE_URL="https://github.com/${OWNER}/${REPO}.git"
-[[ -n "${GITHUB_TOKEN:-}" ]] &&
-	CLONE_URL="https://${GITHUB_TOKEN}@github.com/${OWNER}/${REPO}.git"
+# Per-command credential helper: the token never lands in the checkout's .git/config.
+GIT_AUTH=(-c credential.helper= -c "credential.helper=!gh auth git-credential")
+CLONE_URL="https://${GH_HOST_NAME}/${OWNER}/${REPO}.git"
 
-git clone --depth 50 --quiet "$CLONE_URL" "$REVIEW_DIR"
+git "${GIT_AUTH[@]}" clone --depth 50 --quiet "$CLONE_URL" "$REVIEW_DIR"
 
 cd "$REVIEW_DIR"
-git fetch origin "pull/${PR_NUM}/head:pr-branch" --depth 50 --quiet
+git "${GIT_AUTH[@]}" fetch origin "pull/${PR_NUM}/head:pr-branch" --depth 50 --quiet
 git checkout pr-branch --quiet
 
 HEAD_SHA=$(git rev-parse HEAD)
@@ -482,6 +484,6 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 
 	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s' "$REVIEW")
 
-	gh pr comment "$PR_NUM" --repo "$OWNER/$REPO" --body "$COMMENT"
-	echo "✓  Posted → https://github.com/${OWNER}/${REPO}/pull/${PR_NUM}"
+	gh pr comment "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" --body "$COMMENT"
+	echo "✓  Posted → https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}"
 fi

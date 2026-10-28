@@ -55,6 +55,10 @@ Environment variables: `GH_PR_REVIEW_MODEL` (default model),
 review), `GITHUB_TOKEN` (private repo clones; `gh` auth usually
 suffices).
 
+GitHub Enterprise: pass the full PR URL (e.g. `https://git.example.com/o/r/pull/1`)
+after `gh auth login --hostname git.example.com`. `--user` only selects the
+github.com account; Enterprise hosts use their own stored `gh` login.
+
 Note: `gh pr review` (spaces) is GitHub's built-in approve/comment
 command; `gh pr-review` (hyphen) is this extension. They coexist.
 
