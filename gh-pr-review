@@ -170,7 +170,7 @@ fi
 
 # ── resolve owner/repo/PR number ─────────────────────────────────────────────
 if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
-	REPO_JSON=$(gh repo view --json owner,name 2>/dev/null) || {
+	REPO_JSON=$(gh repo view --json owner,name,url 2>/dev/null) || {
 		echo "Error: a bare PR number only works inside a repo clone." >&2
 		echo "cd into the repository, or pass the full PR URL." >&2
 		exit 1
@@ -178,7 +178,7 @@ if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
 	OWNER=$(echo "$REPO_JSON" | jq -r '.owner.login')
 	REPO=$(echo "$REPO_JSON" | jq -r '.name')
 	PR_NUM="$TARGET"
-	GH_HOST_NAME=$(gh repo view --json url -q .url | awk -F/ '{print $3}')
+	GH_HOST_NAME=$(echo "$REPO_JSON" | jq -r '.url | split("/")[2]')
 elif [[ "$TARGET" =~ ^https?://([^/]+)/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
 	GH_HOST_NAME="${BASH_REMATCH[1]}"
 	OWNER="${BASH_REMATCH[2]}"
@@ -222,17 +222,14 @@ PROMPT_FILE="${SESSION_DIR}/prompt.md"
 
 echo "⏳  Cloning ${OWNER}/${REPO}..."
 
+# Per-command credential helper: the token never lands in the checkout's .git/config.
+GIT_AUTH=(-c credential.helper= -c "credential.helper=!gh auth git-credential")
 CLONE_URL="https://${GH_HOST_NAME}/${OWNER}/${REPO}.git"
-if [[ "$GH_HOST_NAME" == "github.com" ]]; then CLONE_TOKEN="${GITHUB_TOKEN:-}"; else
-	CLONE_TOKEN=$(gh auth token --hostname "$GH_HOST_NAME" 2>/dev/null || true)
-fi
-[[ -n "$CLONE_TOKEN" ]] &&
-	CLONE_URL="https://${CLONE_TOKEN}@${GH_HOST_NAME}/${OWNER}/${REPO}.git"
 
-git clone --depth 50 --quiet "$CLONE_URL" "$REVIEW_DIR"
+git "${GIT_AUTH[@]}" clone --depth 50 --quiet "$CLONE_URL" "$REVIEW_DIR"
 
 cd "$REVIEW_DIR"
-git fetch origin "pull/${PR_NUM}/head:pr-branch" --depth 50 --quiet
+git "${GIT_AUTH[@]}" fetch origin "pull/${PR_NUM}/head:pr-branch" --depth 50 --quiet
 git checkout pr-branch --quiet
 
 HEAD_SHA=$(git rev-parse HEAD)
