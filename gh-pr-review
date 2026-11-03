@@ -127,7 +127,7 @@ run_preflight() {
 		pf_fail "jq not found" "macOS: brew install jq · Linux: apt/dnf install jq"
 	fi
 
-	if gh auth status &>/dev/null; then
+	if gh auth status -h github.com &>/dev/null; then
 		pf_ok "gh authenticated"
 	else
 		pf_fail "gh not authenticated" "run: gh auth login"
@@ -230,11 +230,15 @@ git "${GIT_AUTH[@]}" clone --depth 50 --quiet "$CLONE_URL" "$REVIEW_DIR"
 
 cd "$REVIEW_DIR"
 git "${GIT_AUTH[@]}" fetch origin "pull/${PR_NUM}/head:pr-branch" --depth 50 --quiet
+git "${GIT_AUTH[@]}" fetch origin "${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}" --depth 50 --quiet
 git checkout pr-branch --quiet
 
 HEAD_SHA=$(git rev-parse HEAD)
-BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}" 2>/dev/null ||
-	git rev-parse "HEAD~1")
+BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}") || {
+	echo "Error: no merge-base between PR head and origin/${BASE_BRANCH} within the" >&2
+	echo "shallow clone (depth 50). Refusing to review a partial diff." >&2
+	exit 1
+}
 
 echo "    base: ${BASE_SHA:0:8}  head: ${HEAD_SHA:0:8}"
 echo ""
