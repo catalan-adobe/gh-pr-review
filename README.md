@@ -4,7 +4,7 @@ AI code review for any GitHub pull request, as a `gh` CLI extension.
 Clones the PR, hands the full checkout to a headless
 [pi](https://github.com/earendil-works/pi) agent running a GitHub Copilot
 model, and prints a structured review — optionally posting it as a PR
-comment.
+review.
 
 > **Requires a GitHub Copilot subscription.** The review runs on Copilot
 > models through pi; without a Copilot seat the default setup will not work.
@@ -46,6 +46,7 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--model <id>` | `github-copilot/gpt-5.6-sol` | Any pi model ID |
 | `-u`, `--user <login>` | active `gh` account | Use another logged-in `gh` account for this run only; global `gh auth` is not changed |
 | `--no-post` | posting on (with confirm) | Print the review only |
+| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: the last "Ready to merge?" line decides: No → request-changes, Yes → approve, anything else (incl. Yes with fixes) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
 | `-y`, `--yes` | off | Skip the post confirmation |
 | `--doctor` | — | Check prerequisites and exit |
 
