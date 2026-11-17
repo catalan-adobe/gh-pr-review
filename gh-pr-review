@@ -489,11 +489,11 @@ echo ""
 # ── post ─────────────────────────────────────────────────────────────────────
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	if [[ -z "$DECISION" ]]; then
-		VERDICT=$(grep -i -m1 'ready to merge' <<<"$REVIEW" | sed 's/.*[?:*]\{1,\} *//' | tr '[:upper:]' '[:lower:]')
+		VERDICT=$({ grep -i 'ready to merge' <<<"$REVIEW" || true; } | tail -n1 |
+			sed 's/^[^?:]*[?:]//; s/[*_`.]//g; s/^ *//; s/ *$//' | tr '[:upper:]' '[:lower:]')
 		case "$VERDICT" in
-		"yes with fixes"*) DECISION=comment ;;
-		yes*) DECISION=approve ;;
-		no*) DECISION=request-changes ;;
+		yes) DECISION=approve ;;
+		no) DECISION=request-changes ;;
 		*) DECISION=comment ;;
 		esac
 		echo "Verdict: ${VERDICT:-not found} → ${DECISION}"
@@ -513,7 +513,7 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		esac
 	fi
 
-	ME=$(gh api user --jq .login 2>/dev/null || true)
+	ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
 	if [[ "$DECISION" != "comment" && "$ME" == "$PR_AUTHOR" ]]; then
 		echo "Note: GitHub blocks ${DECISION} on your own PR; posting as comment."
 		DECISION=comment
