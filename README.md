@@ -46,6 +46,7 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--model <id>` | `github-copilot/gpt-5.6-sol` | Any pi model ID |
 | `-u`, `--user <login>` | active `gh` account | Use another logged-in `gh` account for this run only; global `gh auth` is not changed |
 | `--no-post` | posting on (with confirm) | Print the review only |
+| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: "Ready to merge?" No → request-changes, Yes with fixes → comment, Yes → approve |
 | `-y`, `--yes` | off | Skip the post confirmation |
 | `--doctor` | — | Check prerequisites and exit |
 
