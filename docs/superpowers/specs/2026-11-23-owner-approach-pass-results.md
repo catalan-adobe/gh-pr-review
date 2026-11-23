@@ -42,6 +42,24 @@ want: a written rule outranks taste.
 
 **#454 and #448 returned Sound**, short and specific, with "Questions for the author: None".
 
+## Later single runs
+
+After the test set, the final code ran once on four more open PRs, with `--no-post`.
+
+| PR | What it is | Approach | Run time (s) |
+| --- | --- | --- | --- |
+| of1-labs#460 | Replica status page facts as report JSON | Sound | 583 |
+| of1-labs#466 | Insights for http:// sources, retries, backfill | Sound | 344 |
+| of1-labs#473 | Opt-in Pi and GPT-6.2 Astra for Replica | Questionable | 1523 |
+| of1-labs#462 | DA site plugins and flags at Replica completion | Rethink | 146 |
+
+- #473: Pi branches in 14 production files, picked by a model name instead of an extension point. The pass asks
+  if Pi is a time-boxed pilot or a runtime the team will keep.
+- #462: a second writer of the DA site config next to Stardust's `da-library.mjs`, which #458 makes part of
+  completion. The run stopped before the code review, as designed. A manual check confirmed the line counts, #458,
+  the stale-read note in the runbook and the missing of1/docs link. It did not confirm that both writers touch the
+  same config keys.
+
 ## Things noticed
 
 - On a merged PR, the merge base equals the head, so `base..head` is empty. The model noticed and reviewed the PR's
