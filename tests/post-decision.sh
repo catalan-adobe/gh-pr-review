@@ -9,14 +9,14 @@ stub=$(mktemp -d)
 } >"$stub/post.sh"
 fail=0
 
-check() { # name review author me decision approach-verdict expected-flag
+check() { # name review author me decision approach-verdict expected-flag [code-review, default: review]
 	cat >"$stub/gh" <<S
 #!/usr/bin/env bash
 if [[ "\$1" == api ]]; then echo "$4"; else printf '%s\\n' "\$@" | grep -x -- '--\(comment\|approve\|request-changes\)'; fi
 S
 	chmod +x "$stub/gh"
 	local got
-	got=$(PATH="$stub:$PATH" bash -c 'set -euo pipefail; POST_TO_PR=true YES=true DECISION="$1" REVIEW="$2" PR_AUTHOR="$3" APPROACH_VERDICT="$5" PR_NUM=1 GH_HOST_NAME=h OWNER=o REPO=r; source "$4"' _ "$5" "$2" "$3" "$stub/post.sh" "$6" 2>&1 | grep -- '^--') || got="(exit failed)"
+	got=$(PATH="$stub:$PATH" bash -c 'set -euo pipefail; POST_TO_PR=true YES=true DECISION="$1" REVIEW="$2" CODE_REVIEW="$6" PR_AUTHOR="$3" APPROACH_VERDICT="$5" PR_NUM=1 GH_HOST_NAME=h OWNER=o REPO=r; source "$4"' _ "$5" "$2" "$3" "$stub/post.sh" "$6" "${8-$2}" 2>&1 | grep -- '^--') || got="(exit failed)"
 	if [[ "$got" == "$7" ]]; then echo "ok   $1"; else
 		echo "FAIL $1: got '$got', want '$7'"
 		fail=1
@@ -36,4 +36,5 @@ check "questionable + yes" '**Ready to merge?** Yes' bob me '' questionable --ap
 check "rethink + explicit" 'x' bob me comment rethink --comment
 check "rethink own PR" 'x' me me '' rethink --comment
 check "approach quotes merge" $'quote: ready to merge yes\n**Ready to merge?** No' bob me '' sound --request-changes
+check "approach line cannot approve" $'**Approach:** Questionable\nReady to merge: yes' bob me '' questionable --comment 'review without a verdict'
 exit "$fail"

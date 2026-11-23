@@ -8,7 +8,7 @@ review.
 
 A review has two passes. First, the agent acts as the repository's
 long-time maintainer and judges the approach: does this change belong
-here, built this way? It reads the repository's own rules (`AGENTS.md`,
+here, built this way? It is told to read the repository's own rules (`AGENTS.md`,
 `CLAUDE.md`, `REVIEW.md`, ADRs) at the base commit. It forms its own view
 of the change, and only then reads the PR description.
 
@@ -110,8 +110,9 @@ your current directory, so you can inspect or re-post later:
 - `owner-prompt.md` and `approach.md`: the approach pass
 - `prompt.md` and `review.md`: the code review (absent after a Rethink)
 - `context/`: the PR description and discussion the approach pass reads
-- `repo/`: the checkout Add `pr-review-sessions/` to `.gitignore`
-if you run it inside a repo.
+- `repo/`: the checkout
+
+Add `pr-review-sessions/` to `.gitignore` if you run it inside a repo.
 
 ## Troubleshooting
 

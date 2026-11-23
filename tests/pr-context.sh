@@ -43,4 +43,10 @@ if [[ $(grep -n '^## ' "$stub/ctx/pr-discussion.md" | head -1) == *bob* ]]; then
 	echo "FAIL oldest first"
 	fail=1
 fi
+printf '#!/usr/bin/env bash\nexit 4\n' >"$stub/gh"
+out=$(PATH="$stub:$PATH" bash -c 'set -euo pipefail; source "$1"; PR_NUM=1 GH_HOST_NAME=h OWNER=o REPO=r PR_TITLE=T PR_BODY=B; write_pr_context "$2"' _ "$stub/lib.sh" "$stub/ctx2" 2>&1) && rc=0 || rc=$?
+if [[ $rc != 0 && "$out" == *"Error: could not fetch"* ]]; then echo "ok   gh failure is reported"; else
+	echo "FAIL gh failure is reported: rc=$rc out=$out"
+	fail=1
+fi
 exit "$fail"
