@@ -115,6 +115,22 @@ last_verdict() {
 		sed 's/^[^?:]*[?:]//; s/[*_`.]//g; s/^ *//; s/ *$//' | tr '[:upper:]' '[:lower:]'
 }
 
+# ── pr context ─────────────────────────────────────────────────────────────────────
+# The author's description and the discussion, as files the owner pass reads after forming its own view.
+write_pr_context() {
+	local dir="$1" json
+	mkdir -p "$dir"
+	printf '# %s\n\n%s\n' "$PR_TITLE" "$PR_BODY" >"$dir/pr-body.md"
+	json=$(gh pr view "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" --json comments,reviews)
+	jq -r '
+		[(.comments[] | {who: .author.login, kind: "comment", at: .createdAt, body}),
+		 (.reviews[] | {who: .author.login, kind: .state, at: .submittedAt, body})]
+		| map(select((.body // "") != "")) | sort_by(.at)
+		| if length == 0 then "(no comments or reviews)"
+		  else map("## \(.who) · \(.kind) · \(.at)\n\n\(.body)\n") | join("\n") end
+	' <<<"$json" >"$dir/pr-discussion.md"
+}
+
 # ── preflight ────────────────────────────────────────────────────────────────
 PI_AUTH_FILE="${HOME}/.pi/agent/auth.json"
 PREFLIGHT_FAILURES=0
@@ -259,6 +275,9 @@ BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}") || {
 
 echo "    base: ${BASE_SHA:0:8}  head: ${HEAD_SHA:0:8}"
 echo ""
+
+CONTEXT_DIR="${SESSION_DIR}/context"
+write_pr_context "$CONTEXT_DIR"
 
 # ── build review prompt (temp file — no quoting issues) ──────────────────────
 build_prompt() {
