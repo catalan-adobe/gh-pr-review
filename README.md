@@ -6,6 +6,16 @@ Clones the PR, hands the full checkout to a headless
 model, and prints a structured review — optionally posting it as a PR
 review.
 
+A review has two passes. First, the agent acts as the repository's
+long-time maintainer and judges the approach: does this change belong
+here, built this way? It is told to read the repository's own rules (`AGENTS.md`,
+`CLAUDE.md`, `REVIEW.md`, ADRs) at the base commit. It forms its own view
+of the change, and only then reads the PR description.
+
+Its verdict is Sound, Questionable or Rethink. A Rethink stops the run there and posts
+the approach feedback alone. Otherwise a second pass reviews the code
+line by line.
+
 > **Requires a GitHub Copilot subscription.** The review runs on Copilot
 > models through pi; without a Copilot seat the default setup will not work.
 
@@ -46,7 +56,8 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--model <id>` | `github-copilot/gpt-5.6-sol` | Any pi model ID |
 | `-u`, `--user <login>` | active `gh` account | Use another logged-in `gh` account for this run only; global `gh auth` is not changed |
 | `--no-post` | posting on (with confirm) | Print the review only |
-| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: the last "Ready to merge?" line decides: No → request-changes, Yes → approve, anything else (incl. Yes with fixes) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
+| `--skip-approach` | off | Skip the maintainer's approach pass and run the code review only, for example when the approach is already agreed |
+| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve, anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
 | `-y`, `--yes` | off | Skip the post confirmation |
 | `--doctor` | — | Check prerequisites and exit |
 
@@ -66,6 +77,16 @@ command; `gh pr-review` (hyphen) is this extension. They coexist.
 ## What a review looks like
 
 ```
+### Approach
+
+**What it does:** Adds a second export format inside the JSON exporter ...
+**Fit with the repo:** The README documents `Exporter` as the extension
+point; this PR branches inside the JSON exporter instead ...
+**Alternatives:** (1) A new `CsvExporter` ... (2) As-is: ...
+**Questions for the author:** ...
+
+**Approach:** Questionable
+
 ### Strengths
 - **[src/session.ts:88]** Clean teardown path: the abort controller ...
 
@@ -83,10 +104,15 @@ command; `gh pr-review` (hyphen) is this extension. They coexist.
 
 ## Artifacts
 
-Each run writes its prompt, review, and repo checkout to
-`./pr-review-sessions/pr-review-XXXXX/` in your current directory, so you
-can inspect or re-post later. Add `pr-review-sessions/` to `.gitignore`
-if you run it inside a repo.
+Each run writes its files to `./pr-review-sessions/pr-review-XXXXX/` in
+your current directory, so you can inspect or re-post later:
+
+- `owner-prompt.md` and `approach.md`: the approach pass
+- `prompt.md` and `review.md`: the code review (absent after a Rethink)
+- `context/`: the PR description and discussion the approach pass reads
+- `repo/`: the checkout
+
+Add `pr-review-sessions/` to `.gitignore` if you run it inside a repo.
 
 ## Troubleshooting
 
