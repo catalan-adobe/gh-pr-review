@@ -66,6 +66,11 @@ expect "rethink: one model call" '[[ $calls == 1 ]]'
 expect "rethink: posts the approach only" '[[ $body == *"**Approach:** Rethink"* && $body != *"never used"* ]]'
 expect "rethink: requests changes" '[[ $flag == --request-changes ]]'
 
+setup $'### Approach\n**Approach:** Rethink\n\nApproach notes: use the shared client.' 'never used'
+run
+expect "rethink then prose: still one model call" '[[ $calls == 1 ]]'
+expect "rethink then prose: requests changes" '[[ $flag == --request-changes ]]'
+
 setup 'no verdict here' $'**Ready to merge?** Yes, with fixes'
 run
 expect "missing verdict: code review still runs" '[[ $calls == 2 ]]'

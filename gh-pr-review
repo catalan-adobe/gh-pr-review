@@ -115,9 +115,10 @@ if [[ -n "$GH_USER" ]]; then
 fi
 
 # ── verdicts ───────────────────────────────────────────────────────────────────────
-# Lowercased value of the last line that starts with <label> (markdown marks allowed before it).
+# Lowercased value of the last "<label>:" or "<label>?" line (markdown marks allowed around the label).
+# The delimiter must follow the label, so prose such as "Approach notes: …" never matches.
 last_verdict() {
-	{ grep -iE "^[[:space:]*_>-]*$1" <<<"$2" || true; } | tail -n1 |
+	{ grep -iE "^[[:space:]*_>-]*$1[*_]*[?:]" <<<"$2" || true; } | tail -n1 |
 		sed 's/^[^?:]*[?:]//; s/[*_`.]//g; s/^ *//; s/ *$//' | tr '[:upper:]' '[:lower:]'
 }
 
@@ -135,8 +136,9 @@ write_pr_context() {
 		[(.comments[] | {who: .author.login, kind: "comment", at: .createdAt, body}),
 		 (.reviews[] | {who: .author.login, kind: .state, at: .submittedAt, body})]
 		| map(select((.body // "") != "")) | sort_by(.at)
-		| if length == 0 then "(no comments or reviews)"
-		  else map("## \(.who) · \(.kind) · \(.at)\n\n\(.body)\n") | join("\n") end
+		| (if length == 0 then "(no comments or review summaries)"
+		   else map("## \(.who) · \(.kind) · \(.at)\n\n\(.body)\n") | join("\n") end)
+		  + "\n\n_Top-level comments and review summaries only. Inline review threads are not included._"
 	' <<<"$json" >"$dir/pr-discussion.md"
 }
 

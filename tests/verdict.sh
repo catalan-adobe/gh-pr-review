@@ -28,4 +28,8 @@ check "trailing dash reason merge kept" 'ready to merge' '**Ready to merge?** No
 check "comma qualifier kept" 'ready to merge' '**Ready to merge?** Yes, with fixes' 'yes, with fixes'
 check "paren qualifier kept" 'ready to merge' '**Ready to merge?** Yes (with fixes)' 'yes (with fixes)'
 
+check "approach notes prose ignored" 'Approach' $'**Approach:** Rethink\n\nApproach notes: use the existing shared client.' 'rethink'
+check "approach rationale prose ignored" 'Approach' $'**Approach:** Sound\n\n**Approach rationale:** Rethink is unnecessary' 'sound'
+check "merge criteria prose ignored" 'ready to merge' $'**Ready to merge?** No\nReady to merge criteria: yes' 'no'
+check "plain label without bold" 'Approach' 'Approach: Questionable' 'questionable'
 exit "$fail"
