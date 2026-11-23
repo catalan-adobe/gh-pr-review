@@ -57,7 +57,7 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `-u`, `--user <login>` | active `gh` account | Use another logged-in `gh` account for this run only; global `gh auth` is not changed |
 | `--no-post` | posting on (with confirm) | Print the review only |
 | `--skip-approach` | off | Skip the maintainer's approach pass and run the code review only, for example when the approach is already agreed |
-| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, Yes → approve, anything else (incl. Yes with fixes) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
+| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve, anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
 | `-y`, `--yes` | off | Skip the post confirmation |
 | `--doctor` | — | Check prerequisites and exit |
 

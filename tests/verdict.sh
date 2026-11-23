@@ -23,6 +23,9 @@ check "last wins" 'Approach' $'**Approach:** Sound | Questionable | Rethink\n**A
 check "missing" 'Approach' 'no verdict here' ''
 check "merge label" 'ready to merge' '**Ready to merge?** Yes with fixes' 'yes with fixes'
 check "mid-line mention ignored" 'Approach' $'**Approach:** Rethink\nThe approach: sound overall' rethink
-check "trailing reason" 'Approach' '**Approach:** Rethink — the shared client exists' rethink
-check "trailing reason merge" 'ready to merge' '**Ready to merge?** No, see Critical' no
+check "trailing reason kept" 'Approach' '**Approach:** Rethink — the shared client exists' 'rethink — the shared client exists'
+check "trailing dash reason merge kept" 'ready to merge' '**Ready to merge?** No — see Critical' 'no — see critical'
+check "comma qualifier kept" 'ready to merge' '**Ready to merge?** Yes, with fixes' 'yes, with fixes'
+check "paren qualifier kept" 'ready to merge' '**Ready to merge?** Yes (with fixes)' 'yes (with fixes)'
+
 exit "$fail"

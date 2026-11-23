@@ -37,4 +37,8 @@ check "rethink + explicit" 'x' bob me comment rethink --comment
 check "rethink own PR" 'x' me me '' rethink --comment
 check "approach quotes merge" $'quote: ready to merge yes\n**Ready to merge?** No' bob me '' sound --request-changes
 check "approach line cannot approve" $'**Approach:** Questionable\nReady to merge: yes' bob me '' questionable --comment 'review without a verdict'
+check "yes comma fixes" '**Ready to merge?** Yes, with fixes' bob me '' '' --comment
+check "yes paren fixes" '**Ready to merge?** Yes (with fixes)' bob me '' '' --comment
+check "yes dash fixes" '**Ready to merge?** Yes — with fixes' bob me '' '' --comment
+check "no dash reason" '**Ready to merge?** No — see Critical' bob me '' '' --request-changes
 exit "$fail"

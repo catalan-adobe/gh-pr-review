@@ -118,8 +118,7 @@ fi
 # Lowercased value of the last line that starts with <label> (markdown marks allowed before it).
 last_verdict() {
 	{ grep -iE "^[[:space:]*_>-]*$1" <<<"$2" || true; } | tail -n1 |
-		sed -E 's/^[^?:]*[?:]//; s/[[:space:]]*(—|–| - |,|;|\().*//; s/[*_`.]//g; s/^ *//; s/ *$//' |
-		tr '[:upper:]' '[:lower:]'
+		sed 's/^[^?:]*[?:]//; s/[*_`.]//g; s/^ *//; s/ *$//' | tr '[:upper:]' '[:lower:]'
 }
 
 # ── pr context ─────────────────────────────────────────────────────────────────────
@@ -312,7 +311,7 @@ echo "    base: ${BASE_SHA:0:8}  head: ${HEAD_SHA:0:8}"
 echo ""
 
 CONTEXT_DIR="${SESSION_DIR}/context"
-write_pr_context "$CONTEXT_DIR"
+[[ "$SKIP_APPROACH" == "false" ]] && write_pr_context "$CONTEXT_DIR"
 
 # ── build owner (approach) prompt ───────────────────────────────────────────────────────────
 build_owner_prompt() {
@@ -650,7 +649,9 @@ if [[ "$SKIP_APPROACH" == "false" ]]; then
 	echo "⏳  Owner pass: judging the approach (this may take a few minutes)..."
 	run_pi "$OWNER_PROMPT_FILE" "$APPROACH_FILE"
 	APPROACH=$(cat "$APPROACH_FILE")
+	# The first word decides ("rethink — because …" is a rethink); anything else is treated as no verdict.
 	APPROACH_VERDICT=$(last_verdict 'approach' "$APPROACH")
+	APPROACH_VERDICT=${APPROACH_VERDICT%%[^a-z]*}
 	echo "    Approach: ${APPROACH_VERDICT:-not found}"
 	echo ""
 fi
@@ -665,6 +666,13 @@ else
 	echo ""
 	run_pi "$PROMPT_FILE" "$REVIEW_FILE"
 	CODE_REVIEW=$(cat "$REVIEW_FILE")
+	# Only a Rethink may post the approach alone; an empty code review is a failed run.
+	if [[ -z "${CODE_REVIEW//[[:space:]]/}" ]]; then
+		echo "Error: the code review came back empty — pi may have failed or timed out." >&2
+		echo "    Nothing was posted. Session: ${SESSION_DIR}" >&2
+		echo "    Try another model: --model github-copilot/gpt-5.5" >&2
+		exit 1
+	fi
 fi
 
 REVIEW=$(assemble_review "$APPROACH" "$CODE_REVIEW")
@@ -688,9 +696,10 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	fi
 	if [[ -z "$DECISION" ]]; then
 		VERDICT=$(last_verdict 'ready to merge' "$CODE_REVIEW")
+		# Only a bare "yes" approves; any qualifier ("yes, with fixes") falls through to comment.
 		case "$VERDICT" in
 		yes) DECISION=approve ;;
-		no) DECISION=request-changes ;;
+		no | "no "* | no[,\;\(—–-]*) DECISION=request-changes ;;
 		*) DECISION=comment ;;
 		esac
 		echo "Verdict: ${VERDICT:-not found} → ${DECISION}"
