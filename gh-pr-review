@@ -108,6 +108,13 @@ if [[ -n "$GH_USER" ]]; then
 	export GH_TOKEN GITHUB_TOKEN="$GH_TOKEN"
 fi
 
+# ── verdicts ───────────────────────────────────────────────────────────────────────
+# Lowercased value of the last line that starts with <label> (markdown marks allowed before it).
+last_verdict() {
+	{ grep -iE "^[[:space:]*_>-]*$1" <<<"$2" || true; } | tail -n1 |
+		sed 's/^[^?:]*[?:]//; s/[*_`.]//g; s/^ *//; s/ *$//' | tr '[:upper:]' '[:lower:]'
+}
+
 # ── preflight ────────────────────────────────────────────────────────────────
 PI_AUTH_FILE="${HOME}/.pi/agent/auth.json"
 PREFLIGHT_FAILURES=0
@@ -488,9 +495,12 @@ echo ""
 
 # ── post ─────────────────────────────────────────────────────────────────────
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
+	if [[ -z "$DECISION" && "${APPROACH_VERDICT:-}" == rethink ]]; then
+		DECISION=request-changes
+		echo "Approach: rethink → ${DECISION}"
+	fi
 	if [[ -z "$DECISION" ]]; then
-		VERDICT=$({ grep -i 'ready to merge' <<<"$REVIEW" || true; } | tail -n1 |
-			sed 's/^[^?:]*[?:]//; s/[*_`.]//g; s/^ *//; s/ *$//' | tr '[:upper:]' '[:lower:]')
+		VERDICT=$(last_verdict 'ready to merge' "$REVIEW")
 		case "$VERDICT" in
 		yes) DECISION=approve ;;
 		no) DECISION=request-changes ;;
