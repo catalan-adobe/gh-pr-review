@@ -7,7 +7,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 fail=0
 
-setup() { # approach-output code-review-output [discussion-exit-code]
+setup() { # approach-output code-review-output [discussion-exit-code] [failing-pass: owner|code]
 	stub=$(mktemp -d)
 	mkdir -p "$stub/bin" "$stub/home/.pi/agent" "$stub/work"
 	echo '{"github-copilot":{}}' >"$stub/home/.pi/agent/auth.json"
@@ -31,7 +31,8 @@ S
 	cat >"$stub/bin/pi" <<S
 #!/usr/bin/env bash
 echo call >>"$stub/pi.calls"
-if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then cat "$stub/approach.out"; else
+if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] && exit 7; cat "$stub/approach.out"; else
+	[[ "${4:-}" == code ]] && exit 7
 	printf '%s' "\${*: -1}" >"$stub/code-prompt.txt"; cat "$stub/review.out"; fi
 S
 	chmod +x "$stub/bin/"*
@@ -87,4 +88,15 @@ run --skip-approach
 expect "skip-approach: one model call" '[[ $calls == 1 ]]'
 expect "skip-approach: no discussion fetch needed" '[[ $rc == 0 && $flag == --request-changes ]]'
 expect "skip-approach: no approach in body" '[[ $body != *"Approach"* ]]'
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes' 0 owner
+run
+expect "owner pass fails: run fails" '[[ $rc != 0 ]]'
+expect "owner pass fails: no code review" '[[ $calls == 1 ]]'
+expect "owner pass fails: nothing posted" '[[ -z $flag ]]'
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes' 0 code
+run
+expect "code review fails: run fails" '[[ $rc != 0 ]]'
+expect "code review fails: nothing posted" '[[ -z $flag ]]'
+expect "code review fails: names the session" 'grep -q "pr-review-sessions/pr-review-" "$stub/out.log"'
 exit "$fail"
