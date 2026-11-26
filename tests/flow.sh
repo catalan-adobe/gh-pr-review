@@ -287,6 +287,8 @@ run --json
 expect "--json without --check: fails" '[[ $rc == 1 && $calls == 0 ]]'
 
 # ── round 2 and later
+# Markers carry full commit IDs: anything else makes a full round.
+H1=$(printf 'c1%.0s' {1..20}) H2=$(printf 'c2%.0s' {1..20}) B1=$(printf 'b1%.0s' {1..20})
 add_round() { # <record-json> <markdown> -> one more posted round, in the REST reviews and in the discussion
 	local n
 	n=$(($(jq length "$stub/rest-reviews.json") + 1))
@@ -301,9 +303,9 @@ add_round() { # <record-json> <markdown> -> one more posted round, in the REST r
 }
 session_file() { cat "$stub"/work/pr-review-sessions/pr-review-*/context/"$1" 2>/dev/null; }
 two_rounds() { # round 1 (F1, F2) and round 2 (F1 open, F2 fixed, F3 new), both Sound
-	add_round '{"schema":1,"source":"model","round":1,"head_sha":"h1","base_sha":"b1","approach":"sound","ready":"no","code_review":true,"findings":[{"id":"F1","severity":"important","status":"new","first_round":1,"file":"a.js","line":3,"title":"thing breaks"},{"id":"F2","severity":"minor","status":"new","first_round":1,"file":"b.js","line":1,"title":"nit"}],"counts":{"open_blocking":1,"critical":0,"important":1,"minor":1}}' \
+	add_round '{"schema":1,"source":"model","round":1,"head_sha":"'"$H1"'","base_sha":"'"$B1"'","approach":"sound","ready":"no","code_review":true,"findings":[{"id":"F1","severity":"important","status":"new","first_round":1,"file":"a.js","line":3,"title":"thing breaks"},{"id":"F2","severity":"minor","status":"new","first_round":1,"file":"b.js","line":1,"title":"nit"}],"counts":{"open_blocking":1,"critical":0,"important":1,"minor":1}}' \
 		$'### Approach\n\n**Approach:** Sound\n\n### Issues\n- round one'
-	add_round '{"schema":1,"source":"model","round":2,"head_sha":"h2","base_sha":"b1","approach":"sound","ready":"no","code_review":true,"findings":[{"id":"F1","severity":"important","status":"open","first_round":1,"file":"a.js","line":3,"title":"thing breaks"},{"id":"F2","severity":"minor","status":"fixed","first_round":1,"file":"b.js","line":1,"title":"nit"},{"id":"F3","severity":"critical","status":"new","first_round":2,"file":"c.js","line":9,"title":"data loss"}],"counts":{"open_blocking":2,"critical":1,"important":1,"minor":0}}' \
+	add_round '{"schema":1,"source":"model","round":2,"head_sha":"'"$H2"'","base_sha":"'"$B1"'","approach":"sound","ready":"no","code_review":true,"findings":[{"id":"F1","severity":"important","status":"open","first_round":1,"file":"a.js","line":3,"title":"thing breaks"},{"id":"F2","severity":"minor","status":"fixed","first_round":1,"file":"b.js","line":1,"title":"nit"},{"id":"F3","severity":"critical","status":"new","first_round":2,"file":"c.js","line":9,"title":"data loss"}],"counts":{"open_blocking":2,"critical":1,"important":1,"minor":0}}' \
 		$'### Approach\n\n**What it does:** x\n\n**Approach:** Sound\n\n### Issues\n- **F3 · `c.js:9`** — data loss'
 }
 round3=$'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **F3 · `c.js:9`** — still loses data.\n'
@@ -322,9 +324,9 @@ expect "round 1: a full round, no progress line" '[[ $(jq -r ".mode, .mode_reaso
 setup $'### Approach\n\n**Approach:** Sound' "$round3"
 two_rounds
 run
-expect "round 3: incremental since round 2" '[[ $rc == 0 && $(jq -r ".round, .mode, .previous_head_sha" <<<"$record" | paste -sd, -) == "3,incremental,h2" ]] && grep -q "mode: incremental since round 2" "$stub/out.log"'
+expect "round 3: incremental since round 2" '[[ $rc == 0 && $(jq -r ".round, .mode, .previous_head_sha" <<<"$record" | paste -sd, -) == "3,incremental,$H2" ]] && grep -q "mode: incremental since round 2" "$stub/out.log"'
 expect "round 3: the code prompt has the three rules" 'grep -q "## Previous round" "$stub/code-prompt.txt" && grep -q "Check every earlier finding" "$stub/code-prompt.txt" && grep -q "Review what changed since round 2 in full" "$stub/code-prompt.txt" && grep -q "Outside what changed, raise only Critical" "$stub/code-prompt.txt"'
-expect "round 3: the diff since the previous head" 'grep -qF "git diff --stat h2..aaaa" "$stub/code-prompt.txt" && grep -qF "git diff h2..aaaa" "$stub/code-prompt.txt"'
+expect "round 3: the diff since the previous head" 'grep -qF "git diff --stat $H2..aaaa" "$stub/code-prompt.txt" && grep -qF "git diff $H2..aaaa" "$stub/code-prompt.txt"'
 expect "round 3: the later-round output format" 'grep -q "Fixed since the last round" "$stub/code-prompt.txt" && grep -q "\"id\": \"F3\" or null" "$stub/code-prompt.txt"'
 expect "round 3: previous-findings.md lists the open findings first" '[[ $(session_file previous-findings.md | sed -n 1,2p) == "F1 · important · a.js:3 · thing breaks"$'"'"'\n'"'"'"F3 · critical · c.js:9 · data loss" ]]'
 expect "round 3: then the fixed ones, to catch a regression" '[[ $(session_file previous-findings.md | sed -n 4,5p) == "Fixed in round 2 (report one only if the problem is back, as open):"$'"'"'\n'"'"'"F2 · minor · b.js:1 · nit" ]]'
@@ -333,7 +335,7 @@ expect "round 3: delta-files.txt" '[[ $(session_file delta-files.txt) == d.js ]]
 expect "round 3: statuses and IDs" '[[ $(jq -r "([.findings[] | .id + \":\" + .status] | join(\" \")), (.later | map(.id) | join(\" \")), .counts.open_blocking" <<<"$record" | paste -sd, -) == "F1:fixed F3:open F4:new,L1,2" ]]'
 expect "round 3: a churning loop adds the next move" '[[ $body == *"loop: churning"*"**Next:** "* ]]'
 expect "round 3: the progress line opens the body" '[[ $(sed -n 3p <<<"$body") == "### Round 3 · since round 2" && $(sed -n 4p <<<"$body") == "1 fixed · 1 still open · 1 new (1 in the new commits) · 1 for later · open blocking: 2 (was 2)"* ]]'
-expect "round 3: the owner starts from its previous verdict" 'grep -q "## Your previous verdict (round 2)" "$stub/owner-prompt.txt" && grep -q "Unchanged since round 2" "$stub/owner-prompt.txt" && grep -qF "git diff --stat h2..aaaa" "$stub/owner-prompt.txt"'
+expect "round 3: the owner starts from its previous verdict" 'grep -q "## Your previous verdict (round 2)" "$stub/owner-prompt.txt" && grep -q "Unchanged since round 2" "$stub/owner-prompt.txt" && grep -qF "git diff --stat $H2..aaaa" "$stub/owner-prompt.txt"'
 expect "round 3: previous-approach.md is the Approach section" '[[ $(session_file previous-approach.md) == "### Approach"*"**Approach:** Sound" ]]'
 expect "round 3: the record keeps the label of this round" '[[ $(jq -r ".loop.label" <<<"$record") == churning ]]'
 
@@ -351,15 +353,15 @@ setup $'**Approach:** Sound' "$round3"
 two_rounds
 touch "$stub/git.rebased"
 run
-expect "rebased: a range-diff of the two versions" '[[ $(jq -r ".mode" <<<"$record") == rebased ]] && grep -qF "git range-diff b1..h2 bbbb..aaaa" "$stub/code-prompt.txt" && grep -q "The author rebased" "$stub/code-prompt.txt"'
+expect "rebased: a range-diff of the two versions" '[[ $(jq -r ".mode" <<<"$record") == rebased ]] && grep -qF "git range-diff $B1..$H2 bbbb..aaaa" "$stub/code-prompt.txt" && grep -q "The author rebased" "$stub/code-prompt.txt"'
 
 setup $'**Approach:** Sound' "$round3"
 two_rounds
-echo h2 >"$stub/git.missing"
+echo "$H2" >"$stub/git.missing"
 run
-expect "previous head gone: a full round that says why" '[[ $(jq -r ".mode" <<<"$record") == full ]] && grep -q "mode: full (previous head h2 not found after fetch)" "$stub/out.log"'
+expect "previous head gone: a full round that says why" '[[ $(jq -r ".mode" <<<"$record") == full ]] && grep -q "mode: full (previous head ${H2:0:12} not found after fetch)" "$stub/out.log"'
 expect "previous head gone: rule 1 only" 'grep -q "Check every earlier finding" "$stub/code-prompt.txt" && ! grep -q "Outside what changed" "$stub/code-prompt.txt" && grep -q "This round is a full review" "$stub/code-prompt.txt"'
-expect "previous head gone: the progress line says full review" '[[ $(sed -n 4p <<<"$body") == *"full review (previous head h2 not found after fetch)" ]]'
+expect "previous head gone: the progress line says full review" '[[ $(sed -n 4p <<<"$body") == *"full review (previous head ${H2:0:12} not found after fetch)" ]]'
 
 setup $'**Approach:** Sound' "$round3"
 two_rounds
@@ -377,7 +379,7 @@ run
 expect "unverified: a forgotten finding is carried as open, not re-checked" '[[ $(jq -r "[.findings[] | select(.unverified) | .id] | join(\" \")" <<<"$record") == "F1 F3" && $body == *"2 not re-checked"* && $flag == --comment ]]'
 
 setup $'### Approach\n\n**Approach:** Sound' "$round3"
-add_round '{"schema":1,"source":"model","round":1,"head_sha":"h1","base_sha":"b1","approach":"rethink","ready":"unknown","code_review":false,"findings":[],"counts":{"open_blocking":null}}' $'### Approach\n\n**Approach:** Rethink'
+add_round '{"schema":1,"source":"model","round":1,"head_sha":"'"$H1"'","base_sha":"'"$B1"'","approach":"rethink","ready":"unknown","code_review":false,"findings":[],"counts":{"open_blocking":null}}' $'### Approach\n\n**Approach:** Rethink'
 run
 expect "after a Rethink-only round: judged afresh, and a full first code review" '! grep -q "Your previous verdict" "$stub/owner-prompt.txt" && ! grep -q "## Previous round" "$stub/code-prompt.txt" && [[ $(jq -r ".round, .mode, .mode_reason" <<<"$record" | paste -sd, -) == "2,full,no earlier code review" ]]'
 exit "$fail"

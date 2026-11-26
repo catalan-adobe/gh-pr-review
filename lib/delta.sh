@@ -9,12 +9,22 @@
 #   rebased      the previous head is not an ancestor (rebase or force-push), or a base merge that conflicts: a
 #                `git range-diff` of the two ranges.
 #   full         anything else, with a short human reason. The round then reviews the whole PR.
+# The previous head and base come from a marker on the PR, which anyone can edit: they count only as full object IDs
+# (40 or 64 hex digits), checked before git sees them. A name (HEAD, main), a short SHA or an option is `full`.
 # The four SHA fields are full SHAs when the checkout has the commit, else as given ("" when unknown); changed_files
 # reads them. Never fails: every git error ends in `full`.
 pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 	local repo=$1 prev_head=$2 prev_base=$3 head=$4 base=$5 sha old new reason
 	if [[ -z "$prev_head" ]]; then
 		delta_json full "no previous round" "$prev_head" "$prev_base" "$head" "$base"
+		return 0
+	fi
+	if ! delta_object_id "$prev_head"; then
+		delta_json full "previous head is not a full commit ID" "$prev_head" "$prev_base" "$head" "$base"
+		return 0
+	fi
+	if [[ -n "$prev_base" ]] && ! delta_object_id "$prev_base"; then
+		delta_json full "previous base is not a full commit ID" "$prev_head" "$prev_base" "$head" "$base"
 		return 0
 	fi
 	if sha=$(delta_resolve "$repo" "$head"); then head=$sha; else
@@ -118,10 +128,15 @@ delta_json() { # <mode> <reason> <prev-head> <prev-base> <head> <base> [command.
 		prev_head: $prev_head, prev_base: $prev_base, head: $head, base: $base}' --args "${@:7}"
 }
 
+# A full hexadecimal object ID: 40 digits (SHA-1) or 64 (SHA-256).
+delta_object_id() { # <value>
+	[[ "$1" =~ ^[0-9a-f]{40}$ || "$1" =~ ^[0-9a-f]{64}$ ]]
+}
+
 # Prints the full SHA of a commit the checkout has. Fails when it is missing (or the SHA is empty).
 delta_resolve() { # <repo-dir> <sha>
 	[[ -n "$2" ]] || return 1
-	git -C "$1" rev-parse --verify --quiet "${2}^{commit}" 2>/dev/null
+	git -C "$1" rev-parse --verify --quiet --end-of-options "${2}^{commit}" 2>/dev/null
 }
 
 # Like delta_resolve, but a missing commit gets one fetch by SHA first. GitHub serves commits that are still in the
@@ -133,7 +148,7 @@ delta_find() { # <repo-dir> <sha>
 	if delta_shallow "$1"; then depth=(--depth 50); fi
 	# Same credentials as the clone (GIT_AUTH, when the script set it), no hooks, quiet; errors only mean "missing".
 	git -C "$1" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} -c core.hooksPath=/dev/null \
-		fetch --quiet --no-tags ${depth[@]+"${depth[@]}"} origin "$2" >/dev/null 2>&1 || true
+		fetch --quiet --no-tags ${depth[@]+"${depth[@]}"} --end-of-options origin "$2" >/dev/null 2>&1 || true
 	delta_resolve "$1" "$2"
 }
 
@@ -144,7 +159,7 @@ delta_connect() { # <repo-dir> <prev-head> <head>
 	delta_shallow "$1" || return 0
 	git -C "$1" merge-base "$2" "$3" >/dev/null 2>&1 && return 0
 	git -C "$1" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} -c core.hooksPath=/dev/null \
-		fetch --quiet --no-tags --deepen 50 origin "$3" >/dev/null 2>&1 || true
+		fetch --quiet --no-tags --deepen 50 --end-of-options origin "$3" >/dev/null 2>&1 || true
 }
 
 delta_shallow() { # <repo-dir>

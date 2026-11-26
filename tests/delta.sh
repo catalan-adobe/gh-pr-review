@@ -228,6 +228,50 @@ expect "no previous round: full" \
 	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,no previous round" ]]'
 expect "no previous round: no commands" '[[ $(jq -c .commands <<<"$out") == "[]" ]]'
 
+# ── previous head and base from a marker: full commit IDs only ─────────────
+# Anyone can edit a marker: a name would resolve against this checkout, an option would reach git fetch. git logs
+# every call here, so the checks below also prove no git command saw the value.
+world
+commit m1 "a.txt=$ten"
+src checkout --quiet -b feature
+commit f1 b.txt=one
+publish
+prev_head=$(src rev-parse HEAD) prev_base=$(src rev-parse main)
+commit f2 b.txt=two
+publish
+repo=$(checkout 50)
+head=$(git -C "$repo" rev-parse pr-branch)
+base=$(git -C "$repo" merge-base pr-branch origin/main)
+mkdir -p "$tmp/logbin"
+cat >"$tmp/logbin/git" <<S
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$tmp/git.log"
+exec "$real_git" "\$@"
+S
+chmod +x "$tmp/logbin/git"
+for bad in HEAD main --upload-pack=x "${prev_head:0:7}" "${prev_head}x" "${prev_head^^}"; do
+	: >"$tmp/git.log"
+	out=$(
+		PATH="$tmp/logbin:$PATH"
+		pick_delta "$repo" "$bad" "$prev_base" "$head" "$base"
+	)
+	expect "marker head '$bad': full, before any git call" \
+		'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,previous head is not a full commit ID" && ! -s $tmp/git.log ]]'
+	: >"$tmp/git.log"
+	out=$(
+		PATH="$tmp/logbin:$PATH"
+		pick_delta "$repo" "$prev_head" "$bad" "$head" "$base"
+	)
+	expect "marker base '$bad': full, before any git call" \
+		'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,previous base is not a full commit ID" && ! -s $tmp/git.log ]]'
+done
+out=$(pick_delta "$repo" "$prev_head" "$prev_base" "$head" "$base")
+expect "marker: full commit IDs are accepted" '[[ $(jq -r .mode <<<"$out") == incremental ]]'
+sha256=$(printf 'ab%.0s' {1..32})
+out=$(pick_delta "$repo" "$sha256" "$prev_base" "$head" "$base")
+expect "marker: a 64-digit ID passes the check (then is not found)" \
+	'[[ $(jq -r .reason <<<"$out") == "previous head ${sha256:0:12} not found after fetch" ]]'
+
 # ── shallow: the previous head is older than the depth but still on the remote ─
 world
 commit m1 "a.txt=$ten"
