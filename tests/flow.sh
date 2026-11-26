@@ -17,7 +17,7 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 	echo '{"comments":[],"reviews":[]}' >"$stub/discussion.json"
 	echo '[]' >"$stub/rest-reviews.json"
 	echo '[]' >"$stub/rest-comments.json"
-	rm -f "$stub/git.missing" "$stub/git.rebased" "$stub/git.diff-fails"
+	rm -f "$stub/git.missing" "$stub/git.rebased" "$stub/git.diff-fails" "$stub/git.far-base" "$stub/git.deepened"
 	cat >"$stub/bin/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
@@ -34,6 +34,7 @@ esac
 S
 	# git: HEAD is aaaa and the merge-base bbbb. Any other SHA resolves to itself, unless listed in git.missing. The
 	# previous head is an ancestor of the head unless git.rebased exists. git.diff-fails makes `git diff` fail.
+	# git.far-base: no merge-base until a `fetch --deepen` (logged in git.deepened); "never": not even then.
 	cat >"$stub/bin/git" <<'S'
 #!/usr/bin/env bash
 s=$(cd "$(dirname "$0")/.." && pwd)
@@ -48,8 +49,12 @@ case "$*" in
 	echo "$sha"
 	;;
 *rev-parse*) echo aaaa ;;
+*"fetch "*--deepen*) printf '%s\n' "$*" >>"$s/git.deepened" ;;
 *"merge-base --is-ancestor"*) [[ ! -f "$s/git.rebased" ]] ;;
-*merge-base*) echo bbbb ;;
+*merge-base*)
+	if [[ -f "$s/git.far-base" ]] && { [[ ! -f "$s/git.deepened" ]] || grep -qx never "$s/git.far-base"; }; then exit 1; fi
+	echo bbbb
+	;;
 *"diff --name-only"*)
 	[[ ! -f "$s/git.diff-fails" ]] || exit 1
 	printf 'd.js\0'
@@ -177,6 +182,16 @@ expect "instructions as a bullet list: accepted" '[[ $rc == 0 ]] && grep -qF -- 
 setup 'unused' 'unused'
 run --instructions ' '
 expect "blank instructions: fails before any model call" '[[ $rc != 0 && $calls == 0 ]]'
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+touch "$stub/git.far-base"
+run
+expect "merge-base past the depth: deepens the PR and the base once, then reviews" '[[ $rc == 0 && $calls == 2 && $(grep -c -- "--deepen 200" "$stub/git.deepened") == 2 ]] && grep -q "pull/1/head" "$stub/git.deepened" && grep -q "main:refs/remotes/origin/main" "$stub/git.deepened"'
+expect "merge-base past the depth: the deepen uses the credential helper" '[[ $(grep -c "credential.helper=!gh auth git-credential" "$stub/git.deepened") == 2 ]]'
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+echo never >"$stub/git.far-base"
+run
+expect "merge-base still missing after the deepen: refuses, no review" '[[ $rc == 1 && $calls == 0 && -z $flag ]] && grep -q "Refusing to review a partial diff" "$stub/out.log"'
 
 # ── round records
 block=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"}]\n```'

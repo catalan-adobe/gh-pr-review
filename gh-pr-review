@@ -454,11 +454,18 @@ git "${GIT_AUTH[@]}" fetch origin "${BASE_BRANCH}:refs/remotes/origin/${BASE_BRA
 git checkout pr-branch --quiet
 
 HEAD_SHA=$(git rev-parse HEAD)
-BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}") || {
-	echo "Error: no merge-base between PR head and origin/${BASE_BRANCH} within the" >&2
-	echo "shallow clone (depth 50). Refusing to review a partial diff." >&2
-	exit 1
-}
+# A PR branched off more than 50 commits back has no merge-base in the shallow clone: deepen both histories once.
+# One fetch per ref: in a single fetch, git can leave one of them as shallow as it was.
+if ! BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}" 2>/dev/null); then
+	git "${GIT_AUTH[@]}" fetch --quiet --no-tags --deepen 200 origin "pull/${PR_NUM}/head" || true
+	git "${GIT_AUTH[@]}" fetch --quiet --no-tags --deepen 200 origin \
+		"${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}" || true
+	BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}") || {
+		echo "Error: no merge-base between PR head and origin/${BASE_BRANCH} within the" >&2
+		echo "shallow clone (depth 50, deepened by 200). Refusing to review a partial diff." >&2
+		exit 1
+	}
+fi
 
 echo "    base: ${BASE_SHA:0:8}  head: ${HEAD_SHA:0:8}"
 echo ""
