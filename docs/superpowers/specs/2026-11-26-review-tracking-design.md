@@ -171,7 +171,12 @@ The posted body gets a second marker after the existing `<!-- gh-pr-review gener
   the JSON as `-\u002d`, which is the same JSON string.
 - It never contains `--instructions` text or prompts.
 - GitHub caps a review body at 65,536 characters. If the body and the marker pass 60,000, the marker drops titles
-  first, then the `later` list.
+  first, then locations, then the `later` list, then the findings (`findings_dropped: true`, counts kept). When even
+  the counts do not fit, it is a minimal marker, `{"schema":1,"round":N,"findings_dropped":true}` (with `last_ids`
+  if they fit): a later round knows the findings are missing, and the counts are read from the Markdown. Only when
+  even that does not fit is the review posted without a marker.
+- A title or file stays in the marker only as the review shows it: a file as that exact path, a title as the
+  reader sees it (only `*` and backticks removed, whitespace collapsed).
 
 ### Backfill
 

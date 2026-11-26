@@ -260,7 +260,17 @@ line=$(marker_line "$tmp/big.json" "$tmp/body.md")
 step "findings dropped" "$line" '(has("findings") | not) and .findings_dropped and .counts.open_blocking == 3
 	and .last_ids == {"F": 4, "L": 0} and .round == 2'
 pad_to $(($(fill "$line") + 1))
-check "marker cap: no room even for counts, no marker" "$(marker_line "$tmp/big.json" "$tmp/body.md")" ""
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "no room for counts: minimal marker" "$line" '. == {"schema": 1, "round": 2, "findings_dropped": true, "last_ids": {"F": 4, "L": 0}}'
+pad_to $(($(fill "$line") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "minimal marker without last_ids" "$line" '. == {"schema": 1, "round": 2, "findings_dropped": true}'
+pad_to $(($(fill "$line") + 1))
+check "marker cap: no room even for the minimal marker, no marker" "$(marker_line "$tmp/big.json" "$tmp/body.md")" ""
 check "marker cap: round.json keeps everything" "$(jq -c '[(.findings | length), (.later | length)]' "$tmp/big.json")" \
 	"[4,1]"
 

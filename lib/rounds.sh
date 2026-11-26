@@ -7,7 +7,7 @@
 # marker's: the round is the review's position in submission order, posted_at its submission time, head_sha the
 # commit it was posted on and reviewer its author, so two reviews posted at once can't both be round K.
 fetch_round_records() { # <host> <owner> <repo> <N>
-	local reviews pr records='[]' previous=null round=0 review record body facts
+	local reviews pr records='[]' previous=null round=0 review record body facts minimal
 	reviews=$(gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" | jq -cs -L "${LIB_DIR:?}" '
 		include "records";
 		add // [] | map(select((.body | is_generated_review) and .state != "PENDING"))
@@ -23,6 +23,13 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 		round=$((round + 1))
 		body=$(jq -r '.body' <<<"$review")
 		record=$(marker_record "$body" || true)
+		minimal=""
+		# A minimal marker (no room for the counts) says only that the findings are missing: the counts come from the
+		# Markdown, as for a review without a marker, and the record keeps findings_dropped and the marker's last_ids.
+		if [[ -n "$record" ]] && jq -e '.findings_dropped == true and (has("counts") | not)' <<<"$record" >/dev/null; then
+			minimal="$record"
+			record=""
+		fi
 		if [[ -z "$record" ]]; then
 			# The previous record carries the history's ID floor, so backfilled IDs never restart either.
 			if [[ "$previous" != null ]]; then
@@ -30,6 +37,11 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 					jq -cs -L "${LIB_DIR:?}" 'include "records"; .[1] + {last_ids: (.[0] | id_floor)}')
 			fi
 			record=$(backfill_record "$review" "$previous" "$round" "$pr")
+			if [[ -n "$minimal" ]]; then
+				record=$(jq -c --argjson m "$minimal" '. as $b | $b + ($m | del(.last_ids)) | del(.findings)
+					| .last_ids = {F: ([$b.last_ids.F, $m.last_ids.F?] | map(numbers) | max // 0),
+						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}' <<<"$record")
+			fi
 		fi
 		facts=$(jq -c '{posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
 			| with_entries(select(.value | type == "string" and . != ""))' <<<"$review")

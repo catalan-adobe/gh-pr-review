@@ -226,6 +226,20 @@ expect "records: no room for the marker posts the header only, with a warning" \
 		grep -q "no room for its round marker" "$stub/out.log"'
 expect "records: round.json keeps the posted record" '[[ $(jq -r ".round, .preview, .decision" <<<"$record" | paste -sd, -) == "1,false,request-changes" ]]'
 
+# Room for the minimal marker, not for the counts: the marker says the findings are missing, and the counts come back
+# from the Markdown.
+setup $'**Approach:** Sound' $'#### 🚨 Critical (Must Fix Before Merge)\n- **`a.js:1` — boom.**\n\n'"$(head -c 59600 /dev/zero | tr '\0' x)"$'\n\n**Ready to merge?** No'
+run
+expect "records: no room for the counts posts the minimal marker" \
+	'[[ $rc == 0 && $(sed -n 2p <<<"$body") == "<!-- gh-pr-review:round {\"schema\":1,\"round\":1,\"findings_dropped\":true,\"last_ids\":{\"F\":1,\"L\":0}} -->" ]] &&
+		! grep -q "no room for its round marker" "$stub/out.log"'
+jq -n --arg body "$body" '[{id: 1, user: {login: "me", type: "User"}, state: "CHANGES_REQUESTED", commit_id: "head1",
+	submitted_at: "2026-05-01T10:00:00Z", body: $body}]' >"$stub/rest-reviews.json"
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "records: a minimal marker reads back with the Markdown's counts and findings_dropped" \
+	'[[ $rc == 0 && $(jq -c ".records[0] | [.round, .findings_dropped, .counts.critical, .counts.open_blocking, .last_ids.F, has(\"findings\")]" "$stub/rounds.json") == "[1,true,1,1,1,false]" ]]'
+
 setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`b.js:9` — data loss.**\n\n**Ready to merge?** No'
 run
 expect "records: no block falls back to parsing" '[[ $rc == 0 && $(jq -r ".source, .findings[0].severity, .counts.open_blocking" <<<"$record" | paste -sd, -) == "parsed,critical,1" ]]'

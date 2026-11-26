@@ -165,8 +165,9 @@ def _re_literal: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}/-])"; "\\\(.c)");
 # it after only the * and ` marks are removed and whitespace is collapsed, and then the marker gets that visible
 # form. A title cut to 100 characters may match part of a line. Otherwise the field is left out.
 # The whole body (header, newline, marker, newline, review) must fit in 60,000 characters, under GitHub's 65,536: it
-# drops titles, then file, line, first_round and in_delta, then later, then findings (findings_dropped: true). Counts
-# and last_ids always stay. Nothing when even that does not fit.
+# drops titles, then file, line, first_round and in_delta, then later, then findings (findings_dropped: true; counts
+# and last_ids stay). When even that does not fit: a minimal marker, {schema, round, findings_dropped: true} and
+# last_ids if it fits, so a later round knows the baseline is missing. Nothing when even that does not fit.
 def marker_line($body):
 	($body | _visible) as $seen
 	| def file_shown: type == "string" and . != "" and (_re_literal as $f
@@ -189,6 +190,8 @@ def marker_line($body):
 		.later[]?.file, .later[]?.line, .later[]?.first_round, .later[]?.in_delta) end
 	| if fits then . else del(.later) end
 	| if fits then . else del(.findings) | .findings_dropped = true end
+	| if fits then . else {schema: 1, round, findings_dropped: true} + (if .last_ids then {last_ids} else {} end) end
+	| if fits then . else del(.last_ids) end
 	| if fits then line else empty end;
 
 # True when a review body is a generated round: its first line is exactly the generated marker (trailing spaces
