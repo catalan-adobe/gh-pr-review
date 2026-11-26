@@ -1,22 +1,29 @@
 #!/usr/bin/env bash
-# Runs the post block of gh-pr-review against a stub gh, under the script's own shell options.
+# Runs the post block of gh-pr-review against a stub gh, under the script's own shell options. The run has a valid
+# round record unless a test passes "none".
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 stub=$(mktemp -d)
 {
-	cat "$root/lib/verdicts.sh"
+	cat "$root"/lib/*.sh
 	sed -n '/^# ── post/,$p' "$root/gh-pr-review"
 } >"$stub/post.sh"
 fail=0
 
-check() { # name review author me decision approach-verdict expected-flag [code-review, default: review]
+check() { # name review author me decision approach-verdict expected-flag [code-review, default: review] [record: none]
 	cat >"$stub/gh" <<S
 #!/usr/bin/env bash
-if [[ "\$1" == api ]]; then echo "$4"; else printf '%s\\n' "\$@" | grep -x -- '--\(comment\|approve\|request-changes\)'; fi
+case "\$*" in
+*/reviews*) echo '[]' ;;
+api*) echo "$4" ;;
+*) printf '%s\\n' "\$@" | grep -x -- '--\(comment\|approve\|request-changes\)' ;;
+esac
 S
 	chmod +x "$stub/gh"
-	local got
-	got=$(PATH="$stub:$PATH" bash -c 'set -euo pipefail; POST_TO_PR=true YES=true DECISION="$1" REVIEW="$2" CODE_REVIEW="$6" PR_AUTHOR="$3" APPROACH_VERDICT="$5" PR_NUM=1 GH_HOST_NAME=h OWNER=o REPO=r; source "$4"' _ "$5" "$2" "$3" "$stub/post.sh" "$6" "${8-$2}" 2>&1 | grep -- '^--') || got="(exit failed)"
+	local got record="$stub/round.json"
+	echo '{"schema":1,"round":1,"counts":{"open_blocking":0}}' >"$record"
+	[[ "${9:-}" == none ]] && record=""
+	got=$(PATH="$stub:$PATH" LIB_DIR="$root/lib" bash -c 'set -euo pipefail; POST_TO_PR=true YES=true DECISION="$1" REVIEW="$2" CODE_REVIEW="$6" PR_AUTHOR="$3" APPROACH_VERDICT="$5" PR_NUM=1 GH_HOST_NAME=h OWNER=o REPO=r ROUND=1 RECORD_FILE="$7" SESSION_DIR="$8"; source "$4"' _ "$5" "$2" "$3" "$stub/post.sh" "$6" "${8-$2}" "$record" "$stub" 2>&1 | grep -- '^--') || got="(exit failed)"
 	if [[ "$got" == "$7" ]]; then echo "ok   $1"; else
 		echo "FAIL $1: got '$got', want '$7'"
 		fail=1
@@ -40,5 +47,7 @@ check "approach line cannot approve" $'**Approach:** Questionable\nReady to merg
 check "yes comma fixes" '**Ready to merge?** Yes, with fixes' bob me '' '' --comment
 check "yes paren fixes" '**Ready to merge?** Yes (with fixes)' bob me '' '' --comment
 check "yes dash fixes" '**Ready to merge?** Yes — with fixes' bob me '' '' --comment
+check "no record: a bare yes comments" '**Ready to merge?** Yes' bob me '' '' --comment '**Ready to merge?** Yes' none
+check "no record: an explicit approve stays" 'x' bob me approve '' --approve x none
 check "no dash reason" '**Ready to merge?** No — see Critical' bob me '' '' --request-changes
 exit "$fail"
