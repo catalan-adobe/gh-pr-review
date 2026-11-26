@@ -95,6 +95,7 @@ meta='{"source":"model","pr":{"host":"github.com","owner":"o","repo":"r","number
 	"reviewer":"me","model":"m","head_sha":"bbb","approach":"sound","ready":"yes-with-fixes","code_review":true}'
 prev=$(jq -n '{head_sha: "aaa", findings: [range(1; 8) | {id: "F\(.)"}]}')
 rec=$(build_record "$meta" "$(parse_findings "$fixtures/bullets.md")" "$prev")
+rec_bullets=$rec
 check "ids continue after F7" "$(jq -r '[.findings[].id] | join(" ")' <<<"$rec")" "F8 F9 F10 F11 F12 F13"
 check "open_blocking" "$(jq '.counts.open_blocking' <<<"$rec")" 4
 check "counts" "$(jq -c '.counts' <<<"$rec")" \
@@ -292,6 +293,38 @@ check "later round: a heading ends an unclosed <details>" "$(jq -c '[.[] | selec
 check "later round: an unreasoned decline stays open" "$(r3 "$f" | jq -c '[.findings[] | select(.id == "F4" or .id == "F5")
 	| [.id, .status, .unverified]]')" '[["F4","open",true],["F5","open",true]]'
 
+# ── finding IDs never restart ───────────────────────────────────────────────
+check "last_ids: the highest IDs of the round" "$(jq -c '.last_ids' <<<"$rec_bullets")" '{"F":13,"L":0}'
+one='[{"severity":"minor","title":"t"}]'
+r1=$(build_record "$meta" "$one" null)
+r2=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <<<"$meta")" "$one" "$r1")
+check "rethink: keeps last_ids" "$(jq -c '.last_ids' <<<"$r2")" '{"F":1,"L":0}'
+check "F1, then a Rethink, then a new finding: F2" "$(build_record "$meta" "$one" "$r2" | jq -r '.findings[0].id')" F2
+floor() { jq -c -L "$LIB_DIR" 'include "records"; id_floor' <<<"$1"; }
+check "id_floor: no history" "$(floor '[]')" '{"F":0,"L":0}'
+check "id_floor: F1 then a Rethink" "$(floor "[$r1, $r2]")" '{"F":1,"L":0}'
+check "id_floor: a compacted marker without findings keeps its last_ids" \
+	"$(floor '[{"findings":[{"id":"F2"}]},{"findings_dropped":true,"last_ids":{"F":9,"L":4}},{"code_review":false}]')" \
+	'{"F":9,"L":4}'
+check "id_floor: older markers without last_ids are seeded from their IDs" \
+	"$(floor '[{"findings":[{"id":"F3"},{"id":"F12"}],"later":[{"id":"L2"}]},{"findings":[{"id":"F5"}]}]')" \
+	'{"F":12,"L":2}'
+check "id_floor: the next ID comes after the floor, not the previous record" \
+	"$(build_record "$(jq -c '.id_floor = {F: 9, L: 4}' <<<"$meta")" "$one" "$r1" |
+		jq -c '[.findings[0].id, .last_ids]')" '["F10",{"F":10,"L":4}]'
+
+ok_block() { jq -c -L "$LIB_DIR" 'include "records"; map(findings_block_ok)' <<<"$1"; }
+check "findings_block_ok: good blocks" "$(ok_block '[[], [{"severity":"Critical","title":"t","file":null,"line":null}],
+	[{"severity":"minor","title":"t","file":"a.js","line":3}, {"severity":"important","title":"u"}]]')" \
+	"[true,true,true]"
+check "findings_block_ok: an earlier ID may give only its status" \
+	"$(ok_block '[[{"id":"F3","status":"fixed"}], [{"id":"F3","status":"open","severity":"critical"}], [{"id":null,"status":"new","title":"t"}], [{"status":"new","severity":"minor"}]]')" \
+	"[true,true,false,false]"
+check "findings_block_ok: one bad entry spoils the block" "$(ok_block '[{}, [{"level":"critical","title":"t"}],
+	[{"severity":"nit","title":"t"}], [{"severity":"minor"}], [{"severity":"minor","title":"t","line":"3"}],
+	[{"severity":"minor","title":"t","file":3}], [{"severity":"minor","title":"t"}, "F2"]]')" \
+	"[false,false,false,false,false,false,false]"
+
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \
 	"Yes (with fixes)=yes-with-fixes" "yes — with fixes=yes-with-fixes" "No — see Critical=no" "no.=no" \
@@ -300,8 +333,10 @@ for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixe
 done
 
 # ── marker_line and marker_record ───────────────────────────────────────────
+generated() { printf '<!-- gh-pr-review generated -->\n%s\n' "$1"; }
 build_record "$meta" "$(parse_findings "$fixtures/dashes.md")" null >"$tmp/round.json"
-line=$(marker_line "$tmp/round.json" 1000)
+# The review below the marker is the fixture itself, so every title and file is visible to the reader.
+line=$(marker_line "$tmp/round.json" "$fixtures/dashes.md")
 check "marker: one line" "$(wc -l <<<"$line" | tr -d ' ')" 1
 check "marker: one <!--" "$(grep -o -- '<!--' <<<"$line" | wc -l | tr -d ' ')" 1
 check "marker: one -->" "$(grep -o -- '-->' <<<"$line" | wc -l | tr -d ' ')" 1
@@ -310,37 +345,105 @@ body=$(printf '<!-- gh-pr-review generated -->\n%s\n### Approach\n\n**Approach:*
 check "marker: round trip keeps titles" "$(marker_record "$body" | jq -c '[.findings[].title]')" \
 	"$(jq -c '[.findings[].title]' "$tmp/round.json")"
 check "marker: round trip keeps the record" "$(marker_record "$body" | jq -S .)" "$(jq -S . "$tmp/round.json")"
+check "marker: the review as text gives the same line" "$(marker_line "$tmp/round.json" "$(cat "$fixtures/dashes.md")")" \
+	"$line"
 check "marker: verdict lines unchanged" "$(last_verdict 'approach' "$body")" sound
-check "marker_record: the last marker wins" \
-	"$(marker_record "$(printf '%s\n%s\n' "${line/\"round\":2/\"round\":1}" "$line")" | jq .round)" 2
-check "marker_record: no marker, nothing" "$(marker_record $'text\n<!-- gh-pr-review generated -->')" ""
-check "marker_record: broken JSON, nothing" "$(marker_record '<!-- gh-pr-review:round {"round": -->')" ""
+check "marker_record: a marker example later in the review does not override the record" \
+	"$(marker_record "$(printf '%s\nText.\n%s\n' "$body" "${line/\"round\":2/\"round\":1}")" | jq .round)" 2
+check "marker_record: no marker, nothing" "$(marker_record $'<!-- gh-pr-review generated -->\ntext')" ""
+check "marker_record: broken JSON, nothing" \
+	"$(marker_record $'<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round {"round": -->')" ""
+check "marker_record: header with trailing CR and spaces" \
+	"$(marker_record $'<!-- gh-pr-review generated --> \r\n'"$line"$'\r\ntext' | jq .round)" 2
+check "marker_record: a quoted header is not a generated review" \
+	"$(marker_record "$(printf 'I saw this:\n<!-- gh-pr-review generated -->\n%s\n' "$line")")" ""
+check "marker_record: a marker that is not right below the header is not read" \
+	"$(marker_record "$(printf '<!-- gh-pr-review generated -->\nText.\n%s\n' "$line")")" ""
+for bad in '"x"' '{"schema":2,"round":1}' '{"schema":1}' '{"schema":1,"round":"1"}' \
+	'{"schema":1,"round":1,"counts":{"critical":"2"}}' '{"schema":1,"round":1,"findings":[{"line":"3"}]}' \
+	'{"schema":1,"round":1,"findings":"F1"}' '{"schema":1,"round":1,"head_sha":7}'; do
+	check "marker_record: invalid record $bad, nothing" \
+		"$(marker_record "$(printf '<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round %s -->\n' "$bad")")" ""
+done
+check "is_generated_review: first line only" "$(jq -c -L "$LIB_DIR" 'include "records"; map(is_generated_review)' <<<'
+	["<!-- gh-pr-review generated -->\nx", "<!-- gh-pr-review generated -->\t\r", "x\n<!-- gh-pr-review generated -->",
+	 " <!-- gh-pr-review generated -->", "", null]')" "[true,true,false,false,false,false]"
 
-line=$(marker_line "$tmp/round.json" 58900)
-check "marker: 58,900-character body drops titles" "$(grep -c '"title"' <<<"$line" || true)" 0
-check "marker: 58,900-character body keeps findings" \
-	"$(marker_record "$line" | jq '.findings | length')" 4
-check "marker: fits under 60,000" "$((58900 + 1 + ${#line} <= 60000))" 1
-line=$(marker_line "$tmp/round.json" 59800)
-check "marker: no room drops later and findings" "$(marker_record "$line" | jq -c '[has("later"), has("findings")]')" \
-	'[false,false]'
-check "marker: counts stay" "$(marker_record "$line" | jq .counts.open_blocking)" 3
+# Only what the reader sees: a title or file that appears nowhere in the posted review is left out of the marker.
+jq -n '{schema: 1, round: 1, counts: {}, findings: [
+	{id: "F1", title: "Visible   title, with emphasis", file: "src/a_b.js", line: 3},
+	{id: "F2", title: "PRIVATE instructions text", file: "secret/plan.md", line: 1},
+	{id: "F3", title: null, file: null}]}' >"$tmp/private.json"
+line=$(marker_line "$tmp/private.json" $'### Issues\n- **`src/a_b.js:3` — Visible\ntitle, with *emphasis*.** More.')
+check "marker: a visible title and file stay" "$(marker_record "$(generated "$line")" | jq -c '.findings[0] | [.title, .file]')" \
+	'["Visible   title, with emphasis","src/a_b.js"]'
+check "marker: a title and file the reader can't see are left out" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[1] | [has("title"), has("file"), .line]')" '[false,false,1]'
+check "marker: no private text" "$(grep -c -e PRIVATE -e secret <<<"$line" || true)" 0
+check "marker: round.json keeps the private text" "$(jq -r '.findings[1].title' "$tmp/private.json")" \
+	"PRIVATE instructions text"
+
+# The size cap, step by step, on the exact assembled body: header, newline, marker, newline, review.
+jq '.later = [{id: "L1", severity: "minor", file: "src/render.ts", line: 7, title: "Comment says"}]' "$tmp/round.json" \
+	>"$tmp/big.json"
+len() { printf '%s' "$1" | jq -Rs length; }
+header_len=$(len '<!-- gh-pr-review generated -->')
+pad_to() { # n -> $tmp/body.md: the fixture, padded with x to n characters
+	local have
+	have=$(jq -Rs length "$fixtures/dashes.md")
+	{
+		cat "$fixtures/dashes.md"
+		head -c $(($1 - have)) /dev/zero | tr '\0' x
+	} >"$tmp/body.md"
+}
+assembled() { jq -Rs --arg m "$1" '("<!-- gh-pr-review generated -->\n" + $m + "\n" + .) | length' "$tmp/body.md"; }
+# The review length that makes the assembled body exactly 60,000 characters with this marker line.
+fill() { echo $((60000 - header_len - 1 - $(len "$1") - 1)); }
+step() { # name marker-line jq-check
+	check "marker cap, $1: body is exactly 60,000" "$(assembled "$2")" 60000
+	check "marker cap, $1: shape" "$(marker_record "$(generated "$2")" | jq -c "$3")" true
+}
+pad_to 3000
+full=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$full")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "full marker" "$line" '[.findings[], .later[] | has("title")] | all'
+pad_to $(($(fill "$full") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "titles dropped" "$line" '([.findings[], .later[] | has("title")] | any | not) and (.findings[0] | has("file"))'
+pad_to $(($(fill "$line") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "locations dropped" "$line" '(.findings | map(keys) | unique) == [["id", "severity", "status"]] and has("later")'
+pad_to $(($(fill "$line") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "later dropped" "$line" '(has("later") | not) and (.findings | length) == 4'
+pad_to $(($(fill "$line") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "findings dropped" "$line" '(has("findings") | not) and .findings_dropped and .counts.open_blocking == 3
+	and .last_ids == {"F": 4, "L": 0} and .round == 2'
+pad_to $(($(fill "$line") + 1))
+check "marker cap: no room even for counts, no marker" "$(marker_line "$tmp/big.json" "$tmp/body.md")" ""
+check "marker cap: round.json keeps everything" "$(jq -c '[(.findings | length), (.later | length)]' "$tmp/big.json")" \
+	"[4,1]"
 
 build_record "$meta2" "$reply" "$prev2" >"$tmp/round3.json"
-line=$(marker_line "$tmp/round3.json" 1000)
-check "marker: statuses and later round trip" "$(marker_record "$line" | jq -S .)" "$(jq -S . "$tmp/round3.json")"
+# The posted review shows every title and file, so the marker keeps them all.
+body3=$(jq -r '[.findings[], .later[] | (.file // empty), (.title // empty)] | join("\n")' "$tmp/round3.json")
+line=$(marker_line "$tmp/round3.json" "$body3")
+check "marker: statuses and later round trip" "$(marker_record "$(generated "$line")" | jq -S .)" \
+	"$(jq -S . "$tmp/round3.json")"
 check "marker: no -- with statuses" "$(grep -c -- '--' <<<"${line:4:${#line}-8}" || true)" 0
-cap=$((60000 - 1 - ${#line} + 40))
-line=$(marker_line "$tmp/round3.json" "$cap")
-check "marker: over the cap drops titles first" "$(marker_record "$line" |
-	jq -c '[has("later"), (.findings | length), ([.findings[], .later[] | has("title")] | any)]')" '[true,7,false]'
-jq 'del(.findings[].title, .later)' "$tmp/round3.json" >"$tmp/short.json"
-short=$(marker_line "$tmp/short.json" 0)
-line=$(marker_line "$tmp/round3.json" "$((60000 - 1 - ${#short} - 5))")
-check "marker: then later before findings" "$(marker_record "$line" | jq -c '[has("later"), (.findings | length)]')" \
-	'[false,7]'
-check "marker: last ids and counts stay" "$(marker_record "$line" | jq -c '[.last_ids, .counts.unverified]')" \
-	'[{"F":7,"L":7},1]'
+line=$(marker_line "$tmp/round3.json" "$body3$(head -c 59000 /dev/zero | tr '\0' x)")
+check "marker: near the cap, last ids and counts stay" \
+	"$(marker_record "$(generated "$line")" | jq -c '[.last_ids, .counts.unverified, has("later")]')" '[{"F":7,"L":7},1,false]'
 
 # ── progress_line ───────────────────────────────────────────────────────────
 dec='{"label":"converging"}'

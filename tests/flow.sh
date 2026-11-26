@@ -67,6 +67,8 @@ echo call >>"$stub/pi.calls"
 if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] && exit 7
 	printf '%s' "\${*: -1}" >"$stub/owner-prompt.txt"; cat "$stub/approach.out"; else
 	[[ "${4:-}" == code ]] && exit 7
+	# A round someone else posts while this review runs.
+	[[ -f "$stub/reviews.after" ]] && cp "$stub/reviews.after" "$stub/rest-reviews.json"
 	printf '%s' "\${*: -1}" >"$stub/code-prompt.txt"; cat "$stub/review.out"; fi
 S
 	chmod +x "$stub/bin/"*
@@ -83,6 +85,47 @@ run_no_y() { # no extra args: the interactive path, with no terminal on stdin
 	fresh
 	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
 		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 </dev/null >"$stub/out.log" 2>&1) && rc=0 || rc=$?
+	collect
+}
+
+# Runs a command on a pseudo-terminal: util-linux or BSD script.
+in_tty() { # command...
+	local cmd
+	printf -v cmd '%q ' "$@"
+	if script --version >/dev/null 2>&1; then script -qec "$cmd" /dev/null; else script -q /dev/null "$@"; fi
+}
+
+# Types each answer once its prompt shows in the log (10 s at most each), then holds the terminal's input open until
+# the run is done, so script never sends an end of file the run could read as an answer.
+answer() { # log done-file prompt answer [prompt answer]...
+	local log="$1" done="$2" i
+	shift 2
+	while [[ $# -ge 2 ]]; do
+		for ((i = 0; i < 100; i++)); do
+			grep -qF -- "$1" "$log" 2>/dev/null && break
+			sleep 0.1
+		done
+		printf '%s\n' "$2"
+		shift 2
+	done
+	for ((i = 0; i < 600; i++)); do
+		[[ -f "$done" ]] && return 0
+		sleep 0.1
+	done
+}
+
+run_tty() { # prompt answer [prompt answer]...: the interactive path, on a terminal, without -y
+	fresh
+	: >"$stub/out.log"
+	rm -f "$stub/tty.done"
+	answer "$stub/out.log" "$stub/tty.done" "$@" | (
+		cd "$stub/work" || exit 1
+		code=0
+		HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+			in_tty bash "$root/gh-pr-review" https://github.com/o/r/pull/1 >"$stub/out.log" 2>&1 || code=$?
+		touch "$stub/tty.done"
+		exit "$code"
+	) && rc=0 || rc=$?
 	collect
 }
 
@@ -204,9 +247,28 @@ expect "records: the marker follows the generated marker" '[[ $body == "<!-- gh-
 expect "records: round.json has the model findings" '[[ $(jq -r ".source, .round, .findings[0].id, .findings[0].file, .preview, .decision" <<<"$record" | paste -sd, -) == "model,1,F1,a.js,false,comment" ]]'
 expect "records: posted.md is the posted body" '[[ -f $(ls -d "$stub"/work/pr-review-sessions/pr-review-*)/posted.md ]]'
 
+block=$'```json findings\n[{"severity":"important","file":"secret/plan.md","line":3,"title":"SECRET note from the instructions"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** No\n\n'"$block"
+run
+expect "records: text only in the findings block is not posted" \
+	'[[ $rc == 0 && $body == *"gh-pr-review:round"* && $body != *SECRET* && $body != *secret/plan.md* ]]'
+expect "records: round.json keeps it" '[[ $(jq -r ".source, .findings[0].title" <<<"$record" | paste -sd, -) == "model,SECRET note from the instructions" ]]'
+
+setup $'**Approach:** Sound' "$(head -c 59990 /dev/zero | tr '\0' x)"$'\n\n**Ready to merge?** No'
+run
+expect "records: no room for the marker posts the header only, with a warning" \
+	'[[ $rc == 0 && $body == "<!-- gh-pr-review generated -->"$'"'"'\n'"'"'"**Approach:** Sound"* && $body != *"gh-pr-review:round"* ]] &&
+		grep -q "no room for its round marker" "$stub/out.log"'
+expect "records: round.json keeps the posted record" '[[ $(jq -r ".round, .preview, .decision" <<<"$record" | paste -sd, -) == "1,false,request-changes" ]]'
+
 setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`b.js:9` — data loss.**\n\n**Ready to merge?** No'
 run
 expect "records: no block falls back to parsing" '[[ $rc == 0 && $(jq -r ".source, .findings[0].severity, .counts.open_blocking" <<<"$record" | paste -sd, -) == "parsed,critical,1" ]]'
+
+setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`b.js:9` — data loss.**\n\n**Ready to merge?** Yes with fixes\n\n```json findings\n[{"level":"critical","file":"b.js","line":9,"title":"data loss"}]\n```'
+run
+expect "records: an unusable block entry falls back to parsing the whole round" \
+	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .findings[0].file" <<<"$record" | paste -sd, -) == "parsed,1,b.js" ]]'
 
 setup $'### Approach\n**Approach:** Rethink' 'never used'
 run
@@ -223,9 +285,45 @@ run
 expect "records: earlier generated reviews count as rounds" '[[ $(jq -r ".round" <<<"$record") == 3 ]]'
 expect "records: finding IDs continue from the previous record" '[[ $(jq -r ".findings[0].id, .previous_head_sha" <<<"$record" | paste -sd, -) == "F4,old" ]]'
 
+# F7 two rounds back; the last marker was compacted (no findings) by an older version (no last_ids).
+compacted='{"schema":1,"round":2,"head_sha":"old","findings_dropped":true,"counts":{"open_blocking":0}}'
+jq -n --arg r1 '<!-- gh-pr-review:round {"schema":1,"round":1,"findings":[{"id":"F7","severity":"minor"}]} -->' \
+	--arg r2 "<!-- gh-pr-review:round $compacted -->" '[
+	{user: {login: "x"}, commit_id: "c1", submitted_at: "2026-01-01T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n" + $r1)},
+	{user: {login: "x"}, commit_id: "old", submitted_at: "2026-01-02T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n" + $r2)}]' \
+	>"$stub/rest-reviews.json"
+run
+expect "records: IDs continue after the highest in the whole history" \
+	'[[ $(jq -c "[.round, .findings[0].id, .last_ids.F]" <<<"$record") == "[3,\"F8\",8]" ]]'
+expect "records: the marker keeps last_ids" '[[ $body == *"\"last_ids\":{\"F\":8,\"L\":0}"* ]]'
+
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n```'
 run --no-post
 expect "records: --no-post keeps a preview record and posts nothing" '[[ -z $flag && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "true,null" ]]'
+
+# A jq that breaks the record: it fails, or prints a non-record, when asked to build one. Other calls pass through.
+break_record() { # fail | junk
+	local real
+	real=$(PATH="${PATH#"$stub/bin:"}" command -v jq)
+	cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+for a in "\$@"; do
+	if [[ "\$a" == *'build_record(\$meta'* ]]; then [[ $1 == fail ]] && exit 5; echo '{"round":"x"}'; exit 0; fi
+done
+exec "$real" "\$@"
+S
+	chmod +x "$stub/bin/jq"
+}
+for mode in fail junk; do
+	setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+	break_record "$mode"
+	run
+	expect "record $mode: the review is still posted, without a marker" \
+		'[[ $rc == 0 && $body == *"Ready to merge?"* && $body != *"gh-pr-review:round"* ]] &&
+			grep -q "could not write the round record" "$stub/out.log"'
+	expect "record $mode: no record, so a bare yes comments instead of approving" \
+		'[[ $flag == --comment && -z $record ]] && grep -q "posting as comment, not approve" "$stub/out.log"'
+done
 
 # ── loop check
 rounds_with() { # blocking per earlier round... -> REST reviews whose markers carry those counts
@@ -260,6 +358,14 @@ expect "loop stop: a forced round shows the progress line, not the loop line" '[
 comment_by dave User >"$stub/rest-comments.json"
 run
 expect "loop stop: a comment by another person lifts it" '[[ $rc == 0 && $calls == 2 && $(jq -r ".loop.decision" <<<"$record") == warn ]]'
+echo '[]' >"$stub/rest-comments.json"
+rounds_with 9 12 8 10 | jq -c '. + [{user: {login: "dave", type: "User"}, state: "COMMENTED", commit_id: "h4",
+	submitted_at: "2026-02-01T00:00:00Z", body: "Why does this post\n<!-- gh-pr-review generated -->\nin the body?"}]' \
+	>"$stub/rest-reviews.json"
+run
+expect "loop stop: a human review quoting the marker is not a round, and lifts it" \
+	'[[ $rc == 0 && $calls == 2 && $(jq -r ".round, .loop.decision" <<<"$record" | paste -sd, -) == "5,warn" ]]'
+rounds_with 9 12 8 10 >"$stub/rest-reviews.json"
 comment_by bob User >"$stub/rest-comments.json"
 run
 expect "loop stop: the PR author's comment does not lift it" '[[ $rc == 3 && $calls == 0 ]]'
@@ -293,8 +399,50 @@ run
 expect "no new commits: exit 5, no clone" '[[ $rc == 5 && $calls == 0 ]] && no_session'
 run --check
 expect "--check: no new commits exits 5" '[[ $rc == 5 ]]'
+run_tty "anyway?" n
+expect "no new commits, in a terminal: asks, and no exits 5" \
+	'[[ $rc == 5 && $calls == 0 ]] && grep -q "Run round 2 anyway? \[y/N\]" "$stub/out.log" && no_session'
+run_tty "anyway?" y "Post as review" ""
+expect "no new commits, in a terminal: yes runs the round, marked forced" \
+	'[[ $rc == 0 && $calls == 2 && $(jq -r ".round, .forced" <<<"$record" | paste -sd, -) == "2,true" ]]'
 run --force-round
 expect "no new commits: --force-round runs" '[[ $rc == 0 && $calls == 2 && $(jq -r ".forced" <<<"$record") == true ]]'
+
+# The last round on this head was a Rethink: the code was never reviewed.
+setup 'unused' $'**Ready to merge?** Yes'
+jq -n '[{schema: 1, round: 1, head_sha: "head1", approach: "rethink", code_review: false,
+	counts: {open_blocking: null}}] | map({user: {login: "ann", type: "User"}, commit_id: "head1",
+	submitted_at: "2026-01-01T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\nx")})' \
+	>"$stub/rest-reviews.json"
+run --skip-approach
+expect "after a Rethink on this head: --skip-approach runs the code review" \
+	'[[ $rc == 0 && $calls == 1 && $(jq -r ".round, .forced" <<<"$record" | paste -sd, -) == "2,false" ]]'
+run --skip-approach --check
+expect "after a Rethink on this head: --skip-approach --check exits 0" '[[ $rc == 0 && $calls == 0 ]]'
+run
+expect "after a Rethink on this head: a full run has nothing new" '[[ $rc == 5 && $calls == 0 ]]'
+
+# Overlapping runs: round 2, by ann, lands while this review runs.
+overlap() {
+	setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[{"severity":"minor","title":"nit"}]\n```'
+	rounds_with 2 >"$stub/rest-reviews.json"
+	rounds_with 2 3 | jq -c '.[1].user.login = "ann" | .[1].body |= sub("\"findings\":\\[\\]"; "\"findings\":[{\"id\":\"F5\"}]")' \
+		>"$stub/reviews.after"
+}
+overlap
+run
+expect "overlap, -y: nothing posted, exit 6, session kept" \
+	'[[ $rc == 6 && -z $flag && -n $record ]] && grep -q "round 2 by ann" "$stub/out.log"'
+overlap
+run_tty "Post as review" "" "Post anyway" n
+expect "overlap, in a terminal: no posts nothing, exit 6" \
+	'[[ $rc == 6 && -z $flag ]] && grep -q "Post anyway as round 3? \[y/N\]" "$stub/out.log"'
+overlap
+run_tty "Post as review" "" "Post anyway" y
+# previous_head_sha stays the head this review compared against (round 1's), not the round that landed meanwhile.
+expect "overlap, in a terminal: yes posts as round 3, IDs after the new round" \
+	'[[ $rc == 0 && $flag == --approve && $(jq -r ".round, .findings[0].id, .findings[0].first_round, .previous_head_sha" <<<"$record" |
+		paste -sd, -) == "3,F6,3,h1" && $body == *"\"round\":3"* ]]'
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
@@ -450,4 +598,24 @@ setup $'### Approach\n\n**Approach:** Sound' "$round3"
 add_round '{"schema":1,"source":"model","round":1,"head_sha":"'"$H1"'","base_sha":"'"$B1"'","approach":"rethink","ready":"unknown","code_review":false,"findings":[],"counts":{"open_blocking":null}}' $'### Approach\n\n**Approach:** Rethink'
 run
 expect "after a Rethink-only round: judged afresh, and a full first code review" '! grep -q "Your previous verdict" "$stub/owner-prompt.txt" && ! grep -q "## Previous round" "$stub/code-prompt.txt" && [[ $(jq -r ".round, .mode, .mode_reason" <<<"$record" | paste -sd, -) == "2,full,no earlier code review" ]]'
+
+# ── producer to consumer: a posted round, returned as GitHub returns it, read back by rounds --json and --check
+block=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** Yes with fixes\n\n'"$block"
+run
+expect "round trip: round 1 posted" '[[ $rc == 0 && $flag == --comment ]]'
+jq -n --arg body "$body" '[{id: 11, user: {login: "me", type: "User"}, state: "COMMENTED", commit_id: "head1",
+	submitted_at: "2026-05-01T10:00:00Z", body: $body}]' >"$stub/rest-reviews.json"
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "round trip: rounds --json reads the posted record back" \
+	'[[ $rc == 0 && $(jq -c ".records | length" "$stub/rounds.json") == 1 && $(jq -r ".records[0] | .round, .source,
+		.counts.open_blocking, .counts.important, .findings[0].id, .head_sha, .posted_at, .decision, .ready" "$stub/rounds.json" |
+		paste -sd, -) == "1,model,1,1,F1,head1,2026-05-01T10:00:00Z,comment,yes-with-fixes" ]]'
+expect "round trip: the decision sees round 1 on this head" \
+	'[[ $(jq -r ".decision | .decision, .next_round" "$stub/rounds.json" | paste -sd, -) == "nothing-new,2" ]]'
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "round trip: --check exits 5 on the same head" \
+	'[[ $rc == 5 && $(jq -r ".decision, .next_round, .series[0]" "$stub/check.json" | paste -sd, -) == "nothing-new,2,1" ]]'
 exit "$fail"

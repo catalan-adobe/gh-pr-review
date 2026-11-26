@@ -13,15 +13,17 @@
 #   --skip-approach Skip the maintainer's approach pass; run the code review only
 #   --instructions <text>  Extra guidance for both passes (a file: "$(cat notes.md)")
 #   --decision <d>  comment | approve | request-changes (default: from "Ready to merge?")
-#   -y, --yes       Skip confirmation prompt before posting (a loop-check stop then exits 3)
+#   -y, --yes       Skip confirmation prompts (a loop-check stop then exits 3, no new commits exits 5)
 #   --check         Run only the loop check: print it and exit 0 (run), 3 (stop) or 5 (no new commits)
 #   --json          With --check, print the decision as JSON
 #   --force-round   Run a round even when the loop check stops it or nothing changed
+#                   (in a terminal, without -y, both ask "Run round K anyway?" instead)
 #   --full          Review the whole PR again (round 2 and later still re-check the earlier findings)
 #   --doctor        Check all prerequisites and exit
 #   -h, --help      Show this help
 #
-# Exit codes: 0 done, 1 error, 3 stopped by the loop check, 5 no new commits since the last round.
+# Exit codes: 0 done, 1 error, 3 stopped by the loop check, 5 no new commits since the last round,
+#   6 another round was posted while the review ran (with -y; nothing posted, the session is kept).
 #
 # Examples:
 #   gh pr-review https://github.com/owner/repo/pull/42
@@ -378,10 +380,12 @@ if [[ $(jq 'length' <<<"$RECORDS") -gt 0 ]]; then
 	LIFTED=$(lifted_since "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$(jq -r 'last.posted_at // ""' <<<"$RECORDS")" "$PR_AUTHOR")
 fi
 PR_SHAPE=$(jq -cn --argjson lines "$((ADDITIONS + DELETIONS))" --argjson files "$N_FILES" '{lines: $lines, files: $files}')
-LOOP=$(loop_decide_json "$RECORDS" "$PR_SHAPE" "$HEAD_OID" "$LIFTED")
+LOOP=$(loop_decide_json "$RECORDS" "$PR_SHAPE" "$HEAD_OID" "$LIFTED" "{\"skip_approach\": $SKIP_APPROACH}")
 LOOP_DECISION=$(jq -r '.decision' <<<"$LOOP")
 ROUND=$(jq -r '.next_round' <<<"$LOOP")
 PREVIOUS_RECORD=$(jq -c 'last // null' <<<"$RECORDS")
+# New findings are numbered after the highest ID anywhere in the history, so an ID never restarts.
+ID_FLOOR=$(jq -c -L "$LIB_DIR" 'include "records"; id_floor' <<<"$RECORDS")
 
 if [[ "$CHECK_ONLY" == "true" ]]; then
 	if [[ "$CHECK_JSON" == "true" ]]; then echo "$LOOP" >&3; else loop_text "$LOOP"; fi
@@ -398,6 +402,15 @@ nothing-new)
 	if [[ "$FORCE_ROUND" == "true" ]]; then
 		FORCED=true
 		echo "    No new commits since round $((ROUND - 1)); running anyway (--force-round)."
+	elif [[ -t 0 && "$YES" == "false" ]]; then
+		# Someone may want a second opinion on the same commit: ask, as for a stop.
+		echo "No new commits since round $((ROUND - 1)) (${HEAD_OID:0:7})."
+		read -r -p "Run round ${ROUND} anyway? [y/N] " LOOP_ANSWER || LOOP_ANSWER=""
+		[[ "$LOOP_ANSWER" == [Yy]* ]] || {
+			echo "Nothing to review."
+			exit 5
+		}
+		FORCED=true
 	else
 		echo "No new commits since round $((ROUND - 1)) (${HEAD_OID:0:7}): nothing to review. --force-round runs anyway."
 		exit 5
@@ -521,7 +534,9 @@ fi
 
 # The n-th gh-pr-review review on the PR, without its marker lines.
 round_body() { # <round>
-	jq -r --argjson n "$1" '[.reviews[] | select((.body // "") | contains("<!-- gh-pr-review generated -->"))]
+	# The same test as fetch_round_records (the header on the first line), so the n-th body is round n.
+	jq -r -L "$LIB_DIR" --argjson n "$1" 'include "records";
+		[.reviews[] | select(.state != "PENDING" and (.body | is_generated_review))]
 		| sort_by(.submittedAt) | .[$n - 1].body // ""' "$CONTEXT_DIR/discussion.json" | grep -v '^<!-- gh-pr-review' || true
 }
 
@@ -1131,42 +1146,55 @@ fi
 # ── record ─────────────────────────────────────────────────────────────────────────
 # round.json starts as a preview; the post block turns it into the posted round. A failure here never blocks the post.
 # Statuses build on the last code review (FINDINGS_BASE); THIS_LOOP is the loop decision with this round included.
+# It runs under `if !`, where errexit is off: every step checks its own status, and the record is checked before use.
 THIS_LOOP=""
 write_round_record() {
-	local findings source=model code_review=true approach ready meta history
+	local findings source=model code_review=true approach ready meta history tmp="${RECORD_FILE}.tmp"
 	if [[ "$APPROACH_VERDICT" == rethink ]]; then
 		code_review=false
 		findings='[]'
-	elif jq -e 'type == "array"' "$FINDINGS_FILE" >/dev/null 2>&1; then
-		findings=$(jq -c . "$FINDINGS_FILE")
+	elif jq -e -L "$LIB_DIR" 'include "records"; findings_block_ok' "$FINDINGS_FILE" >/dev/null 2>&1; then
+		findings=$(jq -c . "$FINDINGS_FILE") || return 1
 	else
 		source=parsed
+		# A parse failure leaves a parsed record without findings, as the spec says: it never blocks the post.
 		findings=$(parse_findings "$REVIEW_BODY_FILE") || findings='[]'
 	fi
 	case "$APPROACH_VERDICT" in
 	sound | questionable | rethink) approach="$APPROACH_VERDICT" ;;
 	*) if [[ "$SKIP_APPROACH" == "true" ]]; then approach=skipped; else approach=unknown; fi ;;
 	esac
-	ready=$(normalize_ready "$(last_verdict 'ready to merge' "$CODE_REVIEW")")
+	ready=$(normalize_ready "$(last_verdict 'ready to merge' "$CODE_REVIEW")") || return 1
 	meta=$(jq -n --arg source "$source" --arg host "$GH_HOST_NAME" --arg owner "$OWNER" --arg repo "$REPO" \
 		--argjson number "$PR_NUM" --argjson round "$ROUND" --arg reviewer "$ME" --arg model "$MODEL" \
 		--arg base "$BASE_SHA" --arg head "$HEAD_SHA" --argjson previous "$PREVIOUS_RECORD" \
 		--argjson findings_base "$FINDINGS_BASE" --argjson delta "$DELTA" \
 		--arg approach "$approach" --arg ready "$ready" --argjson code_review "$code_review" \
+		--argjson id_floor "$ID_FLOOR" \
 		'{source: $source, pr: {host: $host, owner: $owner, repo: $repo, number: $number}, round: $round,
 		  mode: $delta.mode, mode_reason: ($delta.reason // null),
 		  reviewer: (if $reviewer == "" then null else $reviewer end), model: $model,
 		  base_sha: $base, head_sha: $head,
 		  previous_head_sha: ($findings_base.head_sha? // $previous.head_sha? // null),
 		  approach: $approach, ready: $ready, decision: null, posted_at: null,
-		  code_review: $code_review, preview: true}')
-	build_record "$meta" "$findings" "$FINDINGS_BASE" >"$RECORD_FILE.tmp"
-	history=$(jq -c --slurpfile r "$RECORD_FILE.tmp" '. + $r' <<<"$RECORDS")
-	THIS_LOOP=$(loop_decide_json "$history" "$PR_SHAPE" "" false)
-	jq --argjson loop "$LOOP" --argjson this "$THIS_LOOP" --argjson forced "$FORCED" \
-		'.loop = {label: $this.labels[-1], flags: $this.flags, decision: $loop.decision} | .forced = $forced' \
-		"$RECORD_FILE.tmp" >"$RECORD_FILE"
-	rm -f "$RECORD_FILE.tmp"
+		  code_review: $code_review, preview: true, id_floor: $id_floor}') || return 1
+	if ! build_record "$meta" "$findings" "$FINDINGS_BASE" >"$tmp" ||
+		! jq -e 'type == "object" and (.round | type == "number") and (.counts | type == "object")' \
+			"$tmp" >/dev/null 2>&1; then
+		echo "Warning: the round record came out malformed." >&2
+		rm -f "$tmp"
+		return 1
+	fi
+	if ! history=$(jq -c --slurpfile r "$tmp" '. + $r' <<<"$RECORDS") ||
+		! THIS_LOOP=$(loop_decide_json "$history" "$PR_SHAPE" "" false) ||
+		! jq --argjson loop "$LOOP" --argjson this "$THIS_LOOP" --argjson forced "$FORCED" \
+			'.loop = {label: $this.labels[-1], flags: $this.flags, decision: $loop.decision} | .forced = $forced' \
+			"$tmp" >"$RECORD_FILE"; then
+		THIS_LOOP=""
+		rm -f "$tmp"
+		return 1
+	fi
+	rm -f "$tmp"
 }
 ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
 if ! write_round_record; then
@@ -1175,18 +1203,21 @@ if ! write_round_record; then
 fi
 
 # Round 2 and later open with a progress line, counted from the record. It replaces the loop line, and carries the
-# loop's suggested move when the loop is not converging.
-HEAD_LINES="$LOOP_LINE"
-if [[ -n "$RECORD_FILE" && -n "$THIS_LOOP" ]]; then
-	PROGRESS=$(progress_line "$(cat "$RECORD_FILE")" "$FINDINGS_BASE" "$THIS_LOOP" 2>/dev/null || true)
-	if [[ -n "$PROGRESS" ]]; then
-		HEAD_LINES="$PROGRESS"
-		SUGGESTION=$(jq -r 'if (.labels[-1] == "nit-loop" or .labels[-1] == "churning") then .suggestion // "" else "" end' \
-			<<<"$THIS_LOOP")
-		[[ -z "$SUGGESTION" ]] || HEAD_LINES+=$'\n'"**Next:** ${SUGGESTION}"
+# loop's suggested move when the loop is not converging. Called again if the round is renumbered before posting.
+assemble_body() {
+	local head_lines="$LOOP_LINE" progress suggestion
+	if [[ -n "$RECORD_FILE" && -n "$THIS_LOOP" ]]; then
+		progress=$(progress_line "$(cat "$RECORD_FILE")" "$FINDINGS_BASE" "$THIS_LOOP" 2>/dev/null || true)
+		if [[ -n "$progress" ]]; then
+			head_lines="$progress"
+			suggestion=$(jq -r 'if (.labels[-1] == "nit-loop" or .labels[-1] == "churning") then .suggestion // "" else "" end' \
+				<<<"$THIS_LOOP")
+			[[ -z "$suggestion" ]] || head_lines+=$'\n'"**Next:** ${suggestion}"
+		fi
 	fi
-fi
-REVIEW=$(assemble_review "$HEAD_LINES" "$APPROACH" "$CODE_REVIEW")
+	REVIEW=$(assemble_review "$head_lines" "$APPROACH" "$CODE_REVIEW")
+}
+assemble_body
 
 # ── display ──────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1219,6 +1250,10 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 			jq -e '.ready_overridden == true' "$RECORD_FILE" >/dev/null 2>&1; then
 			DECISION=comment
 			echo "    but $(jq -r '.counts.open_blocking' "$RECORD_FILE") blocking findings are still open → ${DECISION}"
+		# An approval says the findings were checked; without a record nothing can show that, so only comment.
+		elif [[ "$DECISION" == approve && -z "${RECORD_FILE:-}" ]]; then
+			DECISION=comment
+			echo "No round record for this review: posting as comment, not approve."
 		fi
 	fi
 
@@ -1242,18 +1277,60 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		DECISION=comment
 	fi
 
+	# A round posted by someone else while this one ran would give two round Ks: read the history again first.
+	if NOW_RECORDS=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM"); then
+		NOW_COUNT=$(jq 'length' <<<"$NOW_RECORDS")
+		if [[ "$NOW_COUNT" != "$((ROUND - 1))" ]]; then
+			echo "The PR's review history changed while this review ran: $((ROUND - 1)) rounds then, ${NOW_COUNT} now." >&2
+			jq -r --argjson from "$((ROUND - 1))" '.[$from:][]
+				| "    round \(.round) by \(.reviewer // "unknown") at \(.posted_at // "an unknown time")"' \
+				<<<"$NOW_RECORDS" >&2
+			if [[ -t 0 && "$YES" == "false" ]]; then
+				read -r -p "Post anyway as round $((NOW_COUNT + 1))? [y/N] " OVERLAP_ANSWER || OVERLAP_ANSWER=""
+				[[ "$OVERLAP_ANSWER" == [Yy]* ]] || {
+					echo "Not posted. Session: ${SESSION_DIR}"
+					exit 6
+				}
+				# The same findings, renumbered for the new position: round, previous round and IDs.
+				RECORDS="$NOW_RECORDS"
+				ROUND=$((NOW_COUNT + 1))
+				PREVIOUS_RECORD=$(jq -c 'last // null' <<<"$RECORDS")
+				ID_FLOOR=$(jq -c -L "$LIB_DIR" 'include "records"; id_floor' <<<"$RECORDS")
+				if [[ -n "${RECORD_FILE:-}" ]] && ! write_round_record; then
+					echo "Warning: could not renumber the round record; the review is posted without it." >&2
+					RECORD_FILE=""
+				fi
+				# The progress line names the round: build the body again for the new number.
+				assemble_body
+			else
+				echo "Not posted (exit 6): the history changed while the review ran. Session: ${SESSION_DIR}" >&2
+				exit 6
+			fi
+		fi
+	else
+		echo "Warning: could not read the PR's rounds again; posting without checking for a newer round." >&2
+	fi
+
 	MARKER=""
 	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}" ]]; then
 		jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 			'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted"
-		MARKER=$(marker_line "$RECORD_FILE.posted" "${#REVIEW}")$'\n'
+		# The marker is sized for the exact body below: header, newline, marker, newline, review.
+		if ! MARKER=$(marker_line "$RECORD_FILE.posted" "$REVIEW"); then
+			MARKER=""
+			echo "Warning: could not write the round marker; posting the review without it." >&2
+		elif [[ -z "$MARKER" ]]; then
+			echo "Warning: the review leaves no room for its round marker; posting it without one." >&2
+			echo "    round.json keeps the full record: ${RECORD_FILE}" >&2
+		fi
+		[[ -z "$MARKER" ]] || MARKER+=$'\n'
 	fi
 	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s%s' "$MARKER" "$REVIEW")
 
 	gh pr review "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" "--${DECISION}" --body "$COMMENT"
-	if [[ -n "$MARKER" ]]; then
+	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}.posted" ]]; then
 		mv "$RECORD_FILE.posted" "$RECORD_FILE"
-		printf '%s\n' "$COMMENT" >"$(dirname "$RECORD_FILE")/posted.md"
 	fi
+	printf '%s\n' "$COMMENT" >"${SESSION_DIR}/posted.md"
 	echo "✓  Posted → https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}"
 fi

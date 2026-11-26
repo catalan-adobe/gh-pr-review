@@ -93,6 +93,20 @@ def parse_findings:
 		else . end)
 	| .out;
 
+# True when the model's findings block can be used as it is: an array whose every entry is an object with a known
+# severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
+# back to the Markdown, so normalize_findings never drops a finding the reader can see.
+def findings_block_ok:
+	def severity_ok: type == "string" and (ascii_downcase | . == "critical" or . == "important" or . == "minor");
+	type == "array"
+	and all(.[]; type == "object"
+		# Round 2 and later: an entry with an earlier ID may give only its status; the rest comes from the last record.
+		and ((.id | type == "string") as $known
+			| (.severity | severity_ok or ($known and . == null))
+			and (.title | type == "string" or ($known and . == null)))
+		and (.file | . == null or type == "string")
+		and (.line | . == null or type == "number"));
+
 # Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
 def normalize_findings:
 	if type == "array" then
@@ -102,8 +116,9 @@ def normalize_findings:
 			| select(.severity == "critical" or .severity == "important" or .severity == "minor"))
 	else [] end;
 
-# The highest "<prefix><n>" ID in a record's findings, its later list and its last_ids, or 0. The last_ids field
-# keeps the numbers of findings that were not carried (fixed, declined, Later), so an ID is never given twice.
+# The highest "<prefix><n>" ID in a record's findings, its later list and its last_ids, or 0. last_ids keeps the
+# highest numbers even when the lists are empty (a Rethink), cut from the marker, or not carried (fixed, declined,
+# Later), so an ID is never given twice.
 def _last_number($prefix):
 	[((.findings // [])[]?, (.later // [])[]?) | objects | .id | strings
 		| capture("^" + $prefix + "(?<n>\\d+)$").n | tonumber]
@@ -130,13 +145,16 @@ def has_findings_list: type == "object" and (.findings | type) == "array" and .f
 # when Later applies: later true on an Important or Minor finding outside the delta, in an incremental or rebased
 # round ($mode). A Critical one, one in the delta or one in a full round stays a finding. The first entry for an
 # ID wins. Previous open, new or regressed findings the reply leaves out are carried, unverified. A
-# previous record without its findings list (has_findings_list) knows no ID and carries nothing.
-def _track($findings; $prev; $round; $mode):
+# previous record without its findings list (has_findings_list) knows no ID and carries nothing. New IDs start after
+# $floor ({F, L}: the highest numbers in the whole history) and the previous record's.
+def _track($findings; $prev; $round; $mode; $floor):
 	(if $prev | has_findings_list then $prev.findings | map(objects | select(.id | type == "string")) else [] end)
 	as $old
 	| (reduce $old[] as $f ({}; if has($f.id) then . else .[$f.id] = $f end)) as $known
 	| reduce ((if ($findings | type) == "array" then $findings else [] end)[] | objects | _entry) as $e (
-		{seen: {}, findings: [], later: [], f: (($prev // {}) | _last_number("F")), l: (($prev // {}) | _last_number("L"))};
+		{seen: {}, findings: [], later: [],
+			f: ([($prev // {}) | _last_number("F"), (($floor // {}).F | numbers)] | max),
+			l: ([($prev // {}) | _last_number("L"), (($floor // {}).L | numbers)] | max)};
 		if $e.id != null and .seen[$e.id] then .
 		else (if $e.id != null then .seen[$e.id] = true else . end)
 			| if $e.id != null and $known[$e.id] != null then
@@ -170,14 +188,20 @@ def _track($findings; $prev; $round; $mode):
 			| .out),
 		later: .later, last_ids: {F: .f, L: .l}};
 
-# round.json from the run's facts, the findings (block or parser) and the previous record (or null).
-# Round 1 findings carry no id or status: all are new. From round 2, see _track.
+# The ID floor of a history (an array of records): the highest F and L numbers any round used. Older markers have
+# no last_ids: their findings and later IDs seed it.
+def id_floor: map(objects) | {F: (map(_last_number("F")) | max // 0), L: (map(_last_number("L")) | max // 0)};
+
+# round.json from the run's facts, the findings (block or parser) and the previous record (or null). Round 1
+# findings carry no id or status: all are new. From round 2, see _track. New findings are numbered after
+# $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record.
 def build_record($meta; $findings; $prev):
 	($meta.code_review != false) as $code_review
+	| ([($meta.id_floor // {}).F | numbers] + [($prev // {}) | _last_number("F")] | max) as $last
+	| ([($meta.id_floor // {}).L | numbers] + [($prev // {}) | _last_number("L")] | max) as $last_later
 	| ($meta.round | _num) as $round
-	| (if $code_review then _track($findings; $prev; $round; $meta.mode)
-		else {findings: [], later: [], last_ids: {F: (($prev // {}) | _last_number("F")),
-			L: (($prev // {}) | _last_number("L"))}} end) as $t
+	| (if $code_review then _track($findings; $prev; $round; $meta.mode; {F: $last, L: $last_later})
+		else {findings: [], later: [], last_ids: {F: $last, L: $last_later}} end) as $t
 	| $t.findings as $items
 	| def open: select(.status == "open" or .status == "new" or .status == "regressed");
 	def count($s): [$items[] | open | select(.severity == $s)] | length;
@@ -273,22 +297,62 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 		else {round: $prev.round, head_sha: $prev.head_sha,
 			last_ids: {F: ($prev | _last_number("F")), L: ($prev | _last_number("L"))}} end));
 
-# The marker line for a record, for a body of $len characters. One HTML comment: every "--" in the JSON is
-# written "-\u002d". Past 60,000 characters (body, newline and marker) it drops titles, then later, then findings.
-def marker_line($len):
-	def line: "<!-- gh-pr-review:round " + (tojson | gsub("--"; "-\\u002d")) + " -->";
-	def fits: $len + 1 + (line | length) <= 60000;
-	def cut: if type == "array" then map(if type == "object" and has("title") then .title |= _title100 else . end)
-		else . end;
-	(if has("findings") then .findings |= cut else . end)
-	| (if has("later") then .later |= cut else . end)
-	| if fits then . else del(.findings[]?.title, .later[]?.title) end
-	| if fits then . else del(.later) end
-	| if fits then . else del(.findings) end
-	| line;
+# The first line of every body gh-pr-review posts.
+def generated_header: "<!-- gh-pr-review generated -->";
 
-# The record in the last marker line of a body, or nothing.
+# Text as a reader sees it, for matching: Markdown emphasis and backticks removed, whitespace runs as one space.
+def _visible: gsub("[*_`]"; "") | gsub("\\s+"; " ") | _trim;
+
+# The marker line for a record, posted right below the generated header and above $body, the exact review text.
+# One HTML comment: every "--" in the JSON is written "-\u002d". A finding's title and file stay only when the
+# reader can see them in $body (after _visible; a title cut to 100 characters may match part of a line), so the
+# marker never publishes text the review does not show. The whole body (header, newline, marker, newline, review)
+# must fit in 60,000 characters, under GitHub's 65,536: it drops titles, then file, line, first_round and in_delta,
+# then later, then findings (findings_dropped: true). Counts and last_ids always stay. Nothing when even that does
+# not fit.
+def marker_line($body):
+	($body | _visible) as $seen
+	| def shown: type == "string" and (_visible as $t | $t != "" and ($seen | contains($t)));
+	def public: if type == "array" then map(if type == "object" then
+			(if has("title") and .title != null then
+				(.title | _title100) as $t | if $t | shown then .title = $t else del(.title) end
+			else . end)
+			| (if has("file") and .file != null and (.file | shown | not) then del(.file) else . end)
+		else . end) else . end;
+	def line: "<!-- gh-pr-review:round " + (tojson | gsub("--"; "-\\u002d")) + " -->";
+	def fits: (generated_header + "\n" + line + "\n" + $body | length) <= 60000;
+	(if has("findings") then .findings |= public else . end)
+	| (if has("later") then .later |= public else . end)
+	| if fits then . else del(.findings[]?.title, .later[]?.title) end
+	| if fits then . else del(.findings[]?.file, .findings[]?.line, .findings[]?.first_round, .findings[]?.in_delta,
+		.later[]?.file, .later[]?.line, .later[]?.first_round, .later[]?.in_delta) end
+	| if fits then . else del(.later) end
+	| if fits then . else del(.findings) | .findings_dropped = true end
+	| if fits then line else empty end;
+
+# True when a review body is a generated round: its first line is exactly the generated marker (trailing spaces
+# or CR allowed). A review that quotes the marker further down is a person's review.
+def is_generated_review:
+	type == "string" and ((split("\n")[0] // "" | sub("\\s+$"; "")) == generated_header);
+
+def _opt($t): . == null or type == $t;
+
+# A marker record as gh-pr-review writes it: schema 1, a round number, and the optional fields typed.
+def valid_record:
+	type == "object" and .schema == 1 and (.round | type == "number")
+	and all(.source, .mode, .reviewer, .model, .posted_at, .base_sha, .head_sha, .previous_head_sha, .approach,
+		.ready, .decision; _opt("string"))
+	and all(.preview, .code_review, .forced, .findings_dropped; _opt("boolean"))
+	and (.counts | _opt("object") and (. == null or all(.[]; _opt("number"))))
+	and (.last_ids | _opt("object") and (. == null or all(.[]; _opt("number"))))
+	and all(.findings, .later; _opt("array") and (. == null or all(.[]; type == "object"
+		and (.id | _opt("string")) and (.severity | _opt("string")) and (.title | _opt("string"))
+		and (.file | _opt("string")) and (.line | _opt("number")))));
+
+# The record of a generated review: the marker on the line right below the generated marker, when it holds a valid
+# record. Nothing otherwise, and nothing for any other body.
 def marker_record:
-	[split("\n")[] | sub("\r$"; "") | capture("^\\s*<!-- gh-pr-review:round (?<j>\\{.*\\}) -->\\s*$").j]
-	| last
-	| if . == null then empty else (fromjson? // empty) | objects end;
+	select(is_generated_review)
+	| (split("\n")[1] // "" | sub("\r$"; ""))
+	| [capture("^<!-- gh-pr-review:round (?<j>\\{.*\\}) -->\\s*$").j] | .[0]
+	| if . == null then empty else (fromjson? // empty) | select(valid_record) end;

@@ -64,12 +64,19 @@ progress_line() { # <record-json> <previous-record-json-or-null> <decision-json>
 		'include "records"; $record | progress_line($prev; $decision)'
 }
 
-# The hidden marker line for a record file, sized for a body of <body-length> characters.
-marker_line() { # <record-file> <body-length>
-	jq -r -L "${LIB_DIR:?}" --argjson len "$2" 'include "records"; marker_line($len)' "$1"
+# The hidden marker line for a record file, for the review posted below it: a file, or the text itself. Prints
+# nothing when even the smallest marker would push the body past the size cap (see marker_line in records.jq).
+marker_line() { # <record-file> <review-file | review-text>
+	# shellcheck disable=SC2016 # $body and $record are jq variables
+	local program='include "records"; . as $body | $record[0] | marker_line($body)'
+	if [[ -f "$2" ]]; then
+		jq -r -Rs -L "${LIB_DIR:?}" --slurpfile record "$1" "$program" "$2"
+	else
+		printf '%s' "$2" | jq -r -Rs -L "${LIB_DIR:?}" --slurpfile record "$1" "$program"
+	fi
 }
 
-# The record JSON in the last marker line of a body, or nothing.
+# The record of a generated review: the valid marker right below its first line, or nothing.
 marker_record() { # <body>
 	printf '%s' "$1" | jq -c -Rs -L "${LIB_DIR:?}" 'include "records"; marker_record'
 }
@@ -95,7 +102,7 @@ backfill_record() { # <review-json> <previous-record-or-null> <round> <pr-json>
 		! grep -qiE '^#{1,6}[[:space:]].*(critical|important|minor)' <<<"$body"; then
 		code_review=false
 	fi
-	jq -L "${LIB_DIR:?}" -n --argjson review "$1" --argjson prev "${2:-null}" --argjson round "$3" \
+	jq -L "${LIB_DIR:?}" --argjson prev "${2:-null}" --argjson round "$3" \
 		--argjson pr "$4" --arg approach "$approach" --arg ready "$ready" --argjson code_review "$code_review" \
-		'include "records"; backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review)'
+		'include "records"; backfill_record(.; $prev; $round; $pr; $approach; $ready; $code_review)' <<<"$1"
 }

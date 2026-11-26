@@ -59,7 +59,7 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--instructions <text>` | none | Extra guidance for both passes, for example `"Focus on db/; skip style nits"`. For a file: `--instructions "$(cat notes.md)"`. The tool does not post them, and the reviewer is told not to quote them, but the review can still reflect them: use `--no-post` to preview a review shaped by sensitive notes |
 | `--skip-approach` | off | Skip the maintainer's approach pass and run the code review only, for example when the approach is already agreed |
 | `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve, anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
-| `-y`, `--yes` | off | Skip the post confirmation. A loop-check stop then exits with code 3 instead of asking |
+| `-y`, `--yes` | off | Skip the confirmations. A loop-check stop then exits with code 3, and no new commits with code 5, instead of asking |
 | `--check` | off | Run only the loop check (see below) and exit 0, 3 or 5. No clone, no model call |
 | `--json` | off | With `--check`: print the decision as JSON on stdout |
 | `--force-round` | off | Run a round even when the loop check stops it or nothing changed |
@@ -214,11 +214,22 @@ Important) of each round:
   call. In a terminal it asks first; with `-y` (scripts and agents) it exits
   with code 3. The suggested move comes from the history: settle the approach,
   split the PR, or approve and file the rest as follow-ups.
-- **No new commits** since the last round: nothing to review, exit code 5.
+- **No new commits** since the last round: nothing to review. In a terminal it
+  asks "Run round K anyway?" (a second opinion on the same commit); with `-y` it
+  exits with code 5. A round that only judged the approach (a Rethink) leaves
+  the code unreviewed, so a `--skip-approach` run on that commit still runs.
 
 A stop lifts when a person other than the PR author reviews or comments after
 the last round. The author's own replies do not count, so a fix agent posting
-as the author cannot lift its own stop. `--force-round` runs a round anyway.
+as the author cannot lift its own stop. Comments without an identified user
+(a deleted account) do not count either. `--force-round` runs a round anyway,
+without asking, and the record says so (`forced`).
+
+Rounds are numbered in the order GitHub received them. Just before posting,
+the tool reads the rounds again: if someone posted one while this review ran,
+it says who, and asks "Post anyway as round N?" in a terminal (the findings
+are kept, renumbered for the new position). With `-y` it posts nothing, keeps
+the session folder, and exits with code 6.
 
 `gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
 or 5 (no new commits); `--check --json` prints the decision as JSON for
@@ -230,6 +241,7 @@ scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
 | 1 | Error |
 | 3 | Stopped by the loop check |
 | 5 | No new commits since the last round |
+| 6 | History changed while the review ran: someone posted another round; nothing posted |
 
 ## Troubleshooting
 

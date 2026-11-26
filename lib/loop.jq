@@ -50,19 +50,21 @@ def loop_flags($p; $size):
   + (if (($size.lines // 0) > $q.too_big_lines) or (($size.files // 0) > $q.too_big_files)
     then ["too-big"] else [] end);
 
-# The suggested move, from the label and the flags. Only a Nit loop or Churning label gets one.
+# The suggested move, from the label and the flags, as in the spec's table: a Nit loop always gets follow-ups, and
+# the flags choose among the Churning moves. No other label gets one.
 def loop_suggestion($label; $flags):
-  if ($label | loop_bad) | not then null
+  if $label == "nit-loop" then "Approve, and file the remaining findings as follow-ups"
+  elif $label != "churning" then null
   elif $flags | index("approach-stuck") then
     "Settle the approach before the next round: answer the approach questions, or rethink"
   elif $flags | index("too-big") then "Split the PR: each part converges on its own"
-  elif $label == "churning" then
-    "Look at what keeps coming back, and decide it with the author before the next round"
-  else "Approve, and file the remaining findings as follow-ups"
+  else "Look at what keeps coming back, and decide it with the author before the next round"
   end;
 
 # The decision for the next round: nothing-new, then stop, then warn, then run.
 # $head: the PR's head SHA now. $lifted: true when something since the last round lifts a stop.
+# $p.skip_approach: this run reviews the code only. Then a last round on this head that was a Rethink (no code review)
+# is not "nothing new": nobody reviewed that code yet.
 def loop_decide($p; $size; $head; $lifted):
   . as $records
   | loop_labels($p) as $labels
@@ -78,7 +80,8 @@ def loop_decide($p; $size; $head; $lifted):
     series: map(loop_blocking),
     suggestion: loop_suggestion($label; $flags)
   }
-  + if length > 0 and ($head // "") != "" and $records[-1].head_sha == $head then
+  + if length > 0 and ($head // "") != "" and $records[-1].head_sha == $head
+    and ((($p // {}).skip_approach == true and ($records[-1] | loop_code_review | not)) | not) then
     {decision: "nothing-new", reason: "no new commits since round \(length)"}
   elif ($label | loop_bad) and ($prev | loop_bad) and $lifted != true then
     {decision: "stop",
