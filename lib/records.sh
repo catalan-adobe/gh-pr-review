@@ -87,7 +87,7 @@ backfill_record() { # <review-json> <previous-record-or-null> <round> <pr-json>
 		! grep -qiE '^#{1,6}[[:space:]].*(critical|important|minor)' <<<"$body"; then
 		code_review=false
 	fi
-	jq -L "${LIB_DIR:?}" -n --argjson review "$1" --argjson prev "${2:-null}" --argjson round "$3" \
+	jq -L "${LIB_DIR:?}" --argjson prev "${2:-null}" --argjson round "$3" \
 		--argjson pr "$4" --arg approach "$approach" --arg ready "$ready" --argjson code_review "$code_review" \
-		'include "records"; backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review)'
+		'include "records"; backfill_record(.; $prev; $round; $pr; $approach; $ready; $code_review)' <<<"$1"
 }

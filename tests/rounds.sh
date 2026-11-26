@@ -91,6 +91,19 @@ expect "rounds: the marker's head and time stay when GitHub has none" \
 		$(jq -r ".records[1:][] | .head_sha, .reviewer" <<<"$out" | paste -sd, -) == "c1,me,m1,ann" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
+# A history far past the argument limits (128 KiB per argument on Linux, 1 MiB in all on macOS): 20 rounds of
+# about 60,000 characters each.
+cp "$stub/reviews.json" "$stub/reviews.saved"
+jq -n '[range(1; 21) as $r | {schema: 1, round: $r, head_sha: "h\($r)", code_review: true,
+		counts: {open_blocking: 0}, findings: [range(500) | {id: "F\(.)", severity: "minor", title: ("t" * 100)}]}
+	| {body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\nx"), commit_id: .head_sha,
+		submitted_at: "2026-04-\(if .round < 10 then "0" else "" end)\(.round)T00:00:00Z", user: {login: "me"}}]' \
+	>"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "rounds --json: a history past the argument limit" \
+	'[[ $rc == 0 && $(jq -r ".records | length, (.[19].findings | length)" <<<"$out" | paste -sd, -) == "20,500" ]]'
+cp "$stub/reviews.saved" "$stub/reviews.json"
+
 lifted() { # comments-json -> lifted_since's answer for a stop after 2026-01-04
 	printf '%s' "$1" >"$stub/comments.json"
 	PATH="$stub:$PATH" LIB_DIR="$root/lib" bash -c 'for f in "$LIB_DIR"/*.sh; do source "$f"; done

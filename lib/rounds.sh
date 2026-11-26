@@ -29,7 +29,8 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 		facts=$(jq -c '{posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
 			| with_entries(select(.value | type == "string" and . != ""))' <<<"$review")
 		record=$(jq -c --argjson round "$round" --argjson facts "$facts" '. + $facts + {round: $round}' <<<"$record")
-		records=$(jq -c --argjson record "$record" '. + [$record]' <<<"$records")
+		# Records and history go through stdin: a long history must never be one process argument.
+		records=$(printf '%s\n%s\n' "$records" "$record" | jq -cs '.[0] + [.[1]]')
 		previous="$record"
 	done <<<"$reviews"
 	printf '%s\n' "$records"
@@ -118,7 +119,7 @@ cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 	decision=$(loop_decide_json "$records" "$shape" "$(jq -r '.head // ""' <<<"$shape")" "$lifted")
 
 	if [[ "$as_json" == true ]]; then
-		jq -n --argjson records "$records" --argjson decision "$decision" '{records: $records, decision: $decision}'
+		jq --argjson decision "$decision" '{records: ., decision: $decision}' <<<"$records"
 		return 0
 	fi
 
