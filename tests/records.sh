@@ -152,7 +152,8 @@ done
 # ── marker_line and marker_record ───────────────────────────────────────────
 generated() { printf '<!-- gh-pr-review generated -->\n%s\n' "$1"; }
 build_record "$meta" "$(parse_findings "$fixtures/dashes.md")" null >"$tmp/round.json"
-line=$(marker_line "$tmp/round.json" 1000)
+# The review below the marker is the fixture itself, so every title and file is visible to the reader.
+line=$(marker_line "$tmp/round.json" "$fixtures/dashes.md")
 check "marker: one line" "$(wc -l <<<"$line" | tr -d ' ')" 1
 check "marker: one <!--" "$(grep -o -- '<!--' <<<"$line" | wc -l | tr -d ' ')" 1
 check "marker: one -->" "$(grep -o -- '-->' <<<"$line" | wc -l | tr -d ' ')" 1
@@ -161,6 +162,8 @@ body=$(printf '<!-- gh-pr-review generated -->\n%s\n### Approach\n\n**Approach:*
 check "marker: round trip keeps titles" "$(marker_record "$body" | jq -c '[.findings[].title]')" \
 	"$(jq -c '[.findings[].title]' "$tmp/round.json")"
 check "marker: round trip keeps the record" "$(marker_record "$body" | jq -S .)" "$(jq -S . "$tmp/round.json")"
+check "marker: the review as text gives the same line" "$(marker_line "$tmp/round.json" "$(cat "$fixtures/dashes.md")")" \
+	"$line"
 check "marker: verdict lines unchanged" "$(last_verdict 'approach' "$body")" sound
 check "marker_record: a marker example later in the review does not override the record" \
 	"$(marker_record "$(printf '%s\nText.\n%s\n' "$body" "${line/\"round\":2/\"round\":1}")" | jq .round)" 2
@@ -183,15 +186,70 @@ check "is_generated_review: first line only" "$(jq -c -L "$LIB_DIR" 'include "re
 	["<!-- gh-pr-review generated -->\nx", "<!-- gh-pr-review generated -->\t\r", "x\n<!-- gh-pr-review generated -->",
 	 " <!-- gh-pr-review generated -->", "", null]')" "[true,true,false,false,false,false]"
 
-line=$(marker_line "$tmp/round.json" 59000)
-check "marker: 59,000-character body drops titles" "$(grep -c '"title"' <<<"$line" || true)" 0
-check "marker: 59,000-character body keeps findings" \
-	"$(marker_record "$(generated "$line")" | jq '.findings | length')" 4
-check "marker: fits under 60,000" "$((59000 + 1 + ${#line} <= 60000))" 1
-line=$(marker_line "$tmp/round.json" 59800)
-check "marker: no room drops later and findings" "$(marker_record "$(generated "$line")" | jq -c '[has("later"), has("findings")]')" \
-	'[false,false]'
-check "marker: counts stay" "$(marker_record "$(generated "$line")" | jq .counts.open_blocking)" 3
+# Only what the reader sees: a title or file that appears nowhere in the posted review is left out of the marker.
+jq -n '{schema: 1, round: 1, counts: {}, findings: [
+	{id: "F1", title: "Visible   title, with emphasis", file: "src/a_b.js", line: 3},
+	{id: "F2", title: "PRIVATE instructions text", file: "secret/plan.md", line: 1},
+	{id: "F3", title: null, file: null}]}' >"$tmp/private.json"
+line=$(marker_line "$tmp/private.json" $'### Issues\n- **`src/a_b.js:3` — Visible\ntitle, with *emphasis*.** More.')
+check "marker: a visible title and file stay" "$(marker_record "$(generated "$line")" | jq -c '.findings[0] | [.title, .file]')" \
+	'["Visible   title, with emphasis","src/a_b.js"]'
+check "marker: a title and file the reader can't see are left out" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[1] | [has("title"), has("file"), .line]')" '[false,false,1]'
+check "marker: no private text" "$(grep -c -e PRIVATE -e secret <<<"$line" || true)" 0
+check "marker: round.json keeps the private text" "$(jq -r '.findings[1].title' "$tmp/private.json")" \
+	"PRIVATE instructions text"
+
+# The size cap, step by step, on the exact assembled body: header, newline, marker, newline, review.
+jq '.later = [{id: "L1", severity: "minor", file: "src/render.ts", line: 7, title: "Comment says"}]' "$tmp/round.json" \
+	>"$tmp/big.json"
+len() { printf '%s' "$1" | jq -Rs length; }
+header_len=$(len '<!-- gh-pr-review generated -->')
+pad_to() { # n -> $tmp/body.md: the fixture, padded with x to n characters
+	local have
+	have=$(jq -Rs length "$fixtures/dashes.md")
+	{
+		cat "$fixtures/dashes.md"
+		head -c $(($1 - have)) /dev/zero | tr '\0' x
+	} >"$tmp/body.md"
+}
+assembled() { jq -Rs --arg m "$1" '("<!-- gh-pr-review generated -->\n" + $m + "\n" + .) | length' "$tmp/body.md"; }
+# The review length that makes the assembled body exactly 60,000 characters with this marker line.
+fill() { echo $((60000 - header_len - 1 - $(len "$1") - 1)); }
+step() { # name marker-line jq-check
+	check "marker cap, $1: body is exactly 60,000" "$(assembled "$2")" 60000
+	check "marker cap, $1: shape" "$(marker_record "$(generated "$2")" | jq -c "$3")" true
+}
+pad_to 3000
+full=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$full")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "full marker" "$line" '[.findings[], .later[] | has("title")] | all'
+pad_to $(($(fill "$full") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "titles dropped" "$line" '([.findings[], .later[] | has("title")] | any | not) and (.findings[0] | has("file"))'
+pad_to $(($(fill "$line") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "locations dropped" "$line" '(.findings | map(keys) | unique) == [["id", "severity", "status"]] and has("later")'
+pad_to $(($(fill "$line") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "later dropped" "$line" '(has("later") | not) and (.findings | length) == 4'
+pad_to $(($(fill "$line") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "findings dropped" "$line" '(has("findings") | not) and .findings_dropped and .counts.open_blocking == 3
+	and .last_ids == {"F": 4, "L": 0} and .round == 2'
+pad_to $(($(fill "$line") + 1))
+check "marker cap: no room even for counts, no marker" "$(marker_line "$tmp/big.json" "$tmp/body.md")" ""
+check "marker cap: round.json keeps everything" "$(jq -c '[(.findings | length), (.later | length)]' "$tmp/big.json")" \
+	"[4,1]"
 
 # ── backfill_record ─────────────────────────────────────────────────────────
 pr='{"host":"github.com","owner":"o","repo":"r","number":7}'

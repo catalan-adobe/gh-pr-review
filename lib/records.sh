@@ -56,12 +56,19 @@ build_record() { # <meta-json> <findings-json> <previous-record-json-or-null>
 		'include "records"; build_record($meta; $findings; $prev)'
 }
 
-# The hidden marker line for a record file, sized for a body of <body-length> characters.
-marker_line() { # <record-file> <body-length>
-	jq -r -L "${LIB_DIR:?}" --argjson len "$2" 'include "records"; marker_line($len)' "$1"
+# The hidden marker line for a record file, for the review posted below it: a file, or the text itself. Prints
+# nothing when even the smallest marker would push the body past the size cap (see marker_line in records.jq).
+marker_line() { # <record-file> <review-file | review-text>
+	# shellcheck disable=SC2016 # $body and $record are jq variables
+	local program='include "records"; . as $body | $record[0] | marker_line($body)'
+	if [[ -f "$2" ]]; then
+		jq -r -Rs -L "${LIB_DIR:?}" --slurpfile record "$1" "$program" "$2"
+	else
+		printf '%s' "$2" | jq -r -Rs -L "${LIB_DIR:?}" --slurpfile record "$1" "$program"
+	fi
 }
 
-# The record JSON in the last marker line of a body, or nothing.
+# The record of a generated review: the valid marker right below its first line, or nothing.
 marker_record() { # <body>
 	printf '%s' "$1" | jq -c -Rs -L "${LIB_DIR:?}" 'include "records"; marker_record'
 }

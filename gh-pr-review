@@ -944,14 +944,22 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}" ]]; then
 		jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
 			'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted"
-		MARKER=$(marker_line "$RECORD_FILE.posted" "${#REVIEW}")$'\n'
+		# The marker is sized for the exact body below: header, newline, marker, newline, review.
+		if ! MARKER=$(marker_line "$RECORD_FILE.posted" "$REVIEW"); then
+			MARKER=""
+			echo "Warning: could not write the round marker; posting the review without it." >&2
+		elif [[ -z "$MARKER" ]]; then
+			echo "Warning: the review leaves no room for its round marker; posting it without one." >&2
+			echo "    round.json keeps the full record: ${RECORD_FILE}" >&2
+		fi
+		[[ -z "$MARKER" ]] || MARKER+=$'\n'
 	fi
 	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s%s' "$MARKER" "$REVIEW")
 
 	gh pr review "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" "--${DECISION}" --body "$COMMENT"
-	if [[ -n "$MARKER" ]]; then
+	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}.posted" ]]; then
 		mv "$RECORD_FILE.posted" "$RECORD_FILE"
-		printf '%s\n' "$COMMENT" >"$(dirname "$RECORD_FILE")/posted.md"
 	fi
+	printf '%s\n' "$COMMENT" >"${SESSION_DIR}/posted.md"
 	echo "✓  Posted → https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}"
 fi

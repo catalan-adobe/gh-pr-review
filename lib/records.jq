@@ -148,24 +148,43 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 		code_review: $code_review
 	}; (if $code_review then $body | parse_findings else [] end); $prev);
 
-# The marker line for a record, for a body of $len characters. One HTML comment: every "--" in the JSON is
-# written "-\u002d". Past 60,000 characters (body, newline and marker) it drops titles, then later, then findings.
-def marker_line($len):
+# The first line of every body gh-pr-review posts.
+def generated_header: "<!-- gh-pr-review generated -->";
+
+# Text as a reader sees it, for matching: Markdown emphasis and backticks removed, whitespace runs as one space.
+def _visible: gsub("[*_`]"; "") | gsub("\\s+"; " ") | _trim;
+
+# The marker line for a record, posted right below the generated header and above $body, the exact review text.
+# One HTML comment: every "--" in the JSON is written "-\u002d". A finding's title and file stay only when the
+# reader can see them in $body (after _visible; a title cut to 100 characters may match part of a line), so the
+# marker never publishes text the review does not show. The whole body (header, newline, marker, newline, review)
+# must fit in 60,000 characters, under GitHub's 65,536: it drops titles, then file, line, first_round and in_delta,
+# then later, then findings (findings_dropped: true). Counts and last_ids always stay. Nothing when even that does
+# not fit.
+def marker_line($body):
+	($body | _visible) as $seen
+	| def shown: type == "string" and (_visible as $t | $t != "" and ($seen | contains($t)));
+	def public: if type == "array" then map(if type == "object" then
+			(if has("title") and .title != null then
+				(.title | _title100) as $t | if $t | shown then .title = $t else del(.title) end
+			else . end)
+			| (if has("file") and .file != null and (.file | shown | not) then del(.file) else . end)
+		else . end) else . end;
 	def line: "<!-- gh-pr-review:round " + (tojson | gsub("--"; "-\\u002d")) + " -->";
-	def fits: $len + 1 + (line | length) <= 60000;
-	def cut: if type == "array" then map(if type == "object" and has("title") then .title |= _title100 else . end)
-		else . end;
-	(if has("findings") then .findings |= cut else . end)
-	| (if has("later") then .later |= cut else . end)
+	def fits: (generated_header + "\n" + line + "\n" + $body | length) <= 60000;
+	(if has("findings") then .findings |= public else . end)
+	| (if has("later") then .later |= public else . end)
 	| if fits then . else del(.findings[]?.title, .later[]?.title) end
+	| if fits then . else del(.findings[]?.file, .findings[]?.line, .findings[]?.first_round, .findings[]?.in_delta,
+		.later[]?.file, .later[]?.line, .later[]?.first_round, .later[]?.in_delta) end
 	| if fits then . else del(.later) end
-	| if fits then . else del(.findings) end
-	| line;
+	| if fits then . else del(.findings) | .findings_dropped = true end
+	| if fits then line else empty end;
 
 # True when a review body is a generated round: its first line is exactly the generated marker (trailing spaces
 # or CR allowed). A review that quotes the marker further down is a person's review.
 def is_generated_review:
-	type == "string" and ((split("\n")[0] // "" | sub("\\s+$"; "")) == "<!-- gh-pr-review generated -->");
+	type == "string" and ((split("\n")[0] // "" | sub("\\s+$"; "")) == generated_header);
 
 def _opt($t): . == null or type == $t;
 
