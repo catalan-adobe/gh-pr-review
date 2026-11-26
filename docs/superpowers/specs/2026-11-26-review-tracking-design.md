@@ -65,7 +65,8 @@ Out of scope:
 - **Autonomy:** the shepherd starts in draft mode: I approve each action. It is designed and built so that a
   policy can make it fully automatic.
 - **Worktree layout:** `<clone>.reviews/<head-branch>/<N>`, next to the clone.
-- **First step:** this spec. Each phase then gets its own plan and PR, as for the approach pass.
+- **First step:** this spec. Each PR then gets its own plan, as for the approach pass.
+- **Order:** the review flow changes first. See "Order of work" below.
 
 ## Phases
 
@@ -79,6 +80,21 @@ Out of scope:
 | 6 | `gh pr-review gc` | Removes worktrees and refs of closed PRs | 2 |
 
 Phase 6 is small and can ship with phase 2.
+
+### Order of work
+
+The review flow changes first, then the infrastructure, then the overview:
+
+| PR | Contents | What changes for me |
+| --- | --- | --- |
+| 1 | Phase 1, plus the loop check of phase 3 | Runaway loops stop. `rounds` shows a PR's history. |
+| 2 | The rest of phase 3: incremental rounds | Each round checks the earlier findings and reviews what changed. Open findings can reach zero. |
+| 3 | Phases 2 and 6: local clones, review worktrees, `gc` | Faster rounds in my clones. The delta survives force-pushes. |
+| 4+ | Phase 4 (`status`), the dashboard, phase 5 (shepherd) | The overview, then the agent. |
+
+The loop check needs only the blocking count per round, which phase 1 records and backfill already give, so it does
+not wait for incremental rounds. Until PR 2 lands, it works on found counts, which the calibration below is based
+on. Until PR 3 lands, a force-push between rounds means a full round instead of an incremental one.
 
 The terminal dashboard, `gh pr-review dash`, has its own spec:
 [review dashboard](2026-11-26-review-dashboard-design.md). It reads `status --json` (phase 4) and adds no review
@@ -337,17 +353,31 @@ All thresholds live in the config.
 
 The run computes the label of the rounds so far before it starts round K:
 
-- **Warn** after the first Nit loop or Churning round. The run continues. The posted progress line shows the label.
+- **Warn** after the first Nit loop or Churning round. The run continues. The posted review starts with one loop
+  line, for example `**Loop:** Churning · blocking 9, 12, 8 · settle the approach before the next round`. From
+  PR 2, the progress line carries the label instead.
 - **Stop** after two such rounds in a row:
   - Interactive: print the diagnosis (the series, label, flags and suggested move) and ask "Run round K anyway?
     [y/N]".
   - With `-y` (agents and scripts): run nothing, post nothing, write the diagnosis to stderr and to
     `loop-check.md`, and exit with code 3. The shepherd picks it up.
   - `--force-round` runs anyway, and the record says so.
-  - The stop lifts when something changes: a human review, a new approach verdict, a `--full` round, or a label
-    that is no longer Nit loop or Churning.
+  - The stop lifts when something changes: a review or comment after the last round by a person other than the
+    PR author (not a bot, not a gh-pr-review round), a `--full` round, or a label that is no longer Nit loop or
+    Churning. The author's replies do not count: on my own PRs, fix agents post as me, the author, and must not
+    lift their own stop.
+  - Until the state folder exists (PR 3), the diagnosis goes to stderr and to `--check --json` only.
 - **Check only:** `gh pr-review <PR> --check [--json]` computes the label and the decision (run, warn, stop, or
   nothing new) and exits with 0, 3 or 5, without running a round. The dashboard uses it before `r`.
+
+The suggested move comes from the label and the flags:
+
+| Label and flags | Suggested move |
+| --- | --- |
+| Churning with `approach-stuck` | Settle the approach before the next round: answer the approach questions, or rethink |
+| Churning with `too-big` | Split the PR: each part converges on its own |
+| Churning | Look at what keeps coming back, and decide it with the author before the next round |
+| Nit loop | Approve, and file the remaining findings as follow-ups |
 
 Calibration on the real history, before any prompt change (c = Converging or Early, R = Ready, n = Nit loop,
 C = Churning, - = Rethink):
