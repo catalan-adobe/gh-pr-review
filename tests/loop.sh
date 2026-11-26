@@ -164,6 +164,8 @@ eq "suggest churning + approach-stuck" "$(suggest "9 12 8" "1 1 1" "no no no" qq
 eq "suggest churning + too-big" "$(suggest "9 12 8" "1 1 1" "no no no" sss '{"lines":2000,"files":40}')" "$SPLIT"
 eq "suggest churning" "$(suggest "9 12 8" "1 1 1" "no no no" sss '{"lines":100,"files":4}')" "$DECIDE"
 eq "suggest nit loop" "$(suggest "3 2 3" "0 0 0" "no no no" sss '{"lines":100,"files":4}')" "$APPROVE"
+eq "suggest nit loop on a big PR" "$(suggest "3 2 3" "0 0 0" "no no no" sss '{"lines":2000,"files":40}')" "$APPROVE"
+eq "suggest nit loop with approach-stuck" "$(suggest "3 2 3" "0 0 0" "no no no" qqq '{"lines":2000,"files":40}')" "$APPROVE"
 eq "no suggestion when converging" "$(suggest "9 6 2" "1 1 0" "no no no" qqq '{"lines":2000,"files":40}')" -
 
 # loop_text and loop_line.
