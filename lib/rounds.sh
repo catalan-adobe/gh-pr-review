@@ -2,11 +2,13 @@
 # A PR's review rounds, read from GitHub, and the `gh pr-review rounds` subcommand. Functions only.
 
 # Prints the PR's round records as a JSON array, oldest first: the hidden marker of each gh-pr-review review, or a
-# record rebuilt from the review's Markdown (backfill) when the review predates the markers.
+# record rebuilt from the review's Markdown (backfill) when the review predates the markers. A generated review is one
+# whose first line is the generated marker (is_generated_review in lib/records.jq).
 fetch_round_records() { # <host> <owner> <repo> <N>
 	local reviews pr records='[]' previous=null round=0 review record body
-	reviews=$(gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" | jq -cs '
-		add // [] | map(select((.body // "") | contains("<!-- gh-pr-review generated -->")))
+	reviews=$(gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" | jq -cs -L "${LIB_DIR:?}" '
+		include "records";
+		add // [] | map(select(.body | is_generated_review))
 		| sort_by(.submitted_at) | .[] | {body, commit_id, submitted_at, user: {login: .user.login}}') || {
 		echo "Error: could not fetch the reviews of $2/$3#$4 (check gh auth and network)." >&2
 		return 1
@@ -43,12 +45,13 @@ lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 		gh api --hostname "$1" --paginate "repos/$2/$3/issues/$4/comments" &&
 			gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" &&
 			gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/comments"
-	} | jq -s --arg since "$5" --arg author "$6" '
+	} | jq -s -L "${LIB_DIR:?}" --arg since "$5" --arg author "$6" '
+		include "records";
 		[.[] | .[]?] | any(.[];
 			((.submitted_at // .created_at // "") > $since)
 			and ((.user.type // "") != "Bot")
 			and ((.user.login // "") as $login | $login != $author and ($login | endswith("[bot]") | not))
-			and (((.body // "") | contains("<!-- gh-pr-review generated -->")) | not))'); then
+			and ((.body | is_generated_review) | not))'); then
 		printf '%s\n' "$out"
 	else
 		echo "Warning: could not read the PR's comments; the loop check ignores them." >&2

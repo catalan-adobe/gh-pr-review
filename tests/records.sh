@@ -121,6 +121,7 @@ for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixe
 done
 
 # ── marker_line and marker_record ───────────────────────────────────────────
+generated() { printf '<!-- gh-pr-review generated -->\n%s\n' "$1"; }
 build_record "$meta" "$(parse_findings "$fixtures/dashes.md")" null >"$tmp/round.json"
 line=$(marker_line "$tmp/round.json" 1000)
 check "marker: one line" "$(wc -l <<<"$line" | tr -d ' ')" 1
@@ -132,20 +133,36 @@ check "marker: round trip keeps titles" "$(marker_record "$body" | jq -c '[.find
 	"$(jq -c '[.findings[].title]' "$tmp/round.json")"
 check "marker: round trip keeps the record" "$(marker_record "$body" | jq -S .)" "$(jq -S . "$tmp/round.json")"
 check "marker: verdict lines unchanged" "$(last_verdict 'approach' "$body")" sound
-check "marker_record: the last marker wins" \
-	"$(marker_record "$(printf '%s\n%s\n' "${line/\"round\":2/\"round\":1}" "$line")" | jq .round)" 2
-check "marker_record: no marker, nothing" "$(marker_record $'text\n<!-- gh-pr-review generated -->')" ""
-check "marker_record: broken JSON, nothing" "$(marker_record '<!-- gh-pr-review:round {"round": -->')" ""
+check "marker_record: a marker example later in the review does not override the record" \
+	"$(marker_record "$(printf '%s\nText.\n%s\n' "$body" "${line/\"round\":2/\"round\":1}")" | jq .round)" 2
+check "marker_record: no marker, nothing" "$(marker_record $'<!-- gh-pr-review generated -->\ntext')" ""
+check "marker_record: broken JSON, nothing" \
+	"$(marker_record $'<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round {"round": -->')" ""
+check "marker_record: header with trailing CR and spaces" \
+	"$(marker_record $'<!-- gh-pr-review generated --> \r\n'"$line"$'\r\ntext' | jq .round)" 2
+check "marker_record: a quoted header is not a generated review" \
+	"$(marker_record "$(printf 'I saw this:\n<!-- gh-pr-review generated -->\n%s\n' "$line")")" ""
+check "marker_record: a marker that is not right below the header is not read" \
+	"$(marker_record "$(printf '<!-- gh-pr-review generated -->\nText.\n%s\n' "$line")")" ""
+for bad in '"x"' '{"schema":2,"round":1}' '{"schema":1}' '{"schema":1,"round":"1"}' \
+	'{"schema":1,"round":1,"counts":{"critical":"2"}}' '{"schema":1,"round":1,"findings":[{"line":"3"}]}' \
+	'{"schema":1,"round":1,"findings":"F1"}' '{"schema":1,"round":1,"head_sha":7}'; do
+	check "marker_record: invalid record $bad, nothing" \
+		"$(marker_record "$(printf '<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round %s -->\n' "$bad")")" ""
+done
+check "is_generated_review: first line only" "$(jq -c -L "$LIB_DIR" 'include "records"; map(is_generated_review)' <<<'
+	["<!-- gh-pr-review generated -->\nx", "<!-- gh-pr-review generated -->\t\r", "x\n<!-- gh-pr-review generated -->",
+	 " <!-- gh-pr-review generated -->", "", null]')" "[true,true,false,false,false,false]"
 
 line=$(marker_line "$tmp/round.json" 59000)
 check "marker: 59,000-character body drops titles" "$(grep -c '"title"' <<<"$line" || true)" 0
 check "marker: 59,000-character body keeps findings" \
-	"$(marker_record "$line" | jq '.findings | length')" 4
+	"$(marker_record "$(generated "$line")" | jq '.findings | length')" 4
 check "marker: fits under 60,000" "$((59000 + 1 + ${#line} <= 60000))" 1
 line=$(marker_line "$tmp/round.json" 59800)
-check "marker: no room drops later and findings" "$(marker_record "$line" | jq -c '[has("later"), has("findings")]')" \
+check "marker: no room drops later and findings" "$(marker_record "$(generated "$line")" | jq -c '[has("later"), has("findings")]')" \
 	'[false,false]'
-check "marker: counts stay" "$(marker_record "$line" | jq .counts.open_blocking)" 3
+check "marker: counts stay" "$(marker_record "$(generated "$line")" | jq .counts.open_blocking)" 3
 
 # ── backfill_record ─────────────────────────────────────────────────────────
 pr='{"host":"github.com","owner":"o","repo":"r","number":7}'

@@ -225,6 +225,14 @@ expect "loop stop: a forced round shows the loop line" '[[ $body == *"**Loop:** 
 comment_by dave User >"$stub/rest-comments.json"
 run
 expect "loop stop: a comment by another person lifts it" '[[ $rc == 0 && $calls == 2 && $(jq -r ".loop.decision" <<<"$record") == warn ]]'
+echo '[]' >"$stub/rest-comments.json"
+rounds_with 9 12 8 10 | jq -c '. + [{user: {login: "dave", type: "User"}, state: "COMMENTED", commit_id: "h4",
+	submitted_at: "2026-02-01T00:00:00Z", body: "Why does this post\n<!-- gh-pr-review generated -->\nin the body?"}]' \
+	>"$stub/rest-reviews.json"
+run
+expect "loop stop: a human review quoting the marker is not a round, and lifts it" \
+	'[[ $rc == 0 && $calls == 2 && $(jq -r ".round, .loop.decision" <<<"$record" | paste -sd, -) == "5,warn" ]]'
+rounds_with 9 12 8 10 >"$stub/rest-reviews.json"
 comment_by bob User >"$stub/rest-comments.json"
 run
 expect "loop stop: the PR author's comment does not lift it" '[[ $rc == 3 && $calls == 0 ]]'

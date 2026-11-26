@@ -139,8 +139,29 @@ def marker_line($len):
 	| if fits then . else del(.findings) end
 	| line;
 
-# The record in the last marker line of a body, or nothing.
+# True when a review body is a generated round: its first line is exactly the generated marker (trailing spaces
+# or CR allowed). A review that quotes the marker further down is a person's review.
+def is_generated_review:
+	type == "string" and ((split("\n")[0] // "" | sub("\\s+$"; "")) == "<!-- gh-pr-review generated -->");
+
+def _opt($t): . == null or type == $t;
+
+# A marker record as gh-pr-review writes it: schema 1, a round number, and the optional fields typed.
+def valid_record:
+	type == "object" and .schema == 1 and (.round | type == "number")
+	and all(.source, .mode, .reviewer, .model, .posted_at, .base_sha, .head_sha, .previous_head_sha, .approach,
+		.ready, .decision; _opt("string"))
+	and all(.preview, .code_review, .forced, .findings_dropped; _opt("boolean"))
+	and (.counts | _opt("object") and (. == null or all(.[]; _opt("number"))))
+	and (.last_ids | _opt("object") and (. == null or all(.[]; _opt("number"))))
+	and all(.findings, .later; _opt("array") and (. == null or all(.[]; type == "object"
+		and (.id | _opt("string")) and (.severity | _opt("string")) and (.title | _opt("string"))
+		and (.file | _opt("string")) and (.line | _opt("number")))));
+
+# The record of a generated review: the marker on the line right below the generated marker, when it holds a valid
+# record. Nothing otherwise, and nothing for any other body.
 def marker_record:
-	[split("\n")[] | sub("\r$"; "") | capture("^\\s*<!-- gh-pr-review:round (?<j>\\{.*\\}) -->\\s*$").j]
-	| last
-	| if . == null then empty else (fromjson? // empty) | objects end;
+	select(is_generated_review)
+	| (split("\n")[1] // "" | sub("\r$"; ""))
+	| [capture("^<!-- gh-pr-review:round (?<j>\\{.*\\}) -->\\s*$").j] | .[0]
+	| if . == null then empty else (fromjson? // empty) | select(valid_record) end;
