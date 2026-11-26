@@ -347,6 +347,7 @@ expect "round 3: open IDs are mandatory, fixed ones only if back" 'grep -q "Ever
 expect "round 3: the code prompt has the three rules" 'grep -q "## Previous round" "$stub/code-prompt.txt" && grep -q "Check every earlier finding" "$stub/code-prompt.txt" && grep -q "Review what changed since round 2 in full" "$stub/code-prompt.txt" && grep -q "Outside what changed, raise only Critical" "$stub/code-prompt.txt"'
 expect "round 3: the diff since the previous head" 'grep -qF "git diff --stat $H2..aaaa" "$stub/code-prompt.txt" && grep -qF "git diff $H2..aaaa" "$stub/code-prompt.txt"'
 expect "round 3: the later-round output format" 'grep -q "Fixed since the last round" "$stub/code-prompt.txt" && grep -q "\"id\": \"F3\" or null" "$stub/code-prompt.txt"'
+expect "round 3: the findings block asks for a decline's reason" 'grep -qF "\"reason\": \"<the quoted reason>\" or null" "$stub/code-prompt.txt" && grep -qF "Quote it, in \`\"reason\"\`" "$stub/code-prompt.txt"'
 expect "round 3: previous-findings.md lists the open findings first" '[[ $(session_file previous-findings.md | sed -n 1,2p) == "F1 · important · a.js:3 · thing breaks"$'"'"'\n'"'"'"F3 · critical · c.js:9 · data loss" ]]'
 expect "round 3: then the fixed ones, to catch a regression" '[[ $(session_file previous-findings.md | sed -n 4,5p) == "Fixed in round 2 (report one only if the problem is back, as open):"$'"'"'\n'"'"'"F2 · minor · b.js:1 · nit" ]]'
 expect "round 3: previous-review.md is round 2 without markers" '[[ $(session_file previous-review.md) == *"F3 · \`c.js:9\`"* && $(session_file previous-review.md) != *"<!--"* ]]'
@@ -398,6 +399,11 @@ setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[{"i
 two_rounds
 run
 expect "ready override: Yes with a blocking finding open posts as comment" '[[ $flag == --comment && $(jq -r ".ready, .ready_overridden" <<<"$record" | paste -sd, -) == "yes,true" ]] && grep -q "blocking findings are still open" "$stub/out.log"'
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[{"id":"F3","status":"declined","severity":"critical","in_delta":false,"later":false},{"id":"F1","status":"fixed","in_delta":false,"later":false},{"id":null,"status":"new","severity":"critical","file":"x.js","line":1,"title":"leaks a token","in_delta":false,"later":true}]\n```'
+two_rounds
+run
+expect "model output cannot drop a blocker: no reason, no decline; a Critical is never Later" '[[ $flag == --comment && $(jq -r "([.findings[] | .id + \":\" + .status + (if .unverified then \"?\" else \"\" end)] | join(\" \")), (.later | length), .counts.open_blocking" <<<"$record" | paste -sd, -) == "F3:open? F1:fixed F4:new,0,2" ]]'
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n```'
 two_rounds

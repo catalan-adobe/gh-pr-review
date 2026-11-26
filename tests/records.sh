@@ -180,7 +180,7 @@ check "in_delta kept as a boolean" "$(r3 '[{"severity":"minor","title":"t","in_d
 rec=$(build_record "$(jq -c '.ready = "yes"' <<<"$meta2")" '[{"id":"F1","status":"open"}]' "$prev2")
 check "ready yes with open blocking: overridden" "$(jq -c '[.ready, .ready_overridden]' <<<"$rec")" '["yes",true]'
 rec=$(build_record "$(jq -c '.ready = "yes"' <<<"$meta2")" \
-	'[{"id":"F1","status":"fixed"},{"id":"F4","status":"open"},{"id":"F5","status":"declined"}]' "$prev2")
+	'[{"id":"F1","status":"fixed"},{"id":"F4","status":"open"},{"id":"F5","status":"declined","reason":"out of scope"}]' "$prev2")
 check "ready yes, nothing blocking: not overridden" "$(jq -c '[.ready_overridden, .counts.open_blocking]' \
 	<<<"$rec")" '[false,0]'
 check "ready no: not overridden" "$(r3 '[]' | jq .ready_overridden)" false
@@ -191,11 +191,41 @@ rec=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <<<"$
 check "rethink after round 2: no findings, null counts" "$(jq -c '[.findings, .later, ([.counts[]] | unique)]' \
 	<<<"$rec")" '[[],[],[null]]'
 
+# Model output that would drop a blocker: a decline needs a reason, Later needs an eligible finding.
+rec=$(r3 '[{"id":"F1","status":"declined"},{"id":"F5","status":"declined","reason":"  "}]')
+check "declined without a reason: open, unverified" "$(one "$rec" F1),$(one "$rec" F5)" \
+	'["open",1,"critical","a.ts",1,"one",true],["open",1,"important","e.ts",5,"five",true]'
+check "declined without a reason: still blocking" "$(jq -c '.counts | [.open_blocking, .declined]' <<<"$rec")" '[2,0]'
+rec=$(r3 '[{"id":"F1","status":"declined","reason":"\"not in this PR\" (alice)"}]')
+check "declined with a reason: declined" "$(one "$rec" F1)" '["declined",1,"critical","a.ts",1,"one",false]'
+later_of() { # <meta> <entry> -> where it went: later or the findings, with its status
+	build_record "$1" "[$2]" "$prev2" | jq -r 'if (.later | length) > 0 then "later"
+		else .findings[] | select(.status == "new") | "finding:" + .severity end'
+}
+check "later: an Important outside the delta, incremental" \
+	"$(later_of "$meta2" '{"severity":"important","title":"x","later":true}')" later
+check "later: a Minor outside the delta, rebased" \
+	"$(later_of "$(jq -c '.mode = "rebased"' <<<"$meta2")" '{"severity":"minor","title":"x","later":true}')" later
+check "later: a Critical stays a finding" \
+	"$(later_of "$meta2" '{"severity":"critical","title":"x","later":true}')" finding:critical
+check "later: one in the delta stays a finding" \
+	"$(later_of "$meta2" '{"severity":"important","title":"x","later":true,"in_delta":true}')" finding:important
+check "later: a full round has no Later" \
+	"$(later_of "$(jq -c '.mode = "full"' <<<"$meta2")" '{"severity":"important","title":"x","later":true}')" \
+	finding:important
+check "later: no mode, no Later" \
+	"$(later_of "$(jq -c 'del(.mode)' <<<"$meta2")" '{"severity":"minor","title":"x","later":true}')" finding:minor
+rec=$(build_record "$(jq -c '.mode = "full" | .ready = "yes"' <<<"$meta2")" \
+	'[{"id":"F1","status":"fixed"},{"id":"F4","status":"fixed"},{"id":"F5","status":"fixed"},
+	{"severity":"critical","title":"x","later":true}]' "$prev2")
+check "later: a Critical marked later in a full round blocks the approval" \
+	"$(jq -c '[.counts.open_blocking, .ready_overridden, (.later | length)]' <<<"$rec")" '[1,true,0]'
+
 # A full round 3 on the round 2 record: every status moves.
 reply='[
 	{"id":"F2","status":"open","in_delta":true},
 	{"id":"F5","status":"fixed"},
-	{"id":"F4","status":"declined","title":"four, declined"},
+	{"id":"F4","status":"declined","title":"four, declined","reason":"\"Kept on purpose\" (bob)"},
 	{"id":"F2","status":"fixed"},
 	{"id":"F3","status":"open"},
 	{"id":"F77","status":"fixed","severity":"minor","file":"g.ts","line":7,"title":"unknown"},

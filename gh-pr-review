@@ -734,7 +734,8 @@ previous_round_section() {
 Check each one against the current code and give it a status:
    - `fixed`: the current code no longer has the problem.
    - `open`: it is still there. A fix attempt that did not work stays open: say what is still wrong.
-   - `declined`: only when the PR discussion gives a reason you accept. Quote it.
+   - `declined`: only when the PR discussion gives a reason you accept. Quote it, in `"reason"`: a decline without
+     one stays open.
 
    Every open ID listed is mandatory: it appears once in the findings block, with its status. Never invent IDs.
 RULE1
@@ -1049,13 +1050,16 @@ object per open earlier finding listed in previous-findings.md (every one of the
 finding that came back (as open), then one per new finding and per Later item:
 `{"id": "F3" or null, "status": "open" | "fixed" | "declined" | "new", "severity": "critical" | "important" |
 "minor", "file": "<path>" or null, "line": <number> or null, "title": "<the finding in one short sentence>",
-"in_delta": true | false, "later": true | false}`. An earlier finding keeps its ID; a new finding or Later item has
-`"id": null` and `"status": "new"`. Keep the Markdown above exactly as it is: the block is extra, read by tooling,
-and removed before the review is posted. For example:
+"in_delta": true | false, "later": true | false, "reason": "<the quoted reason>" or null}`. An earlier finding keeps
+its ID; a new finding or Later item has `"id": null` and `"status": "new"`. `"reason"` is for a declined finding: the
+quote from the discussion. `"later": true` is only for an Important or Minor finding outside what changed, never in
+a full review. Keep the Markdown above exactly as it is: the block is extra, read by tooling, and removed before the
+review is posted. For example:
 
 ```json findings
 [{"id": "F3", "status": "open", "severity": "critical", "file": "src/api.ts", "line": 141, "title": "Webhook payload is trusted without verification", "in_delta": false, "later": false},
  {"id": "F4", "status": "fixed", "severity": "important", "file": "src/db.ts", "line": 20, "title": "Pool is never closed", "in_delta": false, "later": false},
+ {"id": "F5", "status": "declined", "severity": "minor", "file": "src/log.ts", "line": 7, "title": "Log level is hard-coded", "in_delta": false, "later": false, "reason": "\"We set it per deploy, not per file\" (@alice)"},
  {"id": null, "status": "new", "severity": "important", "file": "src/retry.ts", "line": 12, "title": "Retry loop has no upper bound", "in_delta": true, "later": false}]
 ```
 

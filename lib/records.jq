@@ -80,7 +80,7 @@ def _entry:
 	{id: (.id | _str | if . then _trim else null end), status: (.status | if type == "string" then ascii_downcase | _trim
 		else null end), severity: (.severity | if type == "string" then ascii_downcase | _trim else null end),
 		file: (.file | _str), line: (.line | _num), title: (.title | _str | _title100), in_delta: (.in_delta == true),
-		later: (.later == true)};
+		later: (.later == true), reason: (.reason | _str)};
 
 # True when a record still has its findings list. A marker cut to fit GitHub's size cap can keep the counts but drop
 # the list (findings_dropped): an empty list is a round with no findings, a missing one is unknown.
@@ -88,11 +88,13 @@ def has_findings_list: type == "object" and (.findings | type) == "array" and .f
 
 # The findings of a code-review round, from the model's array and the previous record's findings.
 # Out: {findings, later, last_ids}. Known IDs keep their ID and first round, with the model's status (open on an
-# ID last marked fixed is regressed; a status outside fixed, open, declined is open and unverified). Entries
-# without an ID, or with an ID the previous record doesn't have, are new: F<n>, or L<n> with later true. The first
-# entry for an ID wins. Previous open, new or regressed findings the reply leaves out are carried, unverified. A
+# ID last marked fixed is regressed; declined without a reason, or a status outside fixed, open, declined, is open
+# and unverified). Entries without an ID, or with an ID the previous record doesn't have, are new: F<n>, or L<n>
+# when Later applies: later true on an Important or Minor finding outside the delta, in an incremental or rebased
+# round ($mode). A Critical one, one in the delta or one in a full round stays a finding. The first entry for an
+# ID wins. Previous open, new or regressed findings the reply leaves out are carried, unverified. A
 # previous record without its findings list (has_findings_list) knows no ID and carries nothing.
-def _track($findings; $prev; $round):
+def _track($findings; $prev; $round; $mode):
 	(if $prev | has_findings_list then $prev.findings | map(objects | select(.id | type == "string")) else [] end)
 	as $old
 	| (reduce $old[] as $f ({}; if has($f.id) then . else .[$f.id] = $f end)) as $known
@@ -102,7 +104,7 @@ def _track($findings; $prev; $round):
 		else (if $e.id != null then .seen[$e.id] = true else . end)
 			| if $e.id != null and $known[$e.id] != null then
 				$known[$e.id] as $p
-				| (if $e.status == "fixed" or $e.status == "declined" then {status: $e.status}
+				| (if $e.status == "fixed" or $e.status == "declined" and $e.reason != null then {status: $e.status}
 					elif $e.status == "open" or $e.status == "regressed" then
 						{status: (if $p.status == "fixed" or $p.status == "regressed" and $e.status == "regressed"
 							then "regressed" else "open" end)}
@@ -113,7 +115,8 @@ def _track($findings; $prev; $round):
 					file: ($e.file // $p.file), line: ($e.line // $p.line), title: ($e.title // $p.title)}
 					+ (if $s.unverified then {unverified: true} else {} end)]
 			elif ($e.severity | _severity_ok) | not then .
-			elif $e.later then
+			elif $e.later and ($e.severity == "important" or $e.severity == "minor") and ($e.in_delta | not)
+				and ($mode == "incremental" or $mode == "rebased") then
 				.l += 1
 				| .later += [{id: "L\(.l)", severity: $e.severity, file: $e.file, line: $e.line, title: $e.title}]
 			else
@@ -135,7 +138,7 @@ def _track($findings; $prev; $round):
 def build_record($meta; $findings; $prev):
 	($meta.code_review != false) as $code_review
 	| ($meta.round | _num) as $round
-	| (if $code_review then _track($findings; $prev; $round)
+	| (if $code_review then _track($findings; $prev; $round; $meta.mode)
 		else {findings: [], later: [], last_ids: {F: (($prev // {}) | _last_number("F")),
 			L: (($prev // {}) | _last_number("L"))}} end) as $t
 	| $t.findings as $items
