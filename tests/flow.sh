@@ -515,6 +515,13 @@ expect "round 3: the owner starts from its previous verdict" 'grep -q "## Your p
 expect "round 3: previous-approach.md is the Approach section" '[[ $(session_file previous-approach.md) == "### Approach"*"**Approach:** Sound" ]]'
 expect "round 3: the record keeps the label of this round" '[[ $(jq -r ".loop.label" <<<"$record") == churning ]]'
 
+# Later only outside the files the delta touched: d.js is in delta-files.txt, whatever in_delta says.
+setup $'### Approach\n\n**Approach:** Sound' "${round3//\"e.js\"/\"d.js\"}"
+two_rounds
+run
+expect "round 3: a Later entry in a touched file stays a finding" \
+	'[[ $(session_file delta-files.txt) == d.js && $(jq -r "(.later | length), ([.findings[] | select(.file == \"d.js\") | .severity] | join(\" \"))" <<<"$record" | paste -sd, -) == "0,important minor" ]]'
+
 setup $'### Approach\n\nUnchanged since round 2: it still fits.\n\n**Approach:** Sound' "$round3"
 two_rounds
 run

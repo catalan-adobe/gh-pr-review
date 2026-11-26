@@ -147,11 +147,13 @@ def known_ids: if has_findings_list then [.findings[] | objects | .id | strings]
 # ID last marked fixed is regressed; declined without a reason, or a status outside fixed, open, declined, is open
 # and unverified, with the previous severity). Entries without an ID, or with an ID the previous record doesn't have, are new: F<n>, or L<n>
 # when Later applies: later true on an Important or Minor finding outside the delta, in an incremental or rebased
-# round ($mode). A Critical one, one in the delta or one in a full round stays a finding. The first entry for an
+# round ($mode), with a file that is not in $delta_files (the files the delta touched). A Critical one, one marked in
+# the delta, one in a touched file, one without a file, any when the file list is unknown (not an array) and any in
+# a full round stay findings. The first entry for an
 # ID wins. Previous open, new or regressed findings the reply leaves out are carried, unverified. A
 # previous record without its findings list (has_findings_list) knows no ID and carries nothing. New IDs start after
 # $floor ({F, L}: the highest numbers in the whole history) and the previous record's.
-def _track($findings; $prev; $round; $mode; $floor):
+def _track($findings; $prev; $round; $mode; $floor; $delta_files):
 	(if $prev | has_findings_list then $prev.findings | map(objects | select(.id | type == "string")) else [] end)
 	as $old
 	| (reduce $old[] as $f ({}; if has($f.id) then . else .[$f.id] = $f end)) as $known
@@ -176,7 +178,8 @@ def _track($findings; $prev; $round; $mode; $floor):
 					+ (if $s.unverified then {unverified: true} else {} end)]
 			elif ($e.severity | _severity_ok) | not then .
 			elif $e.later and ($e.severity == "important" or $e.severity == "minor") and ($e.in_delta | not)
-				and ($mode == "incremental" or $mode == "rebased") then
+				and ($mode == "incremental" or $mode == "rebased") and ($delta_files | type) == "array"
+				and ($e.file | type) == "string" and ($delta_files | index([$e.file | ltrimstr("./")]) == null) then
 				.l += 1
 				| .later += [{id: "L\(.l)", severity: $e.severity, file: $e.file, line: $e.line, title: $e.title}]
 			else
@@ -199,13 +202,14 @@ def id_floor: map(objects) | {F: (map(_last_number("F")) | max // 0), L: (map(_l
 
 # round.json from the run's facts, the findings (block or parser) and the previous record (or null). Round 1
 # findings carry no id or status: all are new. From round 2, see _track. New findings are numbered after
-# $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record.
+# $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record. $meta.delta_files: the paths
+# the delta touched (changed_files), for Later.
 def build_record($meta; $findings; $prev):
 	($meta.code_review != false) as $code_review
 	| ([($meta.id_floor // {}).F | numbers] + [($prev // {}) | _last_number("F")] | max) as $last
 	| ([($meta.id_floor // {}).L | numbers] + [($prev // {}) | _last_number("L")] | max) as $last_later
 	| ($meta.round | _num) as $round
-	| (if $code_review then _track($findings; $prev; $round; $meta.mode; {F: $last, L: $last_later})
+	| (if $code_review then _track($findings; $prev; $round; $meta.mode; {F: $last, L: $last_later}; $meta.delta_files)
 		else {findings: [], later: [], last_ids: {F: $last, L: $last_later}} end) as $t
 	| $t.findings as $items
 	| def open: select(.status == "open" or .status == "new" or .status == "regressed");

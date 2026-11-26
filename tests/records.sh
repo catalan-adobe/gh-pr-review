@@ -126,7 +126,7 @@ check "rethink: not overridden, no later" "$(jq -c '[.ready_overridden, .later]'
 # ── build_record with statuses (round 2 and later) ──────────────────────────
 # Round 2: F1 open, F2 fixed, F3 declined, F4 new, F5 regressed, L6 later. F and L number apart, each from its
 # highest.
-meta2=$(jq -c '.round = 3 | .mode = "incremental" | .mode_reason = null | .ready = "no"' <<<"$meta")
+meta2=$(jq -c '.round = 3 | .mode = "incremental" | .mode_reason = null | .ready = "no" | .delta_files = ["t.ts"]' <<<"$meta")
 prev2=$(jq -nc '{round: 2, head_sha: "aaa", counts: {open_blocking: 3}, findings: [
 	{id: "F1", severity: "critical", status: "open", first_round: 1, in_delta: false, file: "a.ts", line: 1, title: "one"},
 	{id: "F2", severity: "important", status: "fixed", first_round: 1, in_delta: false, file: "b.ts", line: 2, title: "two"},
@@ -148,14 +148,14 @@ check "fixed then open: regressed" "$(one "$rec" F2)" '["regressed",1,"important
 check "regressed counts as blocking" "$(jq -c '.counts | [.regressed, .open_blocking]' <<<"$rec")" '[1,3]'
 rec=$(r3 '[{"id":"F5","status":"open"}]')
 check "regressed then open: open" "$(one "$rec" F5)" '["open",1,"important","e.ts",5,"five",false]'
-rec=$(r3 '[{"severity":"minor","title":"n1"},{"severity":"important","title":"l1","later":true},
+rec=$(r3 '[{"severity":"minor","title":"n1"},{"severity":"important","file":"l.ts","title":"l1","later":true},
 	{"severity":"critical","title":"n2","in_delta":true}]')
 check "new ids continue after F5 and L6" "$(jq -c '[.findings[] | select(.status == "new") | .id], [.later[].id]' \
 	<<<"$rec" | tr -d '\n')" '["F6","F7"]["L7"]'
 check "new finding fields" "$(jq -c '.findings[] | select(.id == "F7") | [.status, .first_round, .in_delta]' \
 	<<<"$rec")" '["new",3,true]'
 check "later item fields" "$(jq -c '.later[0]' <<<"$rec")" \
-	'{"id":"L7","severity":"important","file":null,"line":null,"title":"l1"}'
+	'{"id":"L7","severity":"important","file":"l.ts","line":null,"title":"l1"}'
 check "last ids" "$(jq -c '.last_ids' <<<"$rec")" '{"F":7,"L":7}'
 check "later items not blocking" "$(jq -c '.counts | [.later, .important]' <<<"$rec")" '[1,1]'
 check "previous later not carried" "$(jq -c '[.later[].id] | index("L6")' <<<"$rec")" null
@@ -210,18 +210,28 @@ later_of() { # <meta> <entry> -> where it went: later or the findings, with its 
 		else .findings[] | select(.status == "new") | "finding:" + .severity end'
 }
 check "later: an Important outside the delta, incremental" \
-	"$(later_of "$meta2" '{"severity":"important","title":"x","later":true}')" later
+	"$(later_of "$meta2" '{"severity":"important","file":"x.ts","title":"x","later":true}')" later
 check "later: a Minor outside the delta, rebased" \
-	"$(later_of "$(jq -c '.mode = "rebased"' <<<"$meta2")" '{"severity":"minor","title":"x","later":true}')" later
+	"$(later_of "$(jq -c '.mode = "rebased"' <<<"$meta2")" '{"severity":"minor","file":"x.ts","title":"x","later":true}')" later
 check "later: a Critical stays a finding" \
 	"$(later_of "$meta2" '{"severity":"critical","title":"x","later":true}')" finding:critical
 check "later: one in the delta stays a finding" \
-	"$(later_of "$meta2" '{"severity":"important","title":"x","later":true,"in_delta":true}')" finding:important
+	"$(later_of "$meta2" '{"severity":"important","file":"x.ts","title":"x","later":true,"in_delta":true}')" finding:important
 check "later: a full round has no Later" \
-	"$(later_of "$(jq -c '.mode = "full"' <<<"$meta2")" '{"severity":"important","title":"x","later":true}')" \
+	"$(later_of "$(jq -c '.mode = "full"' <<<"$meta2")" '{"severity":"important","file":"x.ts","title":"x","later":true}')" \
 	finding:important
 check "later: no mode, no Later" \
-	"$(later_of "$(jq -c 'del(.mode)' <<<"$meta2")" '{"severity":"minor","title":"x","later":true}')" finding:minor
+	"$(later_of "$(jq -c 'del(.mode)' <<<"$meta2")" '{"severity":"minor","file":"x.ts","title":"x","later":true}')" finding:minor
+# The delta's file list decides, not in_delta: a touched file, a missing file or an unknown list keeps the finding.
+check "later: one in a file the delta touched stays a finding" \
+	"$(later_of "$meta2" '{"severity":"important","file":"t.ts","title":"x","later":true,"in_delta":false}')" finding:important
+check "later: a ./ path in a touched file stays a finding" \
+	"$(later_of "$meta2" '{"severity":"minor","file":"./t.ts","title":"x","later":true}')" finding:minor
+check "later: one without a file stays a finding" \
+	"$(later_of "$meta2" '{"severity":"important","title":"x","later":true}')" finding:important
+check "later: no file list, no Later" \
+	"$(later_of "$(jq -c 'del(.delta_files)' <<<"$meta2")" '{"severity":"minor","file":"x.ts","title":"x","later":true}')" \
+	finding:minor
 rec=$(build_record "$(jq -c '.mode = "full" | .ready = "yes"' <<<"$meta2")" \
 	'[{"id":"F1","status":"fixed"},{"id":"F4","status":"fixed"},{"id":"F5","status":"fixed"},
 	{"severity":"critical","title":"x","later":true}]' "$prev2")
