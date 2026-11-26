@@ -141,7 +141,7 @@ def has_findings_list: type == "object" and (.findings | type) == "array" and .f
 # The findings of a code-review round, from the model's array and the previous record's findings.
 # Out: {findings, later, last_ids}. Known IDs keep their ID and first round, with the model's status (open on an
 # ID last marked fixed is regressed; declined without a reason, or a status outside fixed, open, declined, is open
-# and unverified). Entries without an ID, or with an ID the previous record doesn't have, are new: F<n>, or L<n>
+# and unverified, with the previous severity). Entries without an ID, or with an ID the previous record doesn't have, are new: F<n>, or L<n>
 # when Later applies: later true on an Important or Minor finding outside the delta, in an incremental or rebased
 # round ($mode). A Critical one, one in the delta or one in a full round stays a finding. The first entry for an
 # ID wins. Previous open, new or regressed findings the reply leaves out are carried, unverified. A
@@ -165,7 +165,8 @@ def _track($findings; $prev; $round; $mode; $floor):
 							then "regressed" else "open" end)}
 					else {status: "open", unverified: true} end) as $s
 				| .findings += [{id: $e.id,
-					severity: (if ($e.severity | _severity_ok) then $e.severity else $p.severity end),
+					# A rejected status update (unverified) keeps the previous severity: it cannot downgrade a blocker.
+					severity: (if ($e.severity | _severity_ok) and ($s.unverified | not) then $e.severity else $p.severity end),
 					status: $s.status, first_round: ($p.first_round // $round), in_delta: $e.in_delta,
 					file: ($e.file // $p.file), line: ($e.line // $p.line), title: ($e.title // $p.title)}
 					+ (if $s.unverified then {unverified: true} else {} end)]

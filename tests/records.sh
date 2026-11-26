@@ -199,6 +199,10 @@ rec=$(r3 '[{"id":"F1","status":"declined"},{"id":"F5","status":"declined","reaso
 check "declined without a reason: open, unverified" "$(one "$rec" F1),$(one "$rec" F5)" \
 	'["open",1,"critical","a.ts",1,"one",true],["open",1,"important","e.ts",5,"five",true]'
 check "declined without a reason: still blocking" "$(jq -c '.counts | [.open_blocking, .declined]' <<<"$rec")" '[2,0]'
+rec=$(r3 '[{"id":"F1","status":"declined","severity":"minor"}]')
+check "declined without a reason: no severity downgrade" "$(one "$rec" F1)" '["open",1,"critical","a.ts",1,"one",true]'
+check "declined without a reason: the Critical still blocks" \
+	"$(jq -c '[.counts.open_blocking, .counts.critical, .counts.minor]' <<<"$rec")" '[2,1,1]'
 rec=$(r3 '[{"id":"F1","status":"declined","reason":"\"not in this PR\" (alice)"}]')
 check "declined with a reason: declined" "$(one "$rec" F1)" '["declined",1,"critical","a.ts",1,"one",false]'
 later_of() { # <meta> <entry> -> where it went: later or the findings, with its status
