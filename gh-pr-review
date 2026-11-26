@@ -13,10 +13,11 @@
 #   --skip-approach Skip the maintainer's approach pass; run the code review only
 #   --instructions <text>  Extra guidance for both passes (a file: "$(cat notes.md)")
 #   --decision <d>  comment | approve | request-changes (default: from "Ready to merge?")
-#   -y, --yes       Skip confirmation prompt before posting (a loop-check stop then exits 3)
+#   -y, --yes       Skip confirmation prompts (a loop-check stop then exits 3, no new commits exits 5)
 #   --check         Run only the loop check: print it and exit 0 (run), 3 (stop) or 5 (no new commits)
 #   --json          With --check, print the decision as JSON
 #   --force-round   Run a round even when the loop check stops it or nothing changed
+#                   (in a terminal, without -y, both ask "Run round K anyway?" instead)
 #   --doctor        Check all prerequisites and exit
 #   -h, --help      Show this help
 #
@@ -372,7 +373,7 @@ if [[ $(jq 'length' <<<"$RECORDS") -gt 0 ]]; then
 	LIFTED=$(lifted_since "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$(jq -r 'last.posted_at // ""' <<<"$RECORDS")" "$PR_AUTHOR")
 fi
 PR_SHAPE=$(jq -cn --argjson lines "$((ADDITIONS + DELETIONS))" --argjson files "$N_FILES" '{lines: $lines, files: $files}')
-LOOP=$(loop_decide_json "$RECORDS" "$PR_SHAPE" "$HEAD_OID" "$LIFTED")
+LOOP=$(loop_decide_json "$RECORDS" "$PR_SHAPE" "$HEAD_OID" "$LIFTED" "{\"skip_approach\": $SKIP_APPROACH}")
 LOOP_DECISION=$(jq -r '.decision' <<<"$LOOP")
 ROUND=$(jq -r '.next_round' <<<"$LOOP")
 PREVIOUS_RECORD=$(jq -c 'last // null' <<<"$RECORDS")
@@ -394,6 +395,15 @@ nothing-new)
 	if [[ "$FORCE_ROUND" == "true" ]]; then
 		FORCED=true
 		echo "    No new commits since round $((ROUND - 1)); running anyway (--force-round)."
+	elif [[ -t 0 && "$YES" == "false" ]]; then
+		# Someone may want a second opinion on the same commit: ask, as for a stop.
+		echo "No new commits since round $((ROUND - 1)) (${HEAD_OID:0:7})."
+		read -r -p "Run round ${ROUND} anyway? [y/N] " LOOP_ANSWER || LOOP_ANSWER=""
+		[[ "$LOOP_ANSWER" == [Yy]* ]] || {
+			echo "Nothing to review."
+			exit 5
+		}
+		FORCED=true
 	else
 		echo "No new commits since round $((ROUND - 1)) (${HEAD_OID:0:7}): nothing to review. --force-round runs anyway."
 		exit 5

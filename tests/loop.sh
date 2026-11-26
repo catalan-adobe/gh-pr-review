@@ -129,6 +129,13 @@ rethink=$(records "null" "-" "unknown" r)
 got=$(loop_decide_json "$rethink" '{"lines":1,"files":1}' new false)
 eq "Rethink-only history" "$(jq -c '[.decision, .label, .labels, .series]' <<<"$got")" '["run",null,["rethink"],[null]]'
 
+# Same head as a Rethink-only last round: nothing new for a full run, but a code-review-only run has work to do.
+eq "Rethink on this head: nothing new" "$(loop_decide_json "$rethink" '{}' sha1 false | jq -r .decision)" nothing-new
+eq "Rethink on this head, skip_approach: run" \
+	"$(loop_decide_json "$rethink" '{}' sha1 false '{"skip_approach":true}' | jq -r .decision)" run
+eq "code review on this head, skip_approach: still nothing new" \
+	"$(loop_decide_json "$(records "2" "0" "no" s)" '{}' sha1 false '{"skip_approach":true}' | jq -r .decision)" nothing-new
+
 # A Rethink round between two bad rounds neither breaks nor extends the run.
 recs=$(records "9 12 null 8" "1 1 - 1" "no no unknown no" ssrs)
 eq "Rethink between rounds keeps B(K-2)" "$(letters "$recs")" "ee-C"

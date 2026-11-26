@@ -61,6 +61,30 @@ run_no_y() { # no extra args: the interactive path, with no terminal on stdin
 	collect
 }
 
+# Runs a command on a pseudo-terminal (util-linux or BSD script), typing <input> once the terminal is up.
+in_tty() { # input command...
+	local cmd
+	printf -v cmd '%q ' "${@:2}"
+	if script --version >/dev/null 2>&1; then
+		{
+			sleep 1
+			printf '%s' "$1"
+		} | script -qec "$cmd" /dev/null
+	else
+		{
+			sleep 1
+			printf '%s' "$1"
+		} | script -q /dev/null "${@:2}"
+	fi
+}
+
+run_tty() { # input extra-args...: the interactive path, on a terminal, without -y
+	fresh
+	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+		in_tty "$1" bash "$root/gh-pr-review" https://github.com/o/r/pull/1 "${@:2}" >"$stub/out.log" 2>&1) && rc=0 || rc=$?
+	collect
+}
+
 fresh() { # each run starts with no model calls, nothing posted and no session
 	: >"$stub/pi.calls"
 	rm -rf "$stub/posted.args" "$stub/work/pr-review-sessions"
@@ -321,8 +345,28 @@ run
 expect "no new commits: exit 5, no clone" '[[ $rc == 5 && $calls == 0 ]] && no_session'
 run --check
 expect "--check: no new commits exits 5" '[[ $rc == 5 ]]'
+run_tty $'n\n'
+expect "no new commits, in a terminal: asks, and no exits 5" \
+	'[[ $rc == 5 && $calls == 0 ]] && grep -q "Run round 2 anyway? \[y/N\]" "$stub/out.log" && no_session'
+run_tty $'y\n\n'
+expect "no new commits, in a terminal: yes runs the round, marked forced" \
+	'[[ $rc == 0 && $calls == 2 && $(jq -r ".round, .forced" <<<"$record" | paste -sd, -) == "2,true" ]]'
 run --force-round
 expect "no new commits: --force-round runs" '[[ $rc == 0 && $calls == 2 && $(jq -r ".forced" <<<"$record") == true ]]'
+
+# The last round on this head was a Rethink: the code was never reviewed.
+setup 'unused' $'**Ready to merge?** Yes'
+jq -n '[{schema: 1, round: 1, head_sha: "head1", approach: "rethink", code_review: false,
+	counts: {open_blocking: null}}] | map({user: {login: "ann", type: "User"}, commit_id: "head1",
+	submitted_at: "2026-01-01T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\nx")})' \
+	>"$stub/rest-reviews.json"
+run --skip-approach
+expect "after a Rethink on this head: --skip-approach runs the code review" \
+	'[[ $rc == 0 && $calls == 1 && $(jq -r ".round, .forced" <<<"$record" | paste -sd, -) == "2,false" ]]'
+run --skip-approach --check
+expect "after a Rethink on this head: --skip-approach --check exits 0" '[[ $rc == 0 && $calls == 0 ]]'
+run
+expect "after a Rethink on this head: a full run has nothing new" '[[ $rc == 5 && $calls == 0 ]]'
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run

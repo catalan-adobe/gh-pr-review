@@ -63,6 +63,8 @@ def loop_suggestion($label; $flags):
 
 # The decision for the next round: nothing-new, then stop, then warn, then run.
 # $head: the PR's head SHA now. $lifted: true when something since the last round lifts a stop.
+# $p.skip_approach: this run reviews the code only. Then a last round on this head that was a Rethink (no code review)
+# is not "nothing new": nobody reviewed that code yet.
 def loop_decide($p; $size; $head; $lifted):
   . as $records
   | loop_labels($p) as $labels
@@ -78,7 +80,8 @@ def loop_decide($p; $size; $head; $lifted):
     series: map(loop_blocking),
     suggestion: loop_suggestion($label; $flags)
   }
-  + if length > 0 and ($head // "") != "" and $records[-1].head_sha == $head then
+  + if length > 0 and ($head // "") != "" and $records[-1].head_sha == $head
+    and ((($p // {}).skip_approach == true and ($records[-1] | loop_code_review | not)) | not) then
     {decision: "nothing-new", reason: "no new commits since round \(length)"}
   elif ($label | loop_bad) and ($prev | loop_bad) and $lifted != true then
     {decision: "stop",
