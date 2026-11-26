@@ -37,7 +37,9 @@ fetch_pr_shape() { # <host> <owner> <repo> <N>
 # stop. Bots (user.type "Bot", or a login ending in [bot]) and gh-pr-review rounds do not count, and neither does
 # the PR author: on my own PRs, fix agents post as me and must not lift their own stop.
 lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
-	{
+	local out
+	# Captured first: a gh failure half-way must print one answer, not jq's partial one and then "false".
+	if out=$({
 		gh api --hostname "$1" --paginate "repos/$2/$3/issues/$4/comments" &&
 			gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" &&
 			gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/comments"
@@ -46,10 +48,12 @@ lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 			((.submitted_at // .created_at // "") > $since)
 			and ((.user.type // "") != "Bot")
 			and ((.user.login // "") as $login | $login != $author and ($login | endswith("[bot]") | not))
-			and (((.body // "") | contains("<!-- gh-pr-review generated -->")) | not))' || {
+			and (((.body // "") | contains("<!-- gh-pr-review generated -->")) | not))'); then
+		printf '%s\n' "$out"
+	else
 		echo "Warning: could not read the PR's comments; the loop check ignores them." >&2
 		echo false
-	}
+	fi
 }
 
 cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]

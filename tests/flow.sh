@@ -231,6 +231,9 @@ expect "loop stop: the PR author's comment does not lift it" '[[ $rc == 3 && $ca
 comment_by ci-helper Bot >"$stub/rest-comments.json"
 run
 expect "loop stop: a bot's comment does not lift it" '[[ $rc == 3 && $calls == 0 ]]'
+echo 'not json' >"$stub/rest-comments.json"
+run
+expect "loop stop: unreadable comments keep the stop, with a warning" '[[ $rc == 3 && $calls == 0 ]] && grep -q "could not read the PR" "$stub/out.log"'
 echo '[]' >"$stub/rest-comments.json"
 run --check
 expect "--check: stop exits 3 without clone or pi" '[[ $rc == 3 && $calls == 0 ]] && no_session && grep -q "Loop check for round 5: stop" "$stub/out.log"'
