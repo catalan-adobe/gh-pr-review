@@ -25,7 +25,11 @@ case "\$*" in
 *"--method POST"*pulls/1/reviews*)
 	[[ -f "$stub/post.fail" ]] && exit 1
 	while [[ \$# -gt 0 ]]; do [[ "\$1" == --input ]] && cp "\$2" "$stub/posted.json"; shift; done ;;
-*pulls/1/reviews*) cat "$stub/rest-reviews.json" ;;
+*pulls/1/reviews*)
+	# reviews.fail: how many reads of the reviews fail from now on.
+	n=\$(cat "$stub/reviews.fail" 2>/dev/null || echo 0)
+	[[ "\$n" -gt 0 ]] && { echo "\$((n - 1))" >"$stub/reviews.fail"; exit 1; }
+	cat "$stub/rest-reviews.json" ;;
 *issues/1/comments*) cat "$stub/rest-comments.json" ;;
 *pulls/1/comments*) echo '[]' ;;
 *"auth status"*) exit 0 ;;
@@ -53,6 +57,8 @@ if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] &
 	[[ "${4:-}" == code ]] && exit 7
 	# A round someone else posts while this review runs.
 	[[ -f "$stub/reviews.after" ]] && cp "$stub/reviews.after" "$stub/rest-reviews.json"
+	# GitHub failing the reads of the history from now on.
+	[[ -f "$stub/reviews.fail.after" ]] && cp "$stub/reviews.fail.after" "$stub/reviews.fail"
 	printf '%s' "\${*: -1}" >"$stub/code-prompt.txt"; cat "$stub/review.out"; fi
 S
 	chmod +x "$stub/bin/"*
@@ -298,14 +304,16 @@ setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n
 run --no-post
 expect "records: --no-post keeps a preview record and posts nothing" '[[ -z $flag && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "true,null" ]]'
 
-# A jq that breaks the record: it fails, or prints a non-record, when asked to build one. Other calls pass through.
-break_record() { # fail | junk
+# A jq that breaks the record: it fails, or prints a non-record, when asked to build one; or (posted) it fails the
+# final build of the posted record. Other calls pass through.
+break_record() { # fail | junk | posted
 	local real
 	real=$(PATH="${PATH#"$stub/bin:"}" command -v jq)
 	cat >"$stub/bin/jq" <<S
 #!/usr/bin/env bash
 for a in "\$@"; do
-	if [[ "\$a" == *'build_record(\$meta'* ]]; then [[ $1 == fail ]] && exit 5; echo '{"round":"x"}'; exit 0; fi
+	if [[ $1 != posted && "\$a" == *'build_record(\$meta'* ]]; then [[ $1 == fail ]] && exit 5; echo '{"round":"x"}'; exit 0; fi
+	if [[ $1 == posted && "\$a" == *'.preview = false'* ]]; then exit 5; fi
 done
 exec "$real" "\$@"
 S
@@ -321,6 +329,15 @@ for mode in fail junk; do
 	expect "record $mode: no record, so a bare yes comments instead of approving" \
 		'[[ $flag == --comment && -z $record ]] && grep -q "posting as comment, not approve" "$stub/out.log"'
 done
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+break_record posted
+run_tty "Post as review" ""
+expect "posted record fails, default approve taken at the prompt: posts as comment, without a marker" \
+	'[[ $rc == 0 && $flag == --comment && $body != *"gh-pr-review:round"* ]] &&
+		grep -q "posting as comment, not approve" "$stub/out.log" && grep -q "Enter = approve" "$stub/out.log"'
+run_tty "Post as review" a
+expect "posted record fails, approve typed at the prompt: stays an approval" '[[ $rc == 0 && $flag == --approve ]]'
 
 # ── loop check
 rounds_with() { # blocking per earlier round... -> REST reviews whose markers carry those counts
@@ -419,7 +436,7 @@ expect "after a Rethink on this head: --skip-approach --check exits 0" '[[ $rc =
 run
 expect "after a Rethink on this head: a full run has nothing new" '[[ $rc == 5 && $calls == 0 ]]'
 
-# Overlapping runs: round 2, by ann, lands while this review runs.
+# Overlapping runs: round 2, by ann, lands while this review runs. This one never posts on top of it.
 overlap() {
 	setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[{"severity":"minor","title":"nit"}]\n```'
 	rounds_with 2 >"$stub/rest-reviews.json"
@@ -429,16 +446,25 @@ overlap() {
 overlap
 run
 expect "overlap, -y: nothing posted, exit 6, session kept" \
-	'[[ $rc == 6 && -z $flag && -n $record ]] && grep -q "round 2 by ann" "$stub/out.log"'
+	'[[ $rc == 6 && -z $flag && $(jq -r .preview <<<"$record") == true ]] && grep -q "round 2 by ann" "$stub/out.log"'
 overlap
-run_tty "Post as review" "" "Post anyway" n
-expect "overlap, in a terminal: no posts nothing, exit 6" \
-	'[[ $rc == 6 && -z $flag ]] && grep -q "Post anyway as round 3? \[y/N\]" "$stub/out.log"'
-overlap
-run_tty "Post as review" "" "Post anyway" y
-expect "overlap, in a terminal: yes posts as round 3, IDs after the new round" \
-	'[[ $rc == 0 && $flag == --approve && $(jq -r ".round, .findings[0].id, .findings[0].first_round, .previous_head_sha" <<<"$record" |
-		paste -sd, -) == "3,F6,3,h2" && $body == *"\"round\":3"* ]]'
+run_tty "Post as review" ""
+expect "overlap, in a terminal: no prompt, nothing posted, exit 6" \
+	'[[ $rc == 6 && -z $flag ]] && grep -q "round 2 by ann" "$stub/out.log" && ! grep -q "Post anyway" "$stub/out.log"'
+
+# The history can't be read again before posting: one retry, then nothing is posted.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+echo 1 >"$stub/reviews.fail.after"
+run
+expect "final history read fails once: the retry reads it, and the review is posted" '[[ $rc == 0 && $flag == --approve ]]'
+echo 2 >"$stub/reviews.fail.after"
+run
+expect "final history read fails twice: exit 1, nothing posted, the session kept" \
+	'[[ $rc == 1 && -z $flag && $(jq -r .preview <<<"$record") == true ]] &&
+		grep -q "history could not be verified; nothing was posted" "$stub/out.log" && ! grep -q "exit 6" "$stub/out.log"'
+echo 2 >"$stub/reviews.fail.after"
+run_tty "Post as review" ""
+expect "final history read fails twice, in a terminal: exit 1, nothing posted" '[[ $rc == 1 && -z $flag ]]'
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
