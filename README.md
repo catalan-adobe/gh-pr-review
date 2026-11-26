@@ -171,7 +171,7 @@ Important) of each round:
 A stop lifts when a person other than the PR author reviews or comments after
 the last round. The author's own replies do not count, so a fix agent posting
 as the author cannot lift its own stop. Comments without an identified user
-(a deleted account) do not count either. `--force-round` runs a round anyway,
+(a deleted account, shown as `ghost`) do not count either. `--force-round` runs a round anyway,
 without asking, and the record says so (`forced`).
 
 Rounds are numbered in the order GitHub received them. Just before posting,

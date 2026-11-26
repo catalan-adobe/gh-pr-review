@@ -118,6 +118,8 @@ out=$(lifted "[{\"user\": null, $late}]")
 expect "lifted_since: a comment with no user does not lift" '[[ $out == false ]]'
 out=$(lifted "[{\"user\": {\"login\": \"\", \"type\": \"User\"}, $late}]")
 expect "lifted_since: an empty login does not lift" '[[ $out == false ]]'
+out=$(lifted "[{\"user\": {\"login\": \"ghost\", \"type\": \"User\"}, $late}]")
+expect "lifted_since: GitHub's deleted-account placeholder (ghost) does not lift" '[[ $out == false ]]'
 echo '[]' >"$stub/comments.json"
 
 out=$(rounds) && rc=0 || rc=$?

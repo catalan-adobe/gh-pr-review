@@ -48,9 +48,9 @@ fetch_pr_shape() { # <host> <owner> <repo> <N>
 }
 
 # Prints true when a person other than the PR author reviewed or commented after <time>: that lifts a loop-check
-# stop. Only an identified person counts: no login (a deleted account, user null), bots (user.type "Bot", or a login
-# ending in [bot]) and gh-pr-review rounds do not, and neither does the PR author: on my own PRs, fix agents post as
-# me and must not lift their own stop.
+# stop. Only an identified person counts: no login (user null), GitHub's deleted-account placeholder ("ghost"), bots
+# (user.type "Bot", or a login ending in [bot]) and gh-pr-review rounds do not, and neither does the PR author: on my
+# own PRs, fix agents post as me and must not lift their own stop.
 lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 	local out
 	# Captured first: a gh failure half-way must print one answer, not jq's partial one and then "false".
@@ -64,7 +64,7 @@ lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 			((.submitted_at // .created_at // "") > $since)
 			and ((.user.type // "") != "Bot")
 			and ((.user.login // "") as $login
-				| $login != "" and $login != $author and ($login | endswith("[bot]") | not))
+				| $login != "" and $login != "ghost" and $login != $author and ($login | endswith("[bot]") | not))
 			and ((.body | is_generated_review) | not))'); then
 		printf '%s\n' "$out"
 	else
