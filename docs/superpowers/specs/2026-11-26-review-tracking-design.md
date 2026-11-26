@@ -175,8 +175,8 @@ For `<host>/<owner>/<repo>`, in this order:
 
 1. The `clones` map in the config, for example `"github.com/adobe/skills": "~/repos/ai/adobe/skills"`.
 2. A scan of the configured `roots` (default `~/repos`, depth 5) for a main clone, not a linked worktree, with a
-   remote URL that matches (https or ssh, with or without `.git`). Some repos are cloned twice (adobe/skills,
-   migration-lab, cf-agent-worker). Then the most recently fetched clone wins (`FETCH_HEAD` time), and the run
+   remote URL that matches (https or ssh, with or without `.git`). Some repos are cloned twice (adobe/skills is,
+   for example). Then the most recently fetched clone wins (`FETCH_HEAD` time), and the run
    prints which one it picked. The result is cached in `<state>/clones.json` and checked again on use.
 3. None found: a cache clone at `~/.cache/gh-pr-review/clones/<host>/<owner>/<repo>`, a bare full clone made once and
    reused after that.
@@ -205,7 +205,7 @@ merge-base within depth 50" failure.
 ### The review worktree
 
 Path: `<clone-dir>.reviews/<head-branch-slug>/<N>`, next to the clone. For example
-`~/repos/ai/Adobe-AEM-Foundation/of1-labs.reviews/feat-replica-reskin/331`.
+`~/repos/ai/adobe/skills.reviews/feat-extend-pages/823`.
 
 - `<clone-dir>` is the clone's folder name: `~/repos/adobe-skills` gives `adobe-skills.reviews`.
 - The slug is the PR's head branch, with `/` and other unsafe characters replaced by `-`, cut at 60 characters.
@@ -384,10 +384,10 @@ A first argument of `rounds`, `status`, `shepherd` or `gc` is a subcommand. Anyt
 ### Which PRs
 
 For each account in the config (default: every login that `gh auth status` lists, here `catalan-adobe` and
-`catalan_adobe` on github.com and `catalan` on git.corp.adobe.com): open PRs I authored, PRs where my review is
-requested, and PRs I reviewed, without duplicates. Each account is queried with its own token
+`catalan_adobe` on github.com and `catalan` on the company's GitHub Enterprise host): open PRs I authored, PRs
+where my review is requested, and PRs I reviewed, without duplicates. Each account is queried with its own token
 (`gh auth token --user`), as `--user` does today. `gh search prs` works on the enterprise host with `GH_HOST` set
-(checked: 6 authored PRs and 4 review requests on git.corp.adobe.com).
+(checked: 6 authored PRs and 4 review requests on the enterprise host).
 
 Hidden by default, and counted on the last line:
 
@@ -430,7 +430,7 @@ A table, my turn first, then Churning, Nit loop, Converging, Early, Ready, and t
 
 ```
 TURN    PR                LABEL      ROUNDS  BLOCKING        APPROACH      SIZE         AGE  TITLE
-me      of1-labs#331      Early      2       4 8             —             3.2k 53f     23d  feat(replica): reskin an existing site…
+me      of1-labs#331      Early      2       4 8             —             3.2k 53f     23d  (internal) feature PR…
 me      adobe/skills#813  Churning   14      …8 8 – 10       questionable  4.5k 66f      2d  feat(stardust): replica --extend…
         ↳ approach-stuck · too-big · superseded by #823
 me      adobe/skills#823  Early      2       9 7             questionable  3.2k 62f      1d  feat(stardust): replica --extend…
@@ -541,7 +541,7 @@ environment variables keep working and win over the file.
   "accounts": [
     { "host": "github.com", "user": "catalan-adobe" },
     { "host": "github.com", "user": "catalan_adobe" },
-    { "host": "git.corp.adobe.com" }
+    { "host": "git.example.com" }
   ],
   "roots": ["~/repos"],
   "clones": { "github.com/adobe/skills": "~/repos/ai/adobe/skills" },
