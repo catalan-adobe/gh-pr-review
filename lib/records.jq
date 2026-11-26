@@ -101,6 +101,23 @@ def _last_number($prefix):
 # no last_ids: their findings and later IDs seed it.
 def id_floor: map(objects) | {F: (map(_last_number("F")) | max // 0), L: (map(_last_number("L")) | max // 0)};
 
+# A record read back from GitHub, reconciled with the rounds before it ($earlier, already reconciled) and its
+# position in submission order. Two runs can both pass the check before posting and claim the same round and the
+# same new IDs. When the claimed round is not the position, or a new finding's ID is not above the ID floor of the
+# earlier rounds, its new findings (status new, or none) are numbered after that floor, with first_round set to the
+# position, and last_ids follows. Other findings, and a record that agrees with its position, are left as they are.
+def reconcile_record($earlier; $position):
+	($earlier | id_floor) as $floor
+	| def is_new: type == "object" and ((.status // "new") == "new");
+	def number: .id | strings | capture("^F(?<n>\\d+)$").n | tonumber;
+	if .round != $position or any((.findings // [])[]? | select(is_new); (number // 0) <= $floor.F) then
+		(reduce range(0; (.findings // []) | length) as $i ({rec: ., n: $floor.F};
+			if (.rec.findings[$i] | is_new) then .n += 1 | .rec.findings[$i] += {id: "F\(.n)", first_round: $position}
+			else . end)) as $r
+		| $r.rec
+		| .last_ids = {F: ([_last_number("F"), $floor.F] | max), L: ([_last_number("L"), $floor.L] | max)}
+	else . end;
+
 # round.json from the run's facts, the findings (block or parser) and the previous record (or null). New findings
 # are numbered after $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record.
 def build_record($meta; $findings; $prev):

@@ -5,7 +5,8 @@
 # record rebuilt from the review's Markdown (backfill) when the review predates the markers. A generated review is one
 # whose first line is the generated marker (is_generated_review in lib/records.jq). GitHub's facts win over the
 # marker's: the round is the review's position in submission order, posted_at its submission time, head_sha the
-# commit it was posted on and reviewer its author, so two reviews posted at once can't both be round K.
+# commit it was posted on and reviewer its author, so two reviews posted at once can't both be round K, nor both give
+# out the same new finding IDs (reconcile_record in lib/records.jq).
 fetch_round_records() { # <host> <owner> <repo> <N>
 	local reviews pr records='[]' previous=null round=0 review record body facts minimal
 	reviews=$(gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" | jq -cs -L "${LIB_DIR:?}" '
@@ -45,7 +46,10 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 		fi
 		facts=$(jq -c '{posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
 			| with_entries(select(.value | type == "string" and . != ""))' <<<"$review")
-		record=$(jq -c --argjson round "$round" --argjson facts "$facts" '. + $facts + {round: $round}' <<<"$record")
+		# Two runs posted at once: the later one's new IDs and first_round follow its position (reconcile_record).
+		record=$(printf '%s\n%s\n' "$records" "$record" | jq -cs -L "${LIB_DIR:?}" --argjson round "$round" \
+			--argjson facts "$facts" 'include "records"; .[0] as $earlier | .[1] | reconcile_record($earlier; $round)
+				+ $facts + {round: $round}')
 		# Records and history go through stdin: a long history must never be one process argument.
 		records=$(printf '%s\n%s\n' "$records" "$record" | jq -cs '.[0] + [.[1]]')
 		previous="$record"
