@@ -505,7 +505,9 @@ if [[ "$FINDINGS_BASE" == null ]]; then
 	if [[ "$PREVIOUS_RECORD" == null ]]; then DELTA_REASON="no previous round"; else DELTA_REASON="no earlier code review"; fi
 	DELTA=$(jq -cn --arg reason "$DELTA_REASON" '{mode: "full", reason: $reason, commands: []}')
 elif [[ "$FINDINGS_KNOWN" != true ]]; then
-	DELTA='{"mode":"full","reason":"the last record lost its findings to the size cap","commands":[]}'
+	# A later round read back from its Markdown (no marker) shows only what it re-checked: no list either.
+	DELTA=$(jq -c '{mode: "full", commands: [], reason: (if .source == "backfill" then "the last round has no record of its findings"
+		else "the last record lost its findings to the size cap" end)}' <<<"$FINDINGS_BASE")
 elif [[ "$FULL_ROUND" == "true" ]]; then
 	DELTA='{"mode":"full","reason":"--full","commands":[]}'
 else

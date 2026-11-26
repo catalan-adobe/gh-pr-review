@@ -543,6 +543,43 @@ check "backfill after backfill: IDs continue, previous head kept" \
 	"$(jq -r '[.findings[0].id == "F\($n + 1)", .previous_head_sha == $h] | all' --argjson n "$(jq '[.findings[].id[1:] | tonumber] | max' <<<"$rec")" \
 		--arg h "$(jq -r .head_sha <<<"$rec")" <<<"$rec2")" true
 check "backfill bullets: ready" "$(jq -r .ready <<<"$rec")" yes-with-fixes
+has_list() { jq -L "$LIB_DIR" 'include "records"; has_findings_list' <<<"$1"; }
+check "backfill: a standalone review keeps its findings list" "$(has_list "$rec")" true
+
+# A later round posted without its marker: its record carried an Important finding the body does not show (omitted
+# by the model, so not re-checked). Read back from the Markdown alone, it must not look like a verified empty list.
+prev1=$(jq -nc '{round: 1, head_sha: "aaa", counts: {open_blocking: 1}, findings: [{id: "F1", severity: "important",
+	status: "new", first_round: 1, file: "a.ts", line: 1, title: "one"}]}')
+r2=$(build_record "$(jq -c '.round = 2 | .mode = "incremental" | .ready = "yes"' <<<"$meta")" \
+	'[{"severity":"minor","file":"m.ts","line":2,"title":"Tiny nit"}]' "$prev1")
+check "later round without marker: setup, the record carries F1" \
+	"$(jq -c '[.counts.open_blocking, .counts.unverified, .last_ids.F]' <<<"$r2")" '[1,1,2]'
+later_body() { # <filler length>: the round 2 body as posted, with a filler paragraph before the Assessment
+	echo '<!-- gh-pr-review generated -->'
+	progress_line "$r2" "$prev1" '{"label":"early"}'
+	printf '\n### Issues\n\n#### 🚨 Critical (Must Fix Before Merge)\n\n*(none found)*\n\n'
+	printf '#### ⚠️ Important (Should Fix)\n\n*(none found)*\n\n#### 💡 Minor (Nice to Have)\n\n'
+	printf -- '- **F2 · `m.ts:2`** — Tiny nit.\n\n'
+	head -c "$1" /dev/zero | tr '\0' x
+	printf '\n\n### Assessment\n\n**Ready to merge?** Yes\n'
+}
+filler=$((59776 - $(later_body 1 | jq -Rs length) + 1))
+later_body "$filler" >"$tmp/later-padded.md"
+check "later round without marker: setup, a 59,776-character body" "$(jq -Rs length "$tmp/later-padded.md")" 59776
+check "later round without marker: setup, no room for the marker" \
+	"$(marker_line <(jq -c . <<<"$r2") "$(tail -n +2 "$tmp/later-padded.md")")" ""
+rec=$(backfill_record "$(jq -n --rawfile body "$tmp/later-padded.md" '{body: $body, commit_id: "bbb",
+	submitted_at: "2026-01-03T00:00:00Z", user: {login: "rev"}, state: "APPROVED"}')" "$prev1" 2 "$pr")
+check "later round without marker: no findings list" "$(has_list "$rec")" false
+check "later round without marker: the blocking count of the progress line, IDs covered" \
+	"$(jq -c '[.findings_dropped, .counts.open_blocking, .ready_overridden, .last_ids.F, has("findings")]' <<<"$rec")" \
+	'[true,1,true,2,false]'
+check "later round without marker: the next round carries nothing it cannot know" \
+	"$(build_record "$meta2" '[]' "$rec" | jq -c '[.findings, .counts.open_blocking]')" '[[],0]'
+printf '### Issues\n\n- **`a.ts:1`** — x\n\n<details><summary>Later (1)</summary>\n\n- **[e.ts:5]** — slow.\n\n</details>\n' \
+	>"$tmp/folded.md"
+rec=$(backfill_record "$(jq -n --rawfile body "$tmp/folded.md" '{body: $body}')" null 2 "$pr")
+check "later round without marker: a folded Later section is enough" "$(has_list "$rec")" false
 
 finished=true
 exit "$fail"

@@ -282,9 +282,19 @@ def progress_line($prev; $decision):
 		end
 	end;
 
-# A record rebuilt from an old review (GitHub REST review object). The caller reads the verdict lines.
+# True when a review body is a round 2 or later review: a progress line ("### Round 3 · since round 2") near the top,
+# or a folded Fixed since / Later section. Its Markdown leaves out what it did not re-check, so it is no findings list.
+def later_round_body:
+	(split("\n") | map(sub("\r$"; ""))) as $lines
+	| ($lines[0:8] | any(test("^###\\s+Round\\s+\\d+\\s+·\\s+since\\s+round\\s+\\d+\\s*$"; "i")))
+		or ($lines | any(test("<summary>\\s*(fixed since|later\\b)"; "i")));
+
+# A record rebuilt from an old review (GitHub REST review object). The caller reads the verdict lines. A later-round
+# body that lost its marker (later_round_body) gives no findings list (findings_dropped, so the next round is full),
+# the open blocking count of its progress line, and last_ids that cover the IDs it shows.
 def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review):
 	($review.body // "") as $body
+	| ($code_review and ($body | later_round_body)) as $later_round
 	| build_record({
 		source: "backfill",
 		pr: $pr,
@@ -304,7 +314,16 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 		# so a backfilled round counts what it found, never carries the round before.
 		(if $prev == null then null
 		else {round: $prev.round, head_sha: $prev.head_sha,
-			last_ids: {F: ($prev | _last_number("F")), L: ($prev | _last_number("L"))}} end));
+			last_ids: {F: ($prev | _last_number("F")), L: ($prev | _last_number("L"))}} end))
+	| if $later_round | not then .
+	else ([$body | parse_findings[] | .id | strings | capture("^F(?<n>\\d+)$").n | tonumber] | max // 0) as $shown
+		| ([$body | split("\n")[0:8][] | capture("open blocking: (?<n>\\d+)").n | tonumber] | first // null) as $blocking
+		| del(.findings, .later) | .findings_dropped = true
+		| .last_ids.F = ([.last_ids.F, $shown] | max)
+		| if $blocking == null then .
+		else .counts.open_blocking = $blocking
+			| .ready_overridden = ((.ready == "yes" or .ready == "yes-with-fixes") and $blocking > 0) end
+	end;
 
 # The first line of every body gh-pr-review posts.
 def generated_header: "<!-- gh-pr-review generated -->";

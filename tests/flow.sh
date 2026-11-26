@@ -609,6 +609,18 @@ for capped in '"findings_dropped":true' '"findings_dropped":false'; do
 	expect "capped marker ($capped): an empty reply does not claim progress over the lost findings" '[[ $(sed -n 4p <<<"$body") == "open blocking: 0 · "* && $body != *"(was 3)"* && $(sed -n 4p <<<"$body") == *"full review (the last record lost its findings to the size cap)" ]]'
 done
 
+# A later round posted without its marker (no room for it): its Markdown shows only what it re-checked, so reading
+# it back gives no findings list, and the next round is full.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n```'
+add_round '{"schema":1,"source":"model","round":1,"head_sha":"'"$H1"'","base_sha":"'"$B1"'","approach":"sound","ready":"no","code_review":true,"findings":[{"id":"F1","severity":"important","status":"new","first_round":1,"file":"a.js","line":3,"title":"thing breaks"}],"counts":{"open_blocking":1,"critical":0,"important":1,"minor":0}}' $'### Issues\n- round one'
+jq -c --arg h "$H2" '. + [{user: {login: "me", type: "User"}, state: "APPROVED", commit_id: $h,
+	submitted_at: "2026-01-02T00:00:00Z", body: "<!-- gh-pr-review generated -->\n### Round 2 · since round 1\n1 not re-checked · open blocking: 1 (was 1)\n\n### Issues\n\n*(none found)*\n\n**Ready to merge?** Yes"}]' \
+	"$stub/rest-reviews.json" >"$stub/r.tmp" && mv "$stub/r.tmp" "$stub/rest-reviews.json"
+run
+expect "markerless later round: the next round is full and says why" \
+	'[[ $rc == 0 && $(jq -r ".round, .mode, .mode_reason" <<<"$record" | paste -sd, -) == "3,full,the last round has no record of its findings" ]] && grep -q "mode: full (the last round has no record of its findings)" "$stub/out.log"'
+expect "markerless later round: no claim of progress over it" '[[ $(sed -n 4p <<<"$body") == "open blocking: 0 · "* && $body != *"(was "* ]]'
+
 setup $'### Approach\n\n**Approach:** Sound' "$round3"
 add_round '{"schema":1,"source":"model","round":1,"head_sha":"'"$H1"'","base_sha":"'"$B1"'","approach":"rethink","ready":"unknown","code_review":false,"findings":[],"counts":{"open_blocking":null}}' $'### Approach\n\n**Approach:** Rethink'
 run
