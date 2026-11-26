@@ -33,7 +33,8 @@ S
 	cat >"$stub/bin/pi" <<S
 #!/usr/bin/env bash
 echo call >>"$stub/pi.calls"
-if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] && exit 7; cat "$stub/approach.out"; else
+if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] && exit 7
+	printf '%s' "\${*: -1}" >"$stub/owner-prompt.txt"; cat "$stub/approach.out"; else
 	[[ "${4:-}" == code ]] && exit 7
 	printf '%s' "\${*: -1}" >"$stub/code-prompt.txt"; cat "$stub/review.out"; fi
 S
@@ -107,4 +108,21 @@ run
 expect "code review fails: run fails" '[[ $rc != 0 ]]'
 expect "code review fails: nothing posted" '[[ -z $flag ]]'
 expect "code review fails: names the session" 'grep -q "pr-review-sessions/pr-review-" "$stub/out.log"'
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+run --instructions 'Focus on db/ and $(skip) nits'
+expect "instructions: owner prompt gets them" 'grep -qF "Focus on db/ and \$(skip) nits" "$stub/owner-prompt.txt"'
+expect "instructions: code prompt gets them" 'grep -qF "Focus on db/ and \$(skip) nits" "$stub/code-prompt.txt"'
+expect "instructions: owner prompt has them before the steps" '[[ $(grep -n -e "Reviewer instructions" -e "^## Steps" "$stub/owner-prompt.txt" | head -1) == *instructions* ]]'
+expect "instructions: not posted" '[[ $rc == 0 && $body != *"Focus on db/"* ]]'
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+run
+expect "no instructions: no section in either prompt" '! grep -q "Reviewer instructions" "$stub/owner-prompt.txt" "$stub/code-prompt.txt"'
+
+setup 'unused' 'unused'
+run --instructions
+expect "instructions without a value: fails before any model call" '[[ $rc != 0 && $calls == 0 ]] && grep -q "requires" "$stub/out.log"'
+setup 'unused' 'unused'
+run --instructions ' '
+expect "blank instructions: fails before any model call" '[[ $rc != 0 && $calls == 0 ]]'
 exit "$fail"

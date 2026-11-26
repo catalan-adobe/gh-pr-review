@@ -10,6 +10,7 @@
 #   -u, --user <login>  gh account to use for this run only (global gh auth is untouched)
 #   --no-post       Print review but don't post to GitHub
 #   --skip-approach Skip the maintainer's approach pass; run the code review only
+#   --instructions <text>  Extra guidance for both passes (a file: "$(cat notes.md)")
 #   --decision <d>  comment | approve | request-changes (default: from "Ready to merge?")
 #   -y, --yes       Skip confirmation prompt before posting
 #   --doctor        Check all prerequisites and exit
@@ -36,6 +37,7 @@ YES=false
 DOCTOR=false
 TARGET=""
 SKIP_APPROACH=false
+INSTRUCTIONS=""
 GH_USER="${GH_PR_REVIEW_USER:-}"
 
 # ── arg parsing ──────────────────────────────────────────────────────────────
@@ -55,6 +57,14 @@ while [[ $# -gt 0 ]]; do
 			exit 1
 		}
 		GH_USER="$2"
+		shift 2
+		;;
+	--instructions)
+		[[ $# -ge 2 && -n "${2//[[:space:]]/}" ]] || {
+			echo "Error: --instructions requires non-empty text" >&2
+			exit 1
+		}
+		INSTRUCTIONS="$2"
 		shift 2
 		;;
 	--skip-approach)
@@ -185,6 +195,15 @@ run_pi() {
 		echo "    Check the session directory for details: ${SESSION_DIR}" >&2
 		exit 1
 	fi
+}
+
+# The run's extra guidance as a prompt section. Empty in, empty out.
+instructions_section() {
+	[[ -z "$INSTRUCTIONS" ]] && return 0
+	printf '## Reviewer instructions\n\n'
+	printf 'The person running this review added these instructions. Follow them where they conflict '
+	printf 'with the default checklist. The output format, the verdict line and the read-only rule '
+	printf 'still apply.\n\n%s\n\n' "$INSTRUCTIONS"
 }
 
 # The posted body: the approach section, then the code review, then one footer. Empty in, empty out.
@@ -366,6 +385,8 @@ Your review is read-only. Do not change the working tree, the index, HEAD, or br
 
 OWNER1
 
+		instructions_section
+
 		cat <<OWNER2
 ## Steps, in this order
 
@@ -491,6 +512,8 @@ PART1
 			printf 'A maintainer already judged the approach. Do not argue it again. '
 			printf 'Review the implementation.\n\n%s\n\n' "$(cat "$APPROACH_FILE")"
 		fi
+
+		instructions_section
 
 		printf '## PR Discussion\n\n'
 		printf 'Before you report findings, read %s/pr-discussion.md: comments, review summaries ' "$CONTEXT_DIR"
