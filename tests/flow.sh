@@ -415,4 +415,23 @@ run --check
 expect "--check: no rounds yet exits 0" '[[ $rc == 0 ]]'
 run --json
 expect "--json without --check: fails" '[[ $rc == 1 && $calls == 0 ]]'
+# ── producer to consumer: a posted round, returned as GitHub returns it, read back by rounds --json and --check
+block=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** Yes with fixes\n\n'"$block"
+run
+expect "round trip: round 1 posted" '[[ $rc == 0 && $flag == --comment ]]'
+jq -n --arg body "$body" '[{id: 11, user: {login: "me", type: "User"}, state: "COMMENTED", commit_id: "head1",
+	submitted_at: "2026-05-01T10:00:00Z", body: $body}]' >"$stub/rest-reviews.json"
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "round trip: rounds --json reads the posted record back" \
+	'[[ $rc == 0 && $(jq -c ".records | length" "$stub/rounds.json") == 1 && $(jq -r ".records[0] | .round, .source,
+		.counts.open_blocking, .counts.important, .findings[0].id, .head_sha, .posted_at, .decision, .ready" "$stub/rounds.json" |
+		paste -sd, -) == "1,model,1,1,F1,head1,2026-05-01T10:00:00Z,comment,yes-with-fixes" ]]'
+expect "round trip: the decision sees round 1 on this head" \
+	'[[ $(jq -r ".decision | .decision, .next_round" "$stub/rounds.json" | paste -sd, -) == "nothing-new,2" ]]'
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "round trip: --check exits 5 on the same head" \
+	'[[ $rc == 5 && $(jq -r ".decision, .next_round, .series[0]" "$stub/check.json" | paste -sd, -) == "nothing-new,2,1" ]]'
 exit "$fail"
