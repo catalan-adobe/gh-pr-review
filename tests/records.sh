@@ -98,7 +98,11 @@ rec=$(build_record "$meta" "$(parse_findings "$fixtures/bullets.md")" "$prev")
 check "ids continue after F7" "$(jq -r '[.findings[].id] | join(" ")' <<<"$rec")" "F8 F9 F10 F11 F12 F13"
 check "open_blocking" "$(jq '.counts.open_blocking' <<<"$rec")" 4
 check "counts" "$(jq -c '.counts' <<<"$rec")" \
-	'{"open_blocking":4,"critical":1,"important":3,"minor":2,"new":6,"fixed":0,"declined":0,"regressed":0}'
+	'{"open_blocking":4,"critical":1,"important":3,"minor":2,"new":6,"fixed":0,"declined":0,"regressed":0,"later":0,"unverified":0}'
+check "round 1: no unverified key" "$(jq '[.findings[] | has("unverified")] | any' <<<"$rec")" false
+check "round 1: last ids" "$(jq -c '.last_ids' <<<"$rec")" '{"F":13,"L":0}'
+check "round 1: ready kept, not overridden" "$(jq -c '[.ready, .ready_overridden]' <<<"$rec")" '["yes-with-fixes",true]'
+check "mode kept, no reason" "$(jq -c '[.mode, .mode_reason]' <<<"$rec")" '["full",null]'
 check "finding fields" "$(jq -c '.findings[0] | [.status, .first_round, .in_delta]' <<<"$rec")" '["new",2,false]'
 check "schema, later, preview" "$(jq -c '[.schema, .later, .preview]' <<<"$rec")" '[1,[],false]'
 check "missing meta keys are null" "$(jq -c '[.base_sha, .posted_at, .decision]' <<<"$rec")" '[null,null,null]'
@@ -112,6 +116,100 @@ rethink=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <
 	'[{"severity":"critical","title":"t"}]' null)
 check "rethink: no findings" "$(jq -c '.findings' <<<"$rethink")" "[]"
 check "rethink: null counts" "$(jq -c '[.counts[]] | unique' <<<"$rethink")" "[null]"
+check "rethink: count keys" "$(jq -c '.counts | keys' <<<"$rethink")" \
+	'["critical","declined","fixed","important","later","minor","new","open_blocking","regressed","unverified"]'
+check "rethink: not overridden, no later" "$(jq -c '[.ready_overridden, .later]' <<<"$rethink")" '[false,[]]'
+
+# ── build_record with statuses (round 2 and later) ──────────────────────────
+# Round 2: F1 open, F2 fixed, F3 declined, F4 new, F5 regressed, L6 later. F and L number apart, each from its
+# highest.
+meta2=$(jq -c '.round = 3 | .mode = "incremental" | .mode_reason = null | .ready = "no"' <<<"$meta")
+prev2=$(jq -nc '{round: 2, head_sha: "aaa", counts: {open_blocking: 3}, findings: [
+	{id: "F1", severity: "critical", status: "open", first_round: 1, in_delta: false, file: "a.ts", line: 1, title: "one"},
+	{id: "F2", severity: "important", status: "fixed", first_round: 1, in_delta: false, file: "b.ts", line: 2, title: "two"},
+	{id: "F3", severity: "important", status: "declined", first_round: 1, in_delta: false, file: "c.ts", line: 3, title: "three"},
+	{id: "F4", severity: "minor", status: "new", first_round: 2, in_delta: true, file: "d.ts", line: 4, title: "four"},
+	{id: "F5", severity: "important", status: "regressed", first_round: 1, in_delta: false, file: "e.ts", line: 5,
+		title: "five"}],
+	later: [{id: "L6", severity: "minor", file: "f.ts", line: 6, title: "six"}]}')
+r3() { build_record "$meta2" "$1" "$prev2"; }
+one() { jq -c --arg id "$2" '(.findings + .later)[] | select(.id == $id)
+	| [.status, .first_round, .severity, .file, .line, .title, (.unverified // false)]' <<<"$1"; }
+
+rec=$(r3 '[{"id":"F1","status":"fixed"}]')
+check "known id keeps its status" "$(one "$rec" F1)" '["fixed",1,"critical","a.ts",1,"one",false]'
+rec=$(r3 '[{"id":"F1","status":"open","severity":"minor","file":"z.ts","line":9,"title":"new title"}]')
+check "known id: model fields win" "$(one "$rec" F1)" '["open",1,"minor","z.ts",9,"new title",false]'
+rec=$(r3 '[{"id":"F2","status":"open"}]')
+check "fixed then open: regressed" "$(one "$rec" F2)" '["regressed",1,"important","b.ts",2,"two",false]'
+check "regressed counts as blocking" "$(jq -c '.counts | [.regressed, .open_blocking]' <<<"$rec")" '[1,3]'
+rec=$(r3 '[{"id":"F5","status":"open"}]')
+check "regressed then open: open" "$(one "$rec" F5)" '["open",1,"important","e.ts",5,"five",false]'
+rec=$(r3 '[{"severity":"minor","title":"n1"},{"severity":"important","title":"l1","later":true},
+	{"severity":"critical","title":"n2","in_delta":true}]')
+check "new ids continue after F5 and L6" "$(jq -c '[.findings[] | select(.status == "new") | .id], [.later[].id]' \
+	<<<"$rec" | tr -d '\n')" '["F6","F7"]["L7"]'
+check "new finding fields" "$(jq -c '.findings[] | select(.id == "F7") | [.status, .first_round, .in_delta]' \
+	<<<"$rec")" '["new",3,true]'
+check "later item fields" "$(jq -c '.later[0]' <<<"$rec")" \
+	'{"id":"L7","severity":"important","file":null,"line":null,"title":"l1"}'
+check "last ids" "$(jq -c '.last_ids' <<<"$rec")" '{"F":7,"L":7}'
+check "later items not blocking" "$(jq -c '.counts | [.later, .important]' <<<"$rec")" '[1,1]'
+check "previous later not carried" "$(jq -c '[.later[].id] | index("L6")' <<<"$rec")" null
+rec=$(r3 '[]')
+check "missing ids carried as unverified open" \
+	"$(jq -c '[.findings[] | [.id, .status, .unverified]]' <<<"$rec")" \
+	'[["F1","open",true],["F4","open",true],["F5","open",true]]'
+check "carried keep first round" "$(one "$rec" F4)" '["open",2,"minor","d.ts",4,"four",true]'
+check "fixed and declined not carried" "$(jq -c '[.findings[].id | select(. == "F2" or . == "F3")]' <<<"$rec")" "[]"
+check "carried: counts" "$(jq -c '.counts' <<<"$rec")" \
+	'{"open_blocking":2,"critical":1,"important":1,"minor":1,"new":0,"fixed":0,"declined":0,"regressed":0,"later":0,"unverified":3}'
+check "numbering survives an empty round" "$(build_record "$meta2" '[{"severity":"minor","title":"x"}]' "$rec" |
+	jq -r '.findings[] | select(.status == "new") | .id')" F6
+rec=$(r3 '[{"id":"F1","status":"fixed"},{"id":"F1","status":"open"}]')
+check "duplicate keeps the first" "$(jq -c '[.findings[] | select(.id == "F1") | .status]' <<<"$rec")" '["fixed"]'
+rec=$(r3 '[{"id":"F99","status":"open","severity":"important","title":"ghost"}]')
+check "unknown id becomes new" "$(jq -c '.findings[0] | [.id, .status, .first_round, .title]' <<<"$rec")" \
+	'["F6","new",3,"ghost"]'
+rec=$(r3 '[{"id":"F1","status":"maybe"}]')
+check "bad status: open, unverified" "$(one "$rec" F1)" '["open",1,"critical","a.ts",1,"one",true]'
+check "bad status: not carried twice" "$(jq '[.findings[] | select(.id == "F1")] | length' <<<"$rec")" 1
+check "in_delta kept as a boolean" "$(r3 '[{"severity":"minor","title":"t","in_delta":"yes"}]' |
+	jq -c '.findings[0].in_delta')" false
+
+rec=$(build_record "$(jq -c '.ready = "yes"' <<<"$meta2")" '[{"id":"F1","status":"open"}]' "$prev2")
+check "ready yes with open blocking: overridden" "$(jq -c '[.ready, .ready_overridden]' <<<"$rec")" '["yes",true]'
+rec=$(build_record "$(jq -c '.ready = "yes"' <<<"$meta2")" \
+	'[{"id":"F1","status":"fixed"},{"id":"F4","status":"open"},{"id":"F5","status":"declined"}]' "$prev2")
+check "ready yes, nothing blocking: not overridden" "$(jq -c '[.ready_overridden, .counts.open_blocking]' \
+	<<<"$rec")" '[false,0]'
+check "ready no: not overridden" "$(r3 '[]' | jq .ready_overridden)" false
+rec=$(build_record "$(jq -c '.mode = "full" | .mode_reason = "the previous head is gone"' <<<"$meta2")" '[]' "$prev2")
+check "mode and mode_reason kept" "$(jq -c '[.mode, .mode_reason]' <<<"$rec")" '["full","the previous head is gone"]'
+rec=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <<<"$meta2")" \
+	'[{"id":"F1","status":"fixed"}]' "$prev2")
+check "rethink after round 2: no findings, null counts" "$(jq -c '[.findings, .later, ([.counts[]] | unique)]' \
+	<<<"$rec")" '[[],[],[null]]'
+
+# A full round 3 on the round 2 record: every status moves.
+reply='[
+	{"id":"F2","status":"open","in_delta":true},
+	{"id":"F5","status":"fixed"},
+	{"id":"F4","status":"declined","title":"four, declined"},
+	{"id":"F2","status":"fixed"},
+	{"id":"F3","status":"open"},
+	{"id":"F77","status":"fixed","severity":"minor","file":"g.ts","line":7,"title":"unknown"},
+	{"severity":"critical","file":"h.ts","line":8,"title":"in delta","in_delta":true},
+	{"severity":"important","file":"i.ts","line":9,"title":"later one","later":true},
+	{"severity":"nit","title":"dropped"}
+]'
+rec=$(r3 "$reply")
+check "round 3: findings" "$(jq -c '[.findings[] | [.id, .status, .first_round, (.unverified // false)]]' <<<"$rec")" \
+	'[["F2","regressed",1,false],["F5","fixed",1,false],["F4","declined",2,false],["F3","open",1,false],["F6","new",3,false],["F7","new",3,false],["F1","open",1,true]]'
+check "round 3: later" "$(jq -c '[.later[] | [.id, .title]]' <<<"$rec")" '[["L7","later one"]]'
+check "round 3: counts" "$(jq -c '.counts' <<<"$rec")" \
+	'{"open_blocking":4,"critical":2,"important":2,"minor":1,"new":2,"fixed":1,"declined":1,"regressed":1,"later":1,"unverified":1}'
+check "round 3: kept the round 2 head" "$(jq -r .previous_head_sha <<<"$rec")" aaa
 
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \
@@ -137,15 +235,57 @@ check "marker_record: the last marker wins" \
 check "marker_record: no marker, nothing" "$(marker_record $'text\n<!-- gh-pr-review generated -->')" ""
 check "marker_record: broken JSON, nothing" "$(marker_record '<!-- gh-pr-review:round {"round": -->')" ""
 
-line=$(marker_line "$tmp/round.json" 59000)
-check "marker: 59,000-character body drops titles" "$(grep -c '"title"' <<<"$line" || true)" 0
-check "marker: 59,000-character body keeps findings" \
+line=$(marker_line "$tmp/round.json" 58900)
+check "marker: 58,900-character body drops titles" "$(grep -c '"title"' <<<"$line" || true)" 0
+check "marker: 58,900-character body keeps findings" \
 	"$(marker_record "$line" | jq '.findings | length')" 4
-check "marker: fits under 60,000" "$((59000 + 1 + ${#line} <= 60000))" 1
+check "marker: fits under 60,000" "$((58900 + 1 + ${#line} <= 60000))" 1
 line=$(marker_line "$tmp/round.json" 59800)
 check "marker: no room drops later and findings" "$(marker_record "$line" | jq -c '[has("later"), has("findings")]')" \
 	'[false,false]'
 check "marker: counts stay" "$(marker_record "$line" | jq .counts.open_blocking)" 3
+
+build_record "$meta2" "$reply" "$prev2" >"$tmp/round3.json"
+line=$(marker_line "$tmp/round3.json" 1000)
+check "marker: statuses and later round trip" "$(marker_record "$line" | jq -S .)" "$(jq -S . "$tmp/round3.json")"
+check "marker: no -- with statuses" "$(grep -c -- '--' <<<"${line:4:${#line}-8}" || true)" 0
+cap=$((60000 - 1 - ${#line} + 40))
+line=$(marker_line "$tmp/round3.json" "$cap")
+check "marker: over the cap drops titles first" "$(marker_record "$line" |
+	jq -c '[has("later"), (.findings | length), ([.findings[], .later[] | has("title")] | any)]')" '[true,7,false]'
+jq 'del(.findings[].title, .later)' "$tmp/round3.json" >"$tmp/short.json"
+short=$(marker_line "$tmp/short.json" 0)
+line=$(marker_line "$tmp/round3.json" "$((60000 - 1 - ${#short} - 5))")
+check "marker: then later before findings" "$(marker_record "$line" | jq -c '[has("later"), (.findings | length)]')" \
+	'[false,7]'
+check "marker: last ids and counts stay" "$(marker_record "$line" | jq -c '[.last_ids, .counts.unverified]')" \
+	'[{"F":7,"L":7},1]'
+
+# ── progress_line ───────────────────────────────────────────────────────────
+dec='{"label":"converging"}'
+check "progress: all counts" "$(progress_line "$(cat "$tmp/round3.json")" "$prev2" "$dec")" \
+	"### Round 3 · since round 2
+1 fixed · 1 still open · 1 regressed · 2 new (1 in the new commits) · 1 declined · 1 for later · 1 not re-checked \
+· open blocking: 4 (was 3) · loop: converging"
+rec=$(r3 '[{"id":"F1","status":"fixed"},{"id":"F4","status":"open"},{"id":"F5","status":"open"},
+	{"severity":"minor","title":"n"}]')
+check "progress: zero counts dropped" "$(progress_line "$rec" "$(jq -c 'del(.counts)' <<<"$prev2")" \
+	'{"label":"nit-loop"}' | tail -n 1)" "1 fixed · 2 still open · 1 new · open blocking: 1 · loop: nit loop"
+check "progress: unverified, no label" "$(progress_line "$(r3 '[]')" "$prev2" '{"label":null}' | tail -n 1)" \
+	"3 not re-checked · open blocking: 2 (was 3)"
+check "progress: still open excludes unverified" "$(progress_line "$(r3 '[{"id":"F1","status":"open"}]')" "$prev2" \
+	"$dec" | tail -n 1)" "1 still open · 2 not re-checked · open blocking: 2 (was 3) · loop: converging"
+rec=$(build_record "$(jq -c '.mode = "full" | .mode_reason = "the previous head is gone"' <<<"$meta2")" \
+	'[{"id":"F1","status":"fixed"},{"id":"F4","status":"fixed"},{"id":"F5","status":"fixed"}]' "$prev2")
+check "progress: full with a reason" "$(progress_line "$rec" "$prev2" '{"label":"ready"}' | tail -n 1)" \
+	"3 fixed · open blocking: 0 (was 3) · loop: ready · full review (the previous head is gone)"
+check "progress: full without a reason" "$(progress_line "$(jq -c '.mode_reason = null' <<<"$rec")" "$prev2" \
+	'{"label":"ready"}' | tail -n 1)" "3 fixed · open blocking: 0 (was 3) · loop: ready · full review"
+check "progress: no previous record, nothing" "$(progress_line "$rec" null "$dec")" ""
+rec=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <<<"$meta2")" '[]' "$prev2")
+check "progress: rethink" "$(progress_line "$rec" "$prev2" "$dec")" \
+	"### Round 3 · since round 2
+code review skipped: the approach needs a rethink"
 
 # ── backfill_record ─────────────────────────────────────────────────────────
 pr='{"host":"github.com","owner":"o","repo":"r","number":7}'
