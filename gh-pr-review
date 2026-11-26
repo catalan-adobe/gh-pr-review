@@ -856,22 +856,24 @@ REVIEW=$(assemble_review "$LOOP_LINE" "$APPROACH" "$CODE_REVIEW")
 
 # ── record ─────────────────────────────────────────────────────────────────────────
 # round.json starts as a preview; the post block turns it into the posted round. A failure here never blocks the post.
+# It runs under `if !`, where errexit is off: every step checks its own status, and the record is checked before use.
 write_round_record() {
-	local findings source=model code_review=true approach ready meta
+	local findings source=model code_review=true approach ready meta tmp="${RECORD_FILE}.tmp"
 	if [[ "$APPROACH_VERDICT" == rethink ]]; then
 		code_review=false
 		findings='[]'
 	elif jq -e -L "$LIB_DIR" 'include "records"; findings_block_ok' "$FINDINGS_FILE" >/dev/null 2>&1; then
-		findings=$(jq -c . "$FINDINGS_FILE")
+		findings=$(jq -c . "$FINDINGS_FILE") || return 1
 	else
 		source=parsed
+		# A parse failure leaves a parsed record without findings, as the spec says: it never blocks the post.
 		findings=$(parse_findings "$REVIEW_BODY_FILE") || findings='[]'
 	fi
 	case "$APPROACH_VERDICT" in
 	sound | questionable | rethink) approach="$APPROACH_VERDICT" ;;
 	*) if [[ "$SKIP_APPROACH" == "true" ]]; then approach=skipped; else approach=unknown; fi ;;
 	esac
-	ready=$(normalize_ready "$(last_verdict 'ready to merge' "$CODE_REVIEW")")
+	ready=$(normalize_ready "$(last_verdict 'ready to merge' "$CODE_REVIEW")") || return 1
 	meta=$(jq -n --arg source "$source" --arg host "$GH_HOST_NAME" --arg owner "$OWNER" --arg repo "$REPO" \
 		--argjson number "$PR_NUM" --argjson round "$ROUND" --arg reviewer "$ME" --arg model "$MODEL" \
 		--arg base "$BASE_SHA" --arg head "$HEAD_SHA" --argjson previous "$PREVIOUS_RECORD" \
@@ -881,10 +883,20 @@ write_round_record() {
 		  mode: "full", reviewer: (if $reviewer == "" then null else $reviewer end), model: $model,
 		  base_sha: $base, head_sha: $head, previous_head_sha: ($previous.head_sha? // null),
 		  approach: $approach, ready: $ready, decision: null, posted_at: null,
-		  code_review: $code_review, preview: true, id_floor: $id_floor}')
-	build_record "$meta" "$findings" "$PREVIOUS_RECORD" |
+		  code_review: $code_review, preview: true, id_floor: $id_floor}') || return 1
+	if ! build_record "$meta" "$findings" "$PREVIOUS_RECORD" |
 		jq --argjson loop "$LOOP" --argjson forced "$FORCED" \
-			'.loop = ($loop | {label, flags, decision}) | .forced = $forced' >"$RECORD_FILE"
+			'.loop = ($loop | {label, flags, decision}) | .forced = $forced' >"$tmp"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	if ! jq -e 'type == "object" and (.round | type == "number") and (.counts | type == "object")' \
+		"$tmp" >/dev/null 2>&1; then
+		echo "Warning: the round record came out malformed." >&2
+		rm -f "$tmp"
+		return 1
+	fi
+	mv "$tmp" "$RECORD_FILE"
 }
 ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
 if ! write_round_record; then
@@ -918,6 +930,11 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		*) DECISION=comment ;;
 		esac
 		echo "Verdict: ${VERDICT:-not found} → ${DECISION}"
+		# An approval says the findings were checked; without a record nothing can show that, so only comment.
+		if [[ "$DECISION" == approve && -z "${RECORD_FILE:-}" ]]; then
+			DECISION=comment
+			echo "No round record for this review: posting as comment, not approve."
+		fi
 	fi
 
 	if [[ "$YES" == "false" ]]; then

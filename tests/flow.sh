@@ -223,6 +223,30 @@ setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n
 run --no-post
 expect "records: --no-post keeps a preview record and posts nothing" '[[ -z $flag && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "true,null" ]]'
 
+# A jq that breaks the record: it fails, or prints a non-record, when asked to build one. Other calls pass through.
+break_record() { # fail | junk
+	local real
+	real=$(PATH="${PATH#"$stub/bin:"}" command -v jq)
+	cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+for a in "\$@"; do
+	if [[ "\$a" == *'build_record(\$meta'* ]]; then [[ $1 == fail ]] && exit 5; echo '{"round":"x"}'; exit 0; fi
+done
+exec "$real" "\$@"
+S
+	chmod +x "$stub/bin/jq"
+}
+for mode in fail junk; do
+	setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+	break_record "$mode"
+	run
+	expect "record $mode: the review is still posted, without a marker" \
+		'[[ $rc == 0 && $body == *"Ready to merge?"* && $body != *"gh-pr-review:round"* ]] &&
+			grep -q "could not write the round record" "$stub/out.log"'
+	expect "record $mode: no record, so a bare yes comments instead of approving" \
+		'[[ $flag == --comment && -z $record ]] && grep -q "posting as comment, not approve" "$stub/out.log"'
+done
+
 # ── loop check
 rounds_with() { # blocking per earlier round... -> REST reviews whose markers carry those counts
 	local i=0 b out='[]' rec
