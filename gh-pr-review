@@ -475,14 +475,19 @@ write_pr_context "$CONTEXT_DIR"
 
 # ── previous round ─────────────────────────────────────────────────────────────────
 # Round 2 and later build on the last round with a code review (a Rethink round has none): its open findings are
-# re-checked by ID, and what changed since its head is reviewed in full. Anything unusable makes a full round.
+# re-checked by ID, and what changed since its head is reviewed in full. Anything unusable makes a full round, a
+# record without its findings list included: the open findings it had cannot be re-checked, so nothing may be
+# skipped. PREVIOUS_OPEN counts only a list that is there.
 FINDINGS_BASE=$(jq -c '[.[] | select(.code_review != false)] | last // null' <<<"$RECORDS")
 BASE_ROUND=$(jq -r '.round // empty' <<<"$FINDINGS_BASE")
-PREVIOUS_OPEN=$(jq '[.findings[]? | select(.status == "open" or .status == "new" or .status == "regressed")] | length' \
-	<<<"$FINDINGS_BASE")
+FINDINGS_KNOWN=$(jq -L "$LIB_DIR" 'include "records"; has_findings_list' <<<"$FINDINGS_BASE")
+PREVIOUS_OPEN=$(jq -L "$LIB_DIR" 'include "records"; if has_findings_list then [.findings[] | objects
+	| select(.status == "open" or .status == "new" or .status == "regressed")] | length else 0 end' <<<"$FINDINGS_BASE")
 if [[ "$FINDINGS_BASE" == null ]]; then
 	if [[ "$PREVIOUS_RECORD" == null ]]; then DELTA_REASON="no previous round"; else DELTA_REASON="no earlier code review"; fi
 	DELTA=$(jq -cn --arg reason "$DELTA_REASON" '{mode: "full", reason: $reason, commands: []}')
+elif [[ "$FINDINGS_KNOWN" != true ]]; then
+	DELTA='{"mode":"full","reason":"the last record lost its findings to the size cap","commands":[]}'
 elif [[ "$FULL_ROUND" == "true" ]]; then
 	DELTA='{"mode":"full","reason":"--full","commands":[]}'
 else

@@ -403,6 +403,18 @@ two_rounds
 run
 expect "unverified: a forgotten finding is carried as open, not re-checked" '[[ $(jq -r "[.findings[] | select(.unverified) | .id] | join(\" \")" <<<"$record") == "F1 F3" && $body == *"2 not re-checked"* && $flag == --comment ]]'
 
+# A marker cut to fit the size cap: the counts survive, the findings do not. Nothing can be re-checked by ID, so the
+# round reviews the whole PR, as a first code review.
+for capped in '"findings_dropped":true' '"findings_dropped":false'; do
+	setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n```'
+	add_round '{"schema":1,"source":"model","round":1,"head_sha":"'"$H1"'","base_sha":"'"$B1"'","approach":"sound","ready":"no","code_review":true,"findings":[{"id":"F1","severity":"important","status":"new","first_round":1,"file":"a.js","line":3,"title":"thing breaks"}],"counts":{"open_blocking":1,"critical":0,"important":1,"minor":0}}' $'### Issues\n- round one'
+	add_round '{"schema":1,"source":"model","round":2,"head_sha":"'"$H2"'","base_sha":"'"$B1"'","approach":"sound","ready":"no","code_review":true,'"$capped"',"last_ids":{"F":3,"L":0},"counts":{"open_blocking":3,"critical":1,"important":2,"minor":0}}' $'### Issues\n- round two'
+	run
+	expect "capped marker ($capped): a full round that says why" '[[ $rc == 0 && $(jq -r ".round, .mode, .mode_reason" <<<"$record" | paste -sd, -) == "3,full,the last record lost its findings to the size cap" ]] && grep -q "mode: full (the last record lost its findings" "$stub/out.log"'
+	expect "capped marker ($capped): no rule 1, no rule 3, the first-round format" '! grep -q -e "## Previous round" -e "Check every earlier finding" -e "Outside what changed" -e "Fixed since the last round" "$stub/code-prompt.txt" && [[ -z $(session_file previous-findings.md) ]]'
+	expect "capped marker ($capped): an empty reply does not claim progress over the lost findings" '[[ $(sed -n 4p <<<"$body") == "open blocking: 0 · "* && $body != *"(was 3)"* && $(sed -n 4p <<<"$body") == *"full review (the last record lost its findings to the size cap)" ]]'
+done
+
 setup $'### Approach\n\n**Approach:** Sound' "$round3"
 add_round '{"schema":1,"source":"model","round":1,"head_sha":"'"$H1"'","base_sha":"'"$B1"'","approach":"rethink","ready":"unknown","code_review":false,"findings":[],"counts":{"open_blocking":null}}' $'### Approach\n\n**Approach:** Rethink'
 run

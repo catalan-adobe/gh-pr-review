@@ -211,6 +211,27 @@ check "round 3: counts" "$(jq -c '.counts' <<<"$rec")" \
 	'{"open_blocking":4,"critical":2,"important":2,"minor":1,"new":2,"fixed":1,"declined":1,"regressed":1,"later":1,"unverified":1}'
 check "round 3: kept the round 2 head" "$(jq -r .previous_head_sha <<<"$rec")" aaa
 
+# A marker cut to fit the size cap: counts and last_ids kept, findings list gone. Nothing to carry, no ID to know.
+capped2=$(jq -c '.last_ids = {F: 5, L: 6}' <<<"$prev2")
+for capped in "$(jq -c 'del(.findings) | .findings_dropped = true' <<<"$capped2")" \
+	"$(jq -c 'del(.findings)' <<<"$capped2")" "$(jq -c '.findings_dropped = true' <<<"$capped2")"; do
+	what=$(jq -r 'if has("findings") then "findings_dropped with a list" elif .findings_dropped then "findings_dropped"
+		else "no findings key" end' <<<"$capped")
+	rec=$(build_record "$meta2" '[]' "$capped")
+	check "capped previous ($what): nothing carried" "$(jq -c '[.findings, .counts.open_blocking, .counts.unverified]' \
+		<<<"$rec")" '[[],0,0]'
+	check "capped previous ($what): no 'was' in the progress line" \
+		"$(progress_line "$rec" "$capped" '{"label":null}' | tail -n 1)" "open blocking: 0"
+	rec=$(build_record "$meta2" '[{"id":"F1","status":"fixed"},{"id":"F2","status":"open","severity":"important","title":"t"}]' \
+		"$capped")
+	check "capped previous ($what): an ID it cannot know is new" "$(jq -c '[.findings[] | [.id, .status]]' <<<"$rec")" \
+		'[["F6","new"]]'
+done
+empty=$(jq -c '.findings = [] | .counts.open_blocking = 0' <<<"$prev2")
+rec=$(build_record "$meta2" '[]' "$empty")
+check "empty previous list: a known zero, kept in the progress line" \
+	"$(progress_line "$rec" "$empty" '{"label":null}' | tail -n 1)" "open blocking: 0 (was 0)"
+
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \
 	"Yes (with fixes)=yes-with-fixes" "yes — with fixes=yes-with-fixes" "No — see Critical=no" "no.=no" \

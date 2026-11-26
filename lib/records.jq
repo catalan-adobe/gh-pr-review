@@ -82,13 +82,19 @@ def _entry:
 		file: (.file | _str), line: (.line | _num), title: (.title | _str | _title100), in_delta: (.in_delta == true),
 		later: (.later == true)};
 
+# True when a record still has its findings list. A marker cut to fit GitHub's size cap can keep the counts but drop
+# the list (findings_dropped): an empty list is a round with no findings, a missing one is unknown.
+def has_findings_list: type == "object" and (.findings | type) == "array" and .findings_dropped != true;
+
 # The findings of a code-review round, from the model's array and the previous record's findings.
 # Out: {findings, later, last_ids}. Known IDs keep their ID and first round, with the model's status (open on an
 # ID last marked fixed is regressed; a status outside fixed, open, declined is open and unverified). Entries
 # without an ID, or with an ID the previous record doesn't have, are new: F<n>, or L<n> with later true. The first
-# entry for an ID wins. Previous open, new or regressed findings the reply leaves out are carried, unverified.
+# entry for an ID wins. Previous open, new or regressed findings the reply leaves out are carried, unverified. A
+# previous record without its findings list (has_findings_list) knows no ID and carries nothing.
 def _track($findings; $prev; $round):
-	(($prev // {}).findings // [] | map(objects | select(.id | type == "string"))) as $old
+	(if $prev | has_findings_list then $prev.findings | map(objects | select(.id | type == "string")) else [] end)
+	as $old
 	| (reduce $old[] as $f ({}; if has($f.id) then . else .[$f.id] = $f end)) as $known
 	| reduce ((if ($findings | type) == "array" then $findings else [] end)[] | objects | _entry) as $e (
 		{seen: {}, findings: [], later: [], f: (($prev // {}) | _last_number("F")), l: (($prev // {}) | _last_number("L"))};
@@ -190,9 +196,10 @@ def progress_line($prev; $decision):
 					else "" end)] else [] end)
 				+ part(n("declined"); "declined") + part(($r.later // []) | length; "for later")
 				+ part($unverified; "not re-checked")
+				# "was" only when the previous findings were there to re-check: else the two counts measure different things.
 				+ ["open blocking: \($r.counts.open_blocking // 0)"
-					+ (if ($prev.counts.open_blocking? | type) == "number" then " (was \($prev.counts.open_blocking))"
-					else "" end)]
+					+ (if ($prev.counts.open_blocking? | type) == "number" and ($prev | has_findings_list)
+					then " (was \($prev.counts.open_blocking))" else "" end)]
 				+ (if ($decision.label? | type) == "string"
 					then ["loop: " + (if $decision.label == "nit-loop" then "nit loop" else $decision.label end)]
 					else [] end)
