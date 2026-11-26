@@ -20,30 +20,42 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 	echo '{"comments":[],"reviews":[]}' >"$stub/discussion.json"
 	echo '[]' >"$stub/rest-reviews.json"
 	echo '[]' >"$stub/rest-comments.json"
-	rm -f "$stub/git.head" "$stub/git.base" "$stub/git.missing" "$stub/git.rebased" "$stub/git.retargeted" "$stub/git.diff-fails" "$stub/git.far-base" "$stub/git.deepened"
+	rm -f "$stub/git.base" "$stub/git.missing" "$stub/git.rebased" "$stub/git.retargeted" "$stub/git.diff-fails" "$stub/git.far-base" "$stub/git.deepened"
+	# The PR head the Nth "pr view" returns: line N of heads, or its last line. The clone checks out line 1.
+	echo head1 >"$stub/heads"
 	cat >"$stub/bin/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
-*pulls/1/reviews*) cat "$stub/rest-reviews.json" ;;
+*"--method POST"*pulls/1/reviews*)
+	[[ -f "$stub/post.fail" ]] && exit 1
+	while [[ \$# -gt 0 ]]; do [[ "\$1" == --input ]] && cp "\$2" "$stub/posted.json"; shift; done ;;
+*pulls/1/reviews*)
+	# reviews.fail: how many reads of the reviews fail from now on.
+	n=\$(cat "$stub/reviews.fail" 2>/dev/null || echo 0)
+	[[ "\$n" -gt 0 ]] && { echo "\$((n - 1))" >"$stub/reviews.fail"; exit 1; }
+	cat "$stub/rest-reviews.json" ;;
 *issues/1/comments*) cat "$stub/rest-comments.json" ;;
 *pulls/1/comments*) echo '[]' ;;
 *"auth status"*) exit 0 ;;
 *"api"*user*) echo me ;;
 *graphql*) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}' ;;
 *"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; cat "$stub/discussion.json" ;;
-*"pr view"*) echo '{"title":"T","body":"B","headRefName":"h","baseRefName":"main","author":{"login":"bob"},"additions":1,"deletions":0,"changedFiles":1,"headRefOid":"head1"}' ;;
-*"pr review"*) printf '%s\n' "\$@" >"$stub/posted.args" ;;
+*"pr view"*)
+	n=\$((\$(cat "$stub/heads.n" 2>/dev/null || echo 0) + 1))
+	echo "\$n" >"$stub/heads.n"
+	head=\$(sed -n "\${n}p" "$stub/heads")
+	[[ -n "\$head" ]] || head=\$(tail -1 "$stub/heads")
+	echo '{"title":"T","body":"B","headRefName":"h","baseRefName":"main","author":{"login":"bob"},"additions":1,"deletions":0,"changedFiles":1,"headRefOid":"'"\$head"'"}' ;;
 esac
 S
-	# git: HEAD is aaaa and the merge-base bbbb (or the SHAs in git.head and git.base). Any other SHA resolves to
-	# itself, unless listed in git.missing. The
-	# previous head is an ancestor of the head unless git.rebased exists, and the previous base one of the base unless
+	# git: HEAD is the first line of heads (the PR head the clone checks out) and the merge-base bbbb (or the SHA in
+	# git.base). Any other SHA resolves to itself, unless listed in git.missing. The previous head is an ancestor of the head unless git.rebased exists, and the previous base one of the base unless
 	# git.retargeted exists. git.diff-fails makes `git diff` fail.
 	# git.far-base: no merge-base until a `fetch --deepen` (logged in git.deepened); "never": not even then.
 	cat >"$stub/bin/git" <<'S'
 #!/usr/bin/env bash
 s=$(cd "$(dirname "$0")/.." && pwd)
-H=$(cat "$s/git.head" 2>/dev/null || echo aaaa) B=$(cat "$s/git.base" 2>/dev/null || echo bbbb)
+H=$(head -1 "$s/heads" 2>/dev/null || echo aaaa) B=$(cat "$s/git.base" 2>/dev/null || echo bbbb)
 for a in "$@"; do [[ "$a" == clone ]] && mkdir -p "${@: -1}"; done
 case "$*" in
 *"rev-parse --is-shallow-repository"*) echo false ;;
@@ -77,6 +89,8 @@ if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] &
 	[[ "${4:-}" == code ]] && exit 7
 	# A round someone else posts while this review runs.
 	[[ -f "$stub/reviews.after" ]] && cp "$stub/reviews.after" "$stub/rest-reviews.json"
+	# GitHub failing the reads of the history from now on.
+	[[ -f "$stub/reviews.fail.after" ]] && cp "$stub/reviews.fail.after" "$stub/reviews.fail"
 	printf '%s' "\${*: -1}" >"$stub/code-prompt.txt"; cat "$stub/review.out"; fi
 S
 	chmod +x "$stub/bin/"*
@@ -139,13 +153,16 @@ run_tty() { # prompt answer [prompt answer]...: the interactive path, on a termi
 
 fresh() { # each run starts with no model calls, nothing posted and no session
 	: >"$stub/pi.calls"
-	rm -rf "$stub/posted.args" "$stub/work/pr-review-sessions"
+	rm -rf "$stub/posted.json" "$stub/heads.n" "$stub/work/pr-review-sessions"
 }
 
 collect() {
 	calls=$(wc -l <"$stub/pi.calls" | tr -d ' ')
-	body=$(sed -n '/^--body$/,$p' "$stub/posted.args" 2>/dev/null | sed 1d || true)
-	flag=$(grep -x -- '--\(comment\|approve\|request-changes\)' "$stub/posted.args" 2>/dev/null || true)
+	# What the review API got: the body, the event as the old gh pr review flag, and the commit it is bound to.
+	body=$(jq -r '.body' "$stub/posted.json" 2>/dev/null || true)
+	flag=$(jq -r '{APPROVE: "--approve", COMMENT: "--comment", REQUEST_CHANGES: "--request-changes"}[.event] // "?"' \
+		"$stub/posted.json" 2>/dev/null || true)
+	commit=$(jq -r '.commit_id' "$stub/posted.json" 2>/dev/null || true)
 	record=$(cat "$stub"/work/pr-review-sessions/pr-review-*/round.json 2>/dev/null || true)
 }
 
@@ -269,6 +286,20 @@ expect "records: no room for the marker posts the header only, with a warning" \
 		grep -q "no room for its round marker" "$stub/out.log"'
 expect "records: round.json keeps the posted record" '[[ $(jq -r ".round, .preview, .decision" <<<"$record" | paste -sd, -) == "1,false,request-changes" ]]'
 
+# Room for the minimal marker, not for the counts: the marker says the findings are missing, and the counts come back
+# from the Markdown.
+setup $'**Approach:** Sound' $'#### 🚨 Critical (Must Fix Before Merge)\n- **`a.js:1` — boom.**\n\n'"$(head -c 59600 /dev/zero | tr '\0' x)"$'\n\n**Ready to merge?** No'
+run
+expect "records: no room for the counts posts the minimal marker" \
+	'[[ $rc == 0 && $(sed -n 2p <<<"$body") == "<!-- gh-pr-review:round {\"schema\":1,\"round\":1,\"findings_dropped\":true,\"last_ids\":{\"F\":1,\"L\":0}} -->" ]] &&
+		! grep -q "no room for its round marker" "$stub/out.log"'
+jq -n --arg body "$body" '[{id: 1, user: {login: "me", type: "User"}, state: "CHANGES_REQUESTED", commit_id: "head1",
+	submitted_at: "2026-05-01T10:00:00Z", body: $body}]' >"$stub/rest-reviews.json"
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "records: a minimal marker reads back with the Markdown's counts and findings_dropped" \
+	'[[ $rc == 0 && $(jq -c ".records[0] | [.round, .findings_dropped, .counts.critical, .counts.open_blocking, .last_ids.F, has(\"findings\")]" "$stub/rounds.json") == "[1,true,1,1,1,false]" ]]'
+
 setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`b.js:9` — data loss.**\n\n**Ready to merge?** No'
 run
 expect "records: no block falls back to parsing" '[[ $rc == 0 && $(jq -r ".source, .findings[0].severity, .counts.open_blocking" <<<"$record" | paste -sd, -) == "parsed,critical,1" ]]'
@@ -282,6 +313,12 @@ setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before M
 run
 expect "records: an invented ID without a severity falls back to the Markdown" \
 	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .findings[0].id, .findings[0].file" <<<"$record" | paste -sd, -) == "parsed,1,F1,n.go" ]]'
+
+setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`b.js:9` — data loss.**\n\n**Ready to merge?** Yes with fixes\n\n```json findings\n[]\n```'
+run
+expect "records: an empty block next to a Critical bullet falls back to the Markdown" \
+	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .counts.open_blocking, .findings[0].file" <<<"$record" | paste -sd, -) == "parsed,1,1,b.js" ]] &&
+		grep -q "does not match the review" "$stub/out.log"'
 
 setup $'### Approach\n**Approach:** Rethink' 'never used'
 run
@@ -314,14 +351,16 @@ setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n
 run --no-post
 expect "records: --no-post keeps a preview record and posts nothing" '[[ -z $flag && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "true,null" ]]'
 
-# A jq that breaks the record: it fails, or prints a non-record, when asked to build one. Other calls pass through.
-break_record() { # fail | junk
+# A jq that breaks the record: it fails, or prints a non-record, when asked to build one; or (posted) it fails the
+# final build of the posted record. Other calls pass through.
+break_record() { # fail | junk | posted
 	local real
 	real=$(PATH="${PATH#"$stub/bin:"}" command -v jq)
 	cat >"$stub/bin/jq" <<S
 #!/usr/bin/env bash
 for a in "\$@"; do
-	if [[ "\$a" == *'build_record(\$meta'* ]]; then [[ $1 == fail ]] && exit 5; echo '{"round":"x"}'; exit 0; fi
+	if [[ $1 != posted && "\$a" == *'build_record(\$meta'* ]]; then [[ $1 == fail ]] && exit 5; echo '{"round":"x"}'; exit 0; fi
+	if [[ $1 == posted && "\$a" == *'.preview = false'* ]]; then exit 5; fi
 done
 exec "$real" "\$@"
 S
@@ -337,6 +376,15 @@ for mode in fail junk; do
 	expect "record $mode: no record, so a bare yes comments instead of approving" \
 		'[[ $flag == --comment && -z $record ]] && grep -q "posting as comment, not approve" "$stub/out.log"'
 done
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+break_record posted
+run_tty "Post as review" ""
+expect "posted record fails, default approve taken at the prompt: posts as comment, without a marker" \
+	'[[ $rc == 0 && $flag == --comment && $body != *"gh-pr-review:round"* ]] &&
+		grep -q "posting as comment, not approve" "$stub/out.log" && grep -q "Enter = approve" "$stub/out.log"'
+run_tty "Post as review" a
+expect "posted record fails, approve typed at the prompt: stays an approval" '[[ $rc == 0 && $flag == --approve ]]'
 
 # ── loop check
 rounds_with() { # blocking per earlier round... -> REST reviews whose markers carry those counts
@@ -435,7 +483,7 @@ expect "after a Rethink on this head: --skip-approach --check exits 0" '[[ $rc =
 run
 expect "after a Rethink on this head: a full run has nothing new" '[[ $rc == 5 && $calls == 0 ]]'
 
-# Overlapping runs: round 2, by ann, lands while this review runs.
+# Overlapping runs: round 2, by ann, lands while this review runs. This one never posts on top of it.
 overlap() {
 	setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[{"severity":"minor","title":"nit"}]\n```'
 	rounds_with 2 >"$stub/rest-reviews.json"
@@ -445,17 +493,25 @@ overlap() {
 overlap
 run
 expect "overlap, -y: nothing posted, exit 6, session kept" \
-	'[[ $rc == 6 && -z $flag && -n $record ]] && grep -q "round 2 by ann" "$stub/out.log"'
+	'[[ $rc == 6 && -z $flag && $(jq -r .preview <<<"$record") == true ]] && grep -q "round 2 by ann" "$stub/out.log"'
 overlap
-run_tty "Post as review" "" "Post anyway" n
-expect "overlap, in a terminal: no posts nothing, exit 6" \
-	'[[ $rc == 6 && -z $flag ]] && grep -q "Post anyway as round 3? \[y/N\]" "$stub/out.log"'
-overlap
-run_tty "Post as review" "" "Post anyway" y
-# previous_head_sha stays the head this review compared against (round 1's), not the round that landed meanwhile.
-expect "overlap, in a terminal: yes posts as round 3, IDs after the new round" \
-	'[[ $rc == 0 && $flag == --approve && $(jq -r ".round, .findings[0].id, .findings[0].first_round, .previous_head_sha" <<<"$record" |
-		paste -sd, -) == "3,F6,3,h1" && $body == *"\"round\":3"* ]]'
+run_tty "Post as review" ""
+expect "overlap, in a terminal: no prompt, nothing posted, exit 6" \
+	'[[ $rc == 6 && -z $flag ]] && grep -q "round 2 by ann" "$stub/out.log" && ! grep -q "Post anyway" "$stub/out.log"'
+
+# The history can't be read again before posting: one retry, then nothing is posted.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+echo 1 >"$stub/reviews.fail.after"
+run
+expect "final history read fails once: the retry reads it, and the review is posted" '[[ $rc == 0 && $flag == --approve ]]'
+echo 2 >"$stub/reviews.fail.after"
+run
+expect "final history read fails twice: exit 1, nothing posted, the session kept" \
+	'[[ $rc == 1 && -z $flag && $(jq -r .preview <<<"$record") == true ]] &&
+		grep -q "history could not be verified; nothing was posted" "$stub/out.log" && ! grep -q "exit 6" "$stub/out.log"'
+echo 2 >"$stub/reviews.fail.after"
+run_tty "Post as review" ""
+expect "final history read fails twice, in a terminal: exit 1, nothing posted" '[[ $rc == 1 && -z $flag ]]'
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
@@ -506,7 +562,7 @@ run
 expect "round 3: incremental since round 2" '[[ $rc == 0 && $(jq -r ".round, .mode, .previous_head_sha" <<<"$record" | paste -sd, -) == "3,incremental,$H2" ]] && grep -q "mode: incremental since round 2" "$stub/out.log"'
 expect "round 3: open IDs are mandatory, fixed ones only if back" 'grep -q "Every open ID listed is mandatory" "$stub/code-prompt.txt" && grep -q "Those are not mandatory: report one only if the problem is back" "$stub/code-prompt.txt"'
 expect "round 3: the code prompt has the three rules" 'grep -q "## Previous round" "$stub/code-prompt.txt" && grep -q "Check every earlier finding" "$stub/code-prompt.txt" && grep -q "Review what changed since round 2 in full" "$stub/code-prompt.txt" && grep -q "Outside what changed, raise only Critical" "$stub/code-prompt.txt"'
-expect "round 3: the diff since the previous head" 'grep -qF "git diff --stat $H2..aaaa" "$stub/code-prompt.txt" && grep -qF "git diff $H2..aaaa" "$stub/code-prompt.txt"'
+expect "round 3: the diff since the previous head" 'grep -qF "git diff --stat $H2..head1" "$stub/code-prompt.txt" && grep -qF "git diff $H2..head1" "$stub/code-prompt.txt"'
 expect "round 3: the later-round output format" 'grep -q "Fixed since the last round" "$stub/code-prompt.txt" && grep -q "\"id\": \"F3\" or null" "$stub/code-prompt.txt"'
 expect "round 3: the findings block asks for a decline's reason" 'grep -qF "\"reason\": \"<the quoted reason>\" or null" "$stub/code-prompt.txt" && grep -qF "Quote it, in \`\"reason\"\`" "$stub/code-prompt.txt"'
 expect "round 3: previous-findings.md lists the open findings first" '[[ $(session_file previous-findings.md | sed -n 1,2p) == "F1 · important · a.js:3 · thing breaks"$'"'"'\n'"'"'"F3 · critical · c.js:9 · data loss" ]]'
@@ -516,7 +572,7 @@ expect "round 3: delta-files.txt" '[[ $(session_file delta-files.txt) == d.js ]]
 expect "round 3: statuses and IDs" '[[ $(jq -r "([.findings[] | .id + \":\" + .status] | join(\" \")), (.later | map(.id) | join(\" \")), .counts.open_blocking" <<<"$record" | paste -sd, -) == "F1:fixed F3:open F4:new,L1,2" ]]'
 expect "round 3: a churning loop adds the next move" '[[ $body == *"loop: churning"*"**Next:** "* ]]'
 expect "round 3: the progress line opens the body" '[[ $(sed -n 3p <<<"$body") == "### Round 3 · since round 2" && $(sed -n 4p <<<"$body") == "1 fixed · 1 still open · 1 new (1 in the new commits) · 1 for later · open blocking: 2 (was 2)"* ]]'
-expect "round 3: the owner starts from its previous verdict" 'grep -q "## Your previous verdict (round 2)" "$stub/owner-prompt.txt" && grep -q "Unchanged since round 2" "$stub/owner-prompt.txt" && grep -qF "git diff --stat $H2..aaaa" "$stub/owner-prompt.txt"'
+expect "round 3: the owner starts from its previous verdict" 'grep -q "## Your previous verdict (round 2)" "$stub/owner-prompt.txt" && grep -q "Unchanged since round 2" "$stub/owner-prompt.txt" && grep -qF "git diff --stat $H2..head1" "$stub/owner-prompt.txt"'
 expect "round 3: previous-approach.md is the Approach section" '[[ $(session_file previous-approach.md) == "### Approach"*"**Approach:** Sound" ]]'
 expect "round 3: the record keeps the label of this round" '[[ $(jq -r ".loop.label" <<<"$record") == churning ]]'
 
@@ -551,7 +607,7 @@ setup $'**Approach:** Sound' "$round3"
 two_rounds
 touch "$stub/git.rebased"
 run
-expect "rebased: a range-diff of the two versions" '[[ $(jq -r ".mode" <<<"$record") == rebased ]] && grep -qF "git range-diff $B1..$H2 bbbb..aaaa" "$stub/code-prompt.txt" && grep -q "The author rebased" "$stub/code-prompt.txt"'
+expect "rebased: a range-diff of the two versions" '[[ $(jq -r ".mode" <<<"$record") == rebased ]] && grep -qF "git range-diff $B1..$H2 bbbb..head1" "$stub/code-prompt.txt" && grep -q "The author rebased" "$stub/code-prompt.txt"'
 
 setup $'**Approach:** Sound' "$round3"
 two_rounds
@@ -641,9 +697,15 @@ expect "after a Rethink-only round: judged afresh, and a full first code review"
 block=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"}]\n```'
 setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** Yes with fixes\n\n'"$block"
 run
-expect "round trip: round 1 posted" '[[ $rc == 0 && $flag == --comment ]]'
-jq -n --arg body "$body" '[{id: 11, user: {login: "me", type: "User"}, state: "COMMENTED", commit_id: "head1",
-	submitted_at: "2026-05-01T10:00:00Z", body: $body}]' >"$stub/rest-reviews.json"
+expect "round trip: round 1 posted, on the reviewed commit" '[[ $rc == 0 && $flag == --comment && $commit == head1 ]]'
+# GitHub's copy of what was posted: the body and the commit the review API got.
+landed() { # id state time -> appends the last posted review to the stub's history
+	jq --arg body "$body" --arg commit "$commit" --argjson id "$1" --arg state "$2" --arg at "$3" '. + [{id: $id,
+		user: {login: "me", type: "User"}, state: $state, commit_id: $commit, submitted_at: $at, body: $body}]' \
+		"$stub/rest-reviews.json" >"$stub/r.json"
+	mv "$stub/r.json" "$stub/rest-reviews.json"
+}
+landed 11 COMMENTED 2026-05-01T10:00:00Z
 (cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
 	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
 expect "round trip: rounds --json reads the posted record back" \
@@ -656,6 +718,73 @@ expect "round trip: the decision sees round 1 on this head" \
 	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>"$stub/out.log") && rc=0 || rc=$?
 expect "round trip: --check exits 5 on the same head" \
 	'[[ $rc == 5 && $(jq -r ".decision, .next_round, .series[0]" "$stub/check.json" | paste -sd, -) == "nothing-new,2,1" ]]'
+
+# The head and the history change on their own between and during the rounds.
+check_json() {
+	fresh
+	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>"$stub/out.log") && rc=0 || rc=$?
+	check=$(jq -r '.decision + "," + (.next_round | tostring)' "$stub/check.json" 2>/dev/null || true)
+}
+echo head2 >"$stub/heads"
+check_json
+expect "round trip: a push makes head2 eligible" '[[ $rc == 0 && $check == run,2 ]]'
+printf '%s' $'**Ready to merge?** Yes' >"$stub/review.out"
+printf 'head2\nhead3\n' >"$stub/heads"
+run
+expect "round trip: round 2 reads head2 while head3 lands: posted on head2, not approved" \
+	'[[ $rc == 0 && $commit == head2 && $flag == --comment &&
+		$(jq -r ".round, .head_sha, .previous_head_sha" <<<"$record" | paste -sd, -) == "2,head2,head1" ]]'
+landed 12 COMMENTED 2026-05-02T10:00:00Z
+echo head3 >"$stub/heads"
+check_json
+expect "round trip: head3 stays eligible after round 2" '[[ $rc == 0 && $check == run,3 ]]'
+echo 2 >"$stub/reviews.fail.after"
+run
+expect "round trip: the final history read fails: nothing posted, exit 1" '[[ $rc == 1 && -z $flag && -z $commit ]]'
+rm -f "$stub/reviews.fail.after" "$stub/reviews.fail"
+check_json
+expect "round trip: head3 is still eligible after the failed run" '[[ $rc == 0 && $check == run,3 ]]'
+jq '. + [{id: 13, user: {login: "ann", type: "User"}, state: "APPROVED", commit_id: "head3",
+	submitted_at: "2026-05-03T10:00:00Z", body: "<!-- gh-pr-review generated -->\n**Ready to merge?** Yes"}]' \
+	"$stub/rest-reviews.json" >"$stub/reviews.after"
+run
+expect "round trip: ann's round on head3 lands during round 3: nothing posted, exit 6" \
+	'[[ $rc == 6 && -z $flag ]] && grep -q "round 3 by ann" "$stub/out.log"'
+rm -f "$stub/reviews.after"
+check_json
+expect "round trip: ann's round covers head3: nothing new" '[[ $rc == 5 && $check == nothing-new,4 ]]'
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "round trip: the history has each round on the commit it read" \
+	'[[ $(jq -c "[.records[] | [.round, .head_sha, .reviewer]]" "$stub/rounds.json") == \
+		"[[1,\"head1\",\"me\"],[2,\"head2\",\"me\"],[3,\"head3\",\"ann\"]]" ]]'
+
+# ── the review is bound to the commit it read
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+run
+expect "commit: the review is posted on the reviewed commit, through the review API" '[[ $rc == 0 && $commit == head1 && $flag == --approve ]]'
+printf 'head1\nhead2\n' >"$stub/heads"
+run
+expect "head moved during the review: posted on the reviewed commit, as a comment, not an approval" \
+	'[[ $rc == 0 && $commit == head1 && $flag == --comment && $(jq -r .head_sha <<<"$record") == head1 ]]'
+expect "head moved during the review: the run and the review say so" \
+	'grep -q "The PR moved to head2 during the review; this review covers head1." "$stub/out.log" &&
+		[[ $body == *"**Note:** The PR moved to head2 during the review; this review covers head1."* ]]'
+run --decision approve
+expect "head moved during the review: an explicit approve is a comment too" '[[ $rc == 0 && $commit == head1 && $flag == --comment ]]'
+printf 'head1\nhead2\n' >"$stub/heads"
+run
+jq -n --arg body "$body" --arg commit "$commit" '[{id: 1, user: {login: "me", type: "User"}, state: "COMMENTED",
+	commit_id: $commit, submitted_at: "2026-05-01T10:00:00Z", body: $body}]' >"$stub/rest-reviews.json"
+echo head2 >"$stub/heads"
+run --check
+expect "head moved during the review: --check on the new head runs" '[[ $rc == 0 ]] && grep -q "Loop check for round 2: run" "$stub/out.log"'
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+touch "$stub/post.fail"
+run
+expect "the review API refuses: exit 1, the session kept, the record still a preview" \
+	'[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] && grep -q "nothing was posted" "$stub/out.log"'
 
 # ── producer to consumer, three code-review rounds: each round reads the last one back as GitHub returns it
 H3=$(printf 'c3%.0s' {1..20})
@@ -671,7 +800,7 @@ r1+=$'#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**
 r1+=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"},'
 r1+=$'{"severity":"critical","file":"c.js","line":9,"title":"data loss"}]\n```'
 setup $'**Approach:** Sound' "$r1"
-echo "$H1" >"$stub/git.head"
+echo "$H1" >"$stub/heads"
 echo "$B1" >"$stub/git.base"
 run
 expect "three rounds: round 1 posted" '[[ $rc == 0 && $(jq -r "[.findings[] | .id + \":\" + .file] | join(\" \")" <<<"$record") == "F1:a.js F2:c.js" ]]'
@@ -684,7 +813,7 @@ r2+=$'**Ready to merge?** No\n\n```json findings\n[{"id":"F2","status":"open","s
 r2+=$'"title":"data loss","in_delta":false,"later":false},{"id":null,"status":"new","severity":"minor","file":"d.js",'
 r2+=$'"line":4,"title":"typo in a comment","in_delta":true,"later":false}]\n```'
 printf '%s' "$r2" >"$stub/review.out"
-echo "$H2" >"$stub/git.head"
+echo "$H2" >"$stub/heads"
 run
 expect "three rounds: round 2 incremental from round 1's head" \
 	'[[ $rc == 0 && $(jq -r ".round, .mode, .previous_head_sha" <<<"$record" | paste -sd, -) == "2,incremental,$H1" ]] && grep -qF "git diff --stat $H1..$H2" "$stub/code-prompt.txt"'
@@ -693,7 +822,7 @@ expect "three rounds: round 2 carries F1, and its marker drops what the body doe
 		[[ $(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" | jq -c "[.findings[] | select(.id != \"F3\") | [.id, .file, .title]]") == "[[\"F2\",\"c.js\",null],[\"F1\",null,null]]" ]]'
 post_back "$H2" 2026-06-02T10:00:00Z
 printf '%s' $'**Ready to merge?** No\n\n```json findings\n[]\n```' >"$stub/review.out"
-echo "$H3" >"$stub/git.head"
+echo "$H3" >"$stub/heads"
 run
 expect "three rounds: round 3 compares with round 2's head" \
 	'[[ $rc == 0 && $(jq -r ".round, .mode, .previous_head_sha" <<<"$record" | paste -sd, -) == "3,incremental,$H2" ]] &&

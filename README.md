@@ -222,14 +222,23 @@ Important) of each round:
 A stop lifts when a person other than the PR author reviews or comments after
 the last round. The author's own replies do not count, so a fix agent posting
 as the author cannot lift its own stop. Comments without an identified user
-(a deleted account) do not count either. `--force-round` runs a round anyway,
+(a deleted account, shown as `ghost`) do not count either. `--force-round` runs a round anyway,
 without asking, and the record says so (`forced`).
 
 Rounds are numbered in the order GitHub received them. Just before posting,
 the tool reads the rounds again: if someone posted one while this review ran,
-it says who, and asks "Post anyway as round N?" in a terminal (the findings
-are kept, renumbered for the new position). With `-y` it posts nothing, keeps
-the session folder, and exits with code 6.
+it says who, posts nothing, keeps the session folder, and exits with code 6,
+in a terminal too: run the review again to review on top of that round. If
+the rounds can't be read again (one retry), it posts nothing either, keeps
+the session, and exits with code 1. Two runs that post at the very same
+moment both land; reading the history then gives the later one the next
+round number and finding IDs.
+
+The review is posted on the commit it read (the review API's `commit_id`), so
+its round covers that commit only. If the PR moved while the review ran, the
+review says so ("the PR moved to … during the review; this review covers …")
+and is never an approval, even with `--decision approve`: it posts as a
+comment. The new commits stay unreviewed, and `--check` runs on them.
 
 `gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
 or 5 (no new commits); `--check --json` prints the decision as JSON for
@@ -241,7 +250,7 @@ scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
 | 1 | Error |
 | 3 | Stopped by the loop check |
 | 5 | No new commits since the last round |
-| 6 | History changed while the review ran: someone posted another round; nothing posted |
+| 6 | History changed while the review ran: someone posted another round; nothing posted, the session is kept |
 
 ## Troubleshooting
 

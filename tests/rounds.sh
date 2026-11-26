@@ -79,21 +79,32 @@ expect "rounds --json: GitHub's position, commit and time win over the marker's"
 expect "rounds --json: a backfilled round keeps the history's ID floor" \
 	'[[ $(jq -c "[.records[0].last_ids.F, .records[2].last_ids.F]" <<<"$out") == "[3,3]" ]]'
 
-# Rounds posted at once, all marked round 1. One has neither commit_id nor submitted_at on GitHub (it sorts first),
-# one has no commit_id, and a pending review is not a round.
-one='{"schema":1,"round":1,"head_sha":"m1","posted_at":"2026-03-01T00:00:00Z","code_review":true,"counts":{"open_blocking":0}}'
+# Rounds posted at once, all marked round 1, each with its new finding F1. One has neither commit_id nor submitted_at
+# on GitHub (it sorts first), one has no commit_id, and a pending review is not a round. The last one claims its
+# right round, 4, but reuses F2, which an earlier round already gave out.
+one='{"schema":1,"round":1,"head_sha":"m1","posted_at":"2026-03-01T00:00:00Z","code_review":true,"counts":{"open_blocking":1},'
+one+='"findings":[{"id":"F1","severity":"important","status":"new","first_round":1,"title":"a"}],"last_ids":{"F":1,"L":0}}'
+four='{"schema":1,"round":4,"code_review":true,"counts":{"open_blocking":0},"last_ids":{"F":2,"L":0},'
+four+='"findings":[{"id":"F2","severity":"minor","status":"new","first_round":4}]}'
 cp "$stub/reviews.json" "$stub/reviews.saved"
-jq -n --arg m "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${one} -->${nl}x" '[
+jq -n --arg m "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${one} -->${nl}x" \
+	--arg four "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${four} -->${nl}x" '[
 	{body: $m, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}},
 	{body: $m, commit_id: null, submitted_at: "2026-03-01T00:00:05Z", user: {login: "ann"}},
 	{body: $m, commit_id: null, submitted_at: null, user: null},
-	{body: $m, commit_id: "c9", submitted_at: null, user: {login: "me"}, state: "PENDING"}]' >"$stub/reviews.json"
+	{body: $m, commit_id: "c9", submitted_at: null, user: {login: "me"}, state: "PENDING"},
+	{body: $four, commit_id: "c4", submitted_at: "2026-03-02T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "rounds: duplicate marker rounds are numbered by submission order" \
-	'[[ $(jq -c "[.records[] | .round]" <<<"$out") == "[1,2,3]" ]]'
+	'[[ $(jq -c "[.records[] | .round]" <<<"$out") == "[1,2,3,4]" ]]'
 expect "rounds: the marker's head and time stay when GitHub has none" \
 	'[[ $(jq -r ".records[0] | .head_sha, .posted_at" <<<"$out" | paste -sd, -) == "m1,2026-03-01T00:00:00Z" &&
-		$(jq -r ".records[1:][] | .head_sha, .reviewer" <<<"$out" | paste -sd, -) == "c1,me,m1,ann" ]]'
+		$(jq -r ".records[1:3][] | .head_sha, .reviewer" <<<"$out" | paste -sd, -) == "c1,me,m1,ann" ]]'
+expect "rounds: rounds posted at once get their own new IDs, first_round and last_ids" \
+	'[[ $(jq -c "[.records[] | [.findings[0].id, .findings[0].first_round, .last_ids.F]]" <<<"$out") == \
+		"[[\"F1\",1,1],[\"F2\",2,2],[\"F3\",3,3],[\"F4\",4,4]]" ]]'
+expect "rounds: reconciling keeps the rest of the finding" \
+	'[[ $(jq -c "[.records[2].findings[0] | .severity, .status, .title]" <<<"$out") == "[\"important\",\"new\",\"a\"]" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
 # A history far past the argument limits (128 KiB per argument on Linux, 1 MiB in all on macOS): 20 rounds of
@@ -121,6 +132,8 @@ out=$(lifted "[{\"user\": null, $late}]")
 expect "lifted_since: a comment with no user does not lift" '[[ $out == false ]]'
 out=$(lifted "[{\"user\": {\"login\": \"\", \"type\": \"User\"}, $late}]")
 expect "lifted_since: an empty login does not lift" '[[ $out == false ]]'
+out=$(lifted "[{\"user\": {\"login\": \"ghost\", \"type\": \"User\"}, $late}]")
+expect "lifted_since: GitHub's deleted-account placeholder (ghost) does not lift" '[[ $out == false ]]'
 echo '[]' >"$stub/comments.json"
 
 out=$(rounds) && rc=0 || rc=$?

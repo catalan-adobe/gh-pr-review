@@ -23,7 +23,7 @@
 #   -h, --help      Show this help
 #
 # Exit codes: 0 done, 1 error, 3 stopped by the loop check, 5 no new commits since the last round,
-#   6 another round was posted while the review ran (with -y; nothing posted, the session is kept).
+#   6 another round was posted while the review ran (nothing posted, the session is kept).
 #
 # Examples:
 #   gh pr-review https://github.com/owner/repo/pull/42
@@ -1153,17 +1153,28 @@ fi
 # It runs under `if !`, where errexit is off: every step checks its own status, and the record is checked before use.
 THIS_LOOP=""
 write_round_record() {
-	local findings source=model code_review=true approach ready meta history tmp="${RECORD_FILE}.tmp"
+	local findings parsed source=model code_review=true approach ready meta history tmp="${RECORD_FILE}.tmp"
 	if [[ "$APPROACH_VERDICT" == rethink ]]; then
 		code_review=false
 		findings='[]'
-	elif jq -e -L "$LIB_DIR" --argjson base "$FINDINGS_BASE" 'include "records"; findings_block_ok($base | known_ids)' \
-		"$FINDINGS_FILE" >/dev/null 2>&1; then
-		findings=$(jq -c . "$FINDINGS_FILE") || return 1
 	else
-		source=parsed
+		# The Markdown's findings: the fallback, and the check that the block shows every blocker the review does.
 		# A parse failure leaves a parsed record without findings, as the spec says: it never blocks the post.
-		findings=$(parse_findings "$REVIEW_BODY_FILE") || findings='[]'
+		parsed="${RECORD_FILE}.parsed"
+		parse_findings "$REVIEW_BODY_FILE" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
+		# Status-only entries are allowed for the last code review's IDs only, and take their severity from it here.
+		if jq -e -L "$LIB_DIR" --slurpfile parsed "$parsed" --argjson base "$FINDINGS_BASE" 'include "records";
+			findings_block_ok($base | known_ids) and (with_base_severity($base) | block_covers_markdown($parsed[0]))' \
+			"$FINDINGS_FILE" >/dev/null 2>&1; then
+			findings=$(jq -c . "$FINDINGS_FILE") || return 1
+		else
+			if [[ -s "$FINDINGS_FILE" ]]; then
+				echo "Note: the findings block does not match the review's findings; the record is read from the Markdown." >&2
+			fi
+			source=parsed
+			findings=$(jq -c . "$parsed") || findings='[]'
+		fi
+		rm -f "$parsed"
 	fi
 	case "$APPROACH_VERDICT" in
 	sound | questionable | rethink) approach="$APPROACH_VERDICT" ;;
@@ -1209,7 +1220,7 @@ if ! write_round_record; then
 fi
 
 # Round 2 and later open with a progress line, counted from the record. It replaces the loop line, and carries the
-# loop's suggested move when the loop is not converging. Called again if the round is renumbered before posting.
+# loop's suggested move when the loop is not converging.
 assemble_body() {
 	local head_lines="$LOOP_LINE" progress suggestion
 	if [[ -n "$RECORD_FILE" && -n "$THIS_LOOP" ]]; then
@@ -1237,12 +1248,37 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # ── post ─────────────────────────────────────────────────────────────────────
+# The PR's round records now, read again just before posting (one retry). Fails when GitHub can't say.
+rounds_now() {
+	local try
+	for try in 1 2; do
+		fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" 2>/dev/null && return 0
+		[[ "$try" == 2 ]] || sleep 1
+	done
+	return 1
+}
+
+# The PR's head commit now, read again just before posting (one retry). Fails when GitHub can't say.
+pr_head_now() {
+	local json try
+	for try in 1 2; do
+		if json=$(gh pr view "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" --json headRefOid 2>/dev/null) &&
+			jq -er '.headRefOid | strings | select(. != "")' <<<"$json" 2>/dev/null; then
+			return 0
+		fi
+		[[ "$try" == 2 ]] || sleep 1
+	done
+	return 1
+}
+
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	if [[ -z "$DECISION" && "${APPROACH_VERDICT:-}" == rethink ]]; then
 		DECISION=request-changes
 		echo "Approach: rethink → ${DECISION}"
 	fi
+	AUTO_DECISION=false
 	if [[ -z "$DECISION" ]]; then
+		AUTO_DECISION=true
 		VERDICT=$(last_verdict 'ready to merge' "$CODE_REVIEW")
 		# Only a bare "yes" approves; any qualifier ("yes, with fixes") falls through to comment.
 		case "$VERDICT" in
@@ -1267,9 +1303,9 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		read -r -p "Post as review [c]omment, [a]pprove, [r]equest changes, or [N]o? (Enter = ${DECISION}) " confirm
 		case "$confirm" in
 		"") ;;
-		[Cc]*) DECISION=comment ;;
-		[Aa]*) DECISION=approve ;;
-		[Rr]*) DECISION=request-changes ;;
+		[Cc]*) DECISION=comment AUTO_DECISION=false ;;
+		[Aa]*) DECISION=approve AUTO_DECISION=false ;;
+		[Rr]*) DECISION=request-changes AUTO_DECISION=false ;;
 		*)
 			echo "Aborted — review not posted."
 			exit 0
@@ -1283,44 +1319,55 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		DECISION=comment
 	fi
 
-	# A round posted by someone else while this one ran would give two round Ks: read the history again first.
-	if NOW_RECORDS=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM"); then
-		NOW_COUNT=$(jq 'length' <<<"$NOW_RECORDS")
-		if [[ "$NOW_COUNT" != "$((ROUND - 1))" ]]; then
-			echo "The PR's review history changed while this review ran: $((ROUND - 1)) rounds then, ${NOW_COUNT} now." >&2
-			jq -r --argjson from "$((ROUND - 1))" '.[$from:][]
-				| "    round \(.round) by \(.reviewer // "unknown") at \(.posted_at // "an unknown time")"' \
-				<<<"$NOW_RECORDS" >&2
-			if [[ -t 0 && "$YES" == "false" ]]; then
-				read -r -p "Post anyway as round $((NOW_COUNT + 1))? [y/N] " OVERLAP_ANSWER || OVERLAP_ANSWER=""
-				[[ "$OVERLAP_ANSWER" == [Yy]* ]] || {
-					echo "Not posted. Session: ${SESSION_DIR}"
-					exit 6
-				}
-				# The same findings, renumbered for the new position: round, previous round and IDs.
-				RECORDS="$NOW_RECORDS"
-				ROUND=$((NOW_COUNT + 1))
-				PREVIOUS_RECORD=$(jq -c 'last // null' <<<"$RECORDS")
-				ID_FLOOR=$(jq -c -L "$LIB_DIR" 'include "records"; id_floor' <<<"$RECORDS")
-				if [[ -n "${RECORD_FILE:-}" ]] && ! write_round_record; then
-					echo "Warning: could not renumber the round record; the review is posted without it." >&2
-					RECORD_FILE=""
-				fi
-				# The progress line names the round: build the body again for the new number.
-				assemble_body
-			else
-				echo "Not posted (exit 6): the history changed while the review ran. Session: ${SESSION_DIR}" >&2
-				exit 6
-			fi
-		fi
-	else
-		echo "Warning: could not read the PR's rounds again; posting without checking for a newer round." >&2
+	# A round posted by someone else while this one ran: this one was reviewed without it, so it is never posted on top
+	# of it. Read the history again first; when that read fails twice, nothing is posted either.
+	if ! NOW_RECORDS=$(rounds_now); then
+		echo "Error: could not read the PR's rounds again, so the history could not be verified; nothing was posted." >&2
+		echo "    Session: ${SESSION_DIR}" >&2
+		exit 1
+	fi
+	NOW_COUNT=$(jq 'length' <<<"$NOW_RECORDS")
+	if [[ "$NOW_COUNT" != "$((ROUND - 1))" ]]; then
+		echo "Not posted (exit 6): another round was posted while this review ran ($((ROUND - 1)) rounds then, ${NOW_COUNT} now):" >&2
+		jq -r --argjson from "$((ROUND - 1))" '.[$from:][]
+			| "    round \(.round) by \(.reviewer // "unknown") at \(.posted_at // "an unknown time")"' \
+			<<<"$NOW_RECORDS" >&2
+		echo "    Run the review again to review on top of it. Session: ${SESSION_DIR}" >&2
+		exit 6
+	fi
+
+	# The review covers HEAD_SHA and is posted on it (commit_id). A push while it ran is not reviewed: never approve it.
+	HEAD_NOTE=""
+	if ! NOW_HEAD=$(pr_head_now); then
+		echo "Could not read the PR's head before posting; this review covers ${HEAD_SHA:0:7}."
+		HEAD_NOTE=unknown
+	elif [[ "$NOW_HEAD" != "$HEAD_SHA" ]]; then
+		HEAD_NOTE="The PR moved to ${NOW_HEAD:0:7} during the review; this review covers ${HEAD_SHA:0:7}."
+		echo "$HEAD_NOTE"
+		REVIEW=$(printf '**Note:** %s\n\n%s' "$HEAD_NOTE" "$REVIEW")
+	fi
+	if [[ -n "$HEAD_NOTE" && "$DECISION" == approve ]]; then
+		DECISION=comment
+		echo "Posting as comment, not approve: an approval must cover the PR's head."
+	fi
+
+	# The final record: round.json as posted.
+	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}" ]] &&
+		! jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+			'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted"; then
+		echo "Warning: could not write the posted round record; the review is posted without it." >&2
+		rm -f "$RECORD_FILE.posted"
+		RECORD_FILE=""
+	fi
+	# Right before posting: without a record, an automatic approve (the verdict's, or its default taken at the prompt)
+	# posts as comment. An approve someone chose stays.
+	if [[ "$DECISION" == approve && "$AUTO_DECISION" == true && -z "${RECORD_FILE:-}" ]]; then
+		DECISION=comment
+		echo "No round record for this review: posting as comment, not approve."
 	fi
 
 	MARKER=""
-	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}" ]]; then
-		jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-			'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted"
+	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}.posted" ]]; then
 		# The marker is sized for the exact body below: header, newline, marker, newline, review.
 		if ! MARKER=$(marker_line "$RECORD_FILE.posted" "$REVIEW"); then
 			MARKER=""
@@ -1333,7 +1380,19 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	fi
 	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s%s' "$MARKER" "$REVIEW")
 
-	gh pr review "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" "--${DECISION}" --body "$COMMENT"
+	case "$DECISION" in
+	approve) EVENT=APPROVE ;;
+	request-changes) EVENT=REQUEST_CHANGES ;;
+	*) EVENT=COMMENT ;;
+	esac
+	# Bound to the reviewed commit, so a push while the review ran is still unreviewed. The body goes through a file.
+	printf '%s' "$COMMENT" | jq -Rs --arg commit "$HEAD_SHA" --arg event "$EVENT" \
+		'{commit_id: $commit, event: $event, body: .}' >"${SESSION_DIR}/post.json"
+	if ! gh api --hostname "$GH_HOST_NAME" --method POST "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" \
+		--input "${SESSION_DIR}/post.json" >/dev/null; then
+		echo "Error: GitHub did not take the review; nothing was posted. Session: ${SESSION_DIR}" >&2
+		exit 1
+	fi
 	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}.posted" ]]; then
 		mv "$RECORD_FILE.posted" "$RECORD_FILE"
 	fi

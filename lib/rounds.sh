@@ -5,9 +5,10 @@
 # record rebuilt from the review's Markdown (backfill) when the review predates the markers. A generated review is one
 # whose first line is the generated marker (is_generated_review in lib/records.jq). GitHub's facts win over the
 # marker's: the round is the review's position in submission order, posted_at its submission time, head_sha the
-# commit it was posted on and reviewer its author, so two reviews posted at once can't both be round K.
+# commit it was posted on and reviewer its author, so two reviews posted at once can't both be round K, nor both give
+# out the same new finding IDs (reconcile_record in lib/records.jq).
 fetch_round_records() { # <host> <owner> <repo> <N>
-	local reviews pr records='[]' previous=null round=0 review record body facts
+	local reviews pr records='[]' previous=null round=0 review record body facts minimal
 	reviews=$(gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" | jq -cs -L "${LIB_DIR:?}" '
 		include "records";
 		add // [] | map(select((.body | is_generated_review) and .state != "PENDING"))
@@ -23,6 +24,13 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 		round=$((round + 1))
 		body=$(jq -r '.body' <<<"$review")
 		record=$(marker_record "$body" || true)
+		minimal=""
+		# A minimal marker (no room for the counts) says only that the findings are missing: the counts come from the
+		# Markdown, as for a review without a marker, and the record keeps findings_dropped and the marker's last_ids.
+		if [[ -n "$record" ]] && jq -e '.findings_dropped == true and (has("counts") | not)' <<<"$record" >/dev/null; then
+			minimal="$record"
+			record=""
+		fi
 		if [[ -z "$record" ]]; then
 			# The previous record carries the history's ID floor, so backfilled IDs never restart either.
 			if [[ "$previous" != null ]]; then
@@ -30,10 +38,18 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 					jq -cs -L "${LIB_DIR:?}" 'include "records"; .[1] + {last_ids: (.[0] | id_floor)}')
 			fi
 			record=$(backfill_record "$review" "$previous" "$round" "$pr")
+			if [[ -n "$minimal" ]]; then
+				record=$(jq -c --argjson m "$minimal" '. as $b | $b + ($m | del(.last_ids)) | del(.findings)
+					| .last_ids = {F: ([$b.last_ids.F, $m.last_ids.F?] | map(numbers) | max // 0),
+						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}' <<<"$record")
+			fi
 		fi
 		facts=$(jq -c '{posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
 			| with_entries(select(.value | type == "string" and . != ""))' <<<"$review")
-		record=$(jq -c --argjson round "$round" --argjson facts "$facts" '. + $facts + {round: $round}' <<<"$record")
+		# Two runs posted at once: the later one's new IDs and first_round follow its position (reconcile_record).
+		record=$(printf '%s\n%s\n' "$records" "$record" | jq -cs -L "${LIB_DIR:?}" --argjson round "$round" \
+			--argjson facts "$facts" 'include "records"; .[0] as $earlier | .[1] | reconcile_record($earlier; $round)
+				+ $facts + {round: $round}')
 		# Records and history go through stdin: a long history must never be one process argument.
 		records=$(printf '%s\n%s\n' "$records" "$record" | jq -cs '.[0] + [.[1]]')
 		previous="$record"
@@ -48,9 +64,9 @@ fetch_pr_shape() { # <host> <owner> <repo> <N>
 }
 
 # Prints true when a person other than the PR author reviewed or commented after <time>: that lifts a loop-check
-# stop. Only an identified person counts: no login (a deleted account, user null), bots (user.type "Bot", or a login
-# ending in [bot]) and gh-pr-review rounds do not, and neither does the PR author: on my own PRs, fix agents post as
-# me and must not lift their own stop.
+# stop. Only an identified person counts: no login (user null), GitHub's deleted-account placeholder ("ghost"), bots
+# (user.type "Bot", or a login ending in [bot]) and gh-pr-review rounds do not, and neither does the PR author: on my
+# own PRs, fix agents post as me and must not lift their own stop.
 lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 	local out
 	# Captured first: a gh failure half-way must print one answer, not jq's partial one and then "false".
@@ -64,7 +80,7 @@ lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 			((.submitted_at // .created_at // "") > $since)
 			and ((.user.type // "") != "Bot")
 			and ((.user.login // "") as $login
-				| $login != "" and $login != $author and ($login | endswith("[bot]") | not))
+				| $login != "" and $login != "ghost" and $login != $author and ($login | endswith("[bot]") | not))
 			and ((.body | is_generated_review) | not))'); then
 		printf '%s\n' "$out"
 	else

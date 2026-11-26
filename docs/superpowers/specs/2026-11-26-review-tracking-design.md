@@ -154,7 +154,8 @@ The code-review prompt asks for one more block at the end of the reply: a fenced
 1. Cuts the block out before posting. The posted Markdown stays as it is today.
 2. Checks it with jq, and numbers new findings itself (F1, F2, … continuing from the last round). The model never
    invents IDs.
-3. Falls back to parsing the Markdown when the block is missing or invalid: count the findings under each severity
+3. Falls back to parsing the Markdown when the block is missing or invalid, or when it reports fewer open blockers
+   than the Markdown shows (an empty block next to a Critical bullet): count the findings under each severity
    heading and take `file:line` from the first code span. Findings come as `- **…` bullets or as `1. **…` numbered
    items (older reviews); both count. The record gets `"source": "parsed"`. A parse failure never blocks the post.
 
@@ -171,7 +172,12 @@ The posted body gets a second marker after the existing `<!-- gh-pr-review gener
   the JSON as `-\u002d`, which is the same JSON string.
 - It never contains `--instructions` text or prompts.
 - GitHub caps a review body at 65,536 characters. If the body and the marker pass 60,000, the marker drops titles
-  first, then the `later` list.
+  first, then locations, then the `later` list, then the findings (`findings_dropped: true`, counts kept). When even
+  the counts do not fit, it is a minimal marker, `{"schema":1,"round":N,"findings_dropped":true}` (with `last_ids`
+  if they fit): a later round knows the findings are missing, and the counts are read from the Markdown. Only when
+  even that does not fit is the review posted without a marker.
+- A title or file stays in the marker only as the review shows it: a file as that exact path, a title as the
+  reader sees it (only `*` and backticks removed, whitespace collapsed).
 
 ### Backfill
 

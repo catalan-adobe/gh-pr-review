@@ -65,7 +65,7 @@ progress_line() { # <record-json> <previous-record-json-or-null> <decision-json>
 }
 
 # The hidden marker line for a record file, for the review posted below it: a file, or the text itself. Prints
-# nothing when even the smallest marker would push the body past the size cap (see marker_line in records.jq).
+# nothing when even the minimal marker would push the body past the size cap (see marker_line in records.jq).
 marker_line() { # <record-file> <review-file | review-text>
 	# shellcheck disable=SC2016 # $body and $record are jq variables
 	local program='include "records"; . as $body | $record[0] | marker_line($body)'

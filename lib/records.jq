@@ -108,6 +108,19 @@ def findings_block_ok($ids):
 		and (.file | . == null or type == "string")
 		and (.line | . == null or type == "number"));
 
+# True when the findings block reports at least the blockers the review's Markdown shows ($parsed: parse_findings of
+# the posted body): as many open Critical findings, and as many open Critical and Important ones together. An entry
+# with status fixed or declined, or with later: true, is not open; status and later may be absent. A block that
+# leaves out or downgrades a visible blocker ([] next to a Critical bullet) fails, and the round is parsed instead.
+def block_covers_markdown($parsed):
+	def open($sev): [.[] | objects | select(.later != true)
+		| select((.status // "new") | . != "fixed" and . != "declined")
+		| select((.severity | strings | ascii_downcase) == $sev)] | length;
+	def shown($sev): [($parsed // [])[]? | objects | select(.severity == $sev)] | length;
+	(if type == "array" then . else [] end)
+	| open("critical") >= shown("critical")
+		and open("critical") + open("important") >= shown("critical") + shown("important");
+
 # Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
 def normalize_findings:
 	if type == "array" then
@@ -215,6 +228,30 @@ def recover_details($history):
 # The ID floor of a history (an array of records): the highest F and L numbers any round used. Older markers have
 # no last_ids: their findings and later IDs seed it.
 def id_floor: map(objects) | {F: (map(_last_number("F")) | max // 0), L: (map(_last_number("L")) | max // 0)};
+
+# A record read back from GitHub, reconciled with the rounds before it ($earlier, already reconciled) and its
+# position in submission order. Two runs can both pass the check before posting and claim the same round and the
+# same new IDs. When the claimed round is not the position, or a new finding's ID is not above the ID floor of the
+# earlier rounds, its new findings (status new, or none) are numbered after that floor, with first_round set to the
+# position, and last_ids follows. Other findings, and a record that agrees with its position, are left as they are.
+def reconcile_record($earlier; $position):
+	($earlier | id_floor) as $floor
+	| def is_new: type == "object" and ((.status // "new") == "new");
+	def number: .id | strings | capture("^F(?<n>\\d+)$").n | tonumber;
+	if .round != $position or any((.findings // [])[]? | select(is_new); (number // 0) <= $floor.F) then
+		(reduce range(0; (.findings // []) | length) as $i ({rec: ., n: $floor.F};
+			if (.rec.findings[$i] | is_new) then .n += 1 | .rec.findings[$i] += {id: "F\(.n)", first_round: $position}
+			else . end)) as $r
+		| $r.rec
+		| .last_ids = {F: ([_last_number("F"), $floor.F] | max), L: ([_last_number("L"), $floor.L] | max)}
+	else . end;
+
+# Block entries with an earlier ID and no severity take it from the last code review ($base), so the cross-check
+# with the Markdown (block_covers_markdown) counts an open earlier blocker as the blocker it is.
+def with_base_severity($base):
+	(if $base | has_findings_list then [$base.findings[] | select(.id | type == "string") | {key: .id, value: .severity}]
+		| from_entries else {} end) as $severity
+	| map(if type == "object" and .severity == null and (.id | type == "string") then .severity = $severity[.id] else . end);
 
 # round.json from the run's facts, the findings (block or parser) and the previous record (or null). Round 1
 # findings carry no id or status: all are new. From round 2, see _track. New findings are numbered after
@@ -345,24 +382,35 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 # The first line of every body gh-pr-review posts.
 def generated_header: "<!-- gh-pr-review generated -->";
 
-# Text as a reader sees it, for matching: Markdown emphasis and backticks removed, whitespace runs as one space.
-def _visible: gsub("[*_`]"; "") | gsub("\\s+"; " ") | _trim;
+# Text as a reader sees it, for matching a title: bold/italic stars and backticks removed, whitespace runs as one
+# space. Underscores stay: "api_key" and "apikey" are different words.
+def _visible: gsub("[*`]"; "") | gsub("\\s+"; " ") | _trim;
+
+# A string as a regex that matches it literally.
+def _re_literal: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}/-])"; "\\\(.c)");
 
 # The marker line for a record, posted right below the generated header and above $body, the exact review text.
-# One HTML comment: every "--" in the JSON is written "-\u002d". A finding's title and file stay only when the
-# reader can see them in $body (after _visible; a title cut to 100 characters may match part of a line), so the
-# marker never publishes text the review does not show. The whole body (header, newline, marker, newline, review)
-# must fit in 60,000 characters, under GitHub's 65,536: it drops titles, then file, line, first_round and in_delta,
-# then later, then findings (findings_dropped: true). Counts and last_ids always stay. Nothing when even that does
-# not fit.
+# One HTML comment: every "--" in the JSON is written "-\u002d". The marker never publishes text the review does not
+# show. A file stays only when $body shows that exact path, as a whole path (in backticks, before ":line", or
+# between spaces or brackets). A title stays when $body holds it as it is; else when the review's visible text holds
+# it after only the * and ` marks are removed and whitespace is collapsed, and then the marker gets that visible
+# form. A title cut to 100 characters may match part of a line. Otherwise the field is left out.
+# The whole body (header, newline, marker, newline, review) must fit in 60,000 characters, under GitHub's 65,536: it
+# drops titles, then file, line, first_round and in_delta, then later, then findings (findings_dropped: true; counts
+# and last_ids stay). When even that does not fit: a minimal marker, {schema, round, findings_dropped: true} and
+# last_ids if it fits, so a later round knows the baseline is missing. Nothing when even that does not fit.
 def marker_line($body):
 	($body | _visible) as $seen
-	| def shown: type == "string" and (_visible as $t | $t != "" and ($seen | contains($t)));
+	| def file_shown: type == "string" and . != "" and (_re_literal as $f
+		| $body | test("(^|[\\s`\\[(*\"'])" + $f + "(?=$|[\\s`\\])*:,;\"']|\\.(\\s|$))"));
+	def title_shown: if type != "string" or (_trim == "") then null
+		elif (. as $t | $body | contains($t)) then .
+		else _visible as $t | if $t != "" and ($seen | contains($t)) then $t else null end end;
 	def public: if type == "array" then map(if type == "object" then
 			(if has("title") and .title != null then
-				(.title | _title100) as $t | if $t | shown then .title = $t else del(.title) end
+				(.title | _title100 | title_shown) as $t | if $t != null then .title = $t else del(.title) end
 			else . end)
-			| (if has("file") and .file != null and (.file | shown | not) then del(.file) else . end)
+			| (if has("file") and .file != null and (.file | file_shown | not) then del(.file) else . end)
 		else . end) else . end;
 	def line: "<!-- gh-pr-review:round " + (tojson | gsub("--"; "-\\u002d")) + " -->";
 	def fits: (generated_header + "\n" + line + "\n" + $body | length) <= 60000;
@@ -373,6 +421,8 @@ def marker_line($body):
 		.later[]?.file, .later[]?.line, .later[]?.first_round, .later[]?.in_delta) end
 	| if fits then . else del(.later) end
 	| if fits then . else del(.findings) | .findings_dropped = true end
+	| if fits then . else {schema: 1, round, findings_dropped: true} + (if .last_ids then {last_ids} else {} end) end
+	| if fits then . else del(.last_ids) end
 	| if fits then line else empty end;
 
 # True when a review body is a generated round: its first line is exactly the generated marker (trailing spaces

@@ -373,6 +373,27 @@ check "findings_block_ok: one bad entry spoils the block" "$(ok_block '[{}, [{"l
 	[{"severity":"minor","title":"t","file":3}], [{"severity":"minor","title":"t"}, "F2"]]')" \
 	"[false,false,false,false,false,false,false]"
 
+covers() { # block parsed -> block_covers_markdown
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson p "$2" 'include "records"; $b | block_covers_markdown($p)'
+}
+crit='[{"severity":"critical","title":"t"}]'
+check "block_covers_markdown: [] next to a Critical bullet does not cover it" "$(covers '[]' "$crit")" false
+check "block_covers_markdown: the same Critical covers it" "$(covers '[{"severity":"Critical","title":"x"}]' "$crit")" true
+check "block_covers_markdown: a Critical downgraded to Important does not cover it" \
+	"$(covers '[{"severity":"important","title":"x"}]' "$crit")" false
+check "block_covers_markdown: a Critical covers an Important" \
+	"$(covers '[{"severity":"critical","title":"x"}]' '[{"severity":"important","title":"t"}]')" true
+check "block_covers_markdown: a downgrade to minor does not cover an Important" \
+	"$(covers '[{"severity":"minor","title":"x"}]' '[{"severity":"important","title":"t"}]')" false
+check "block_covers_markdown: fixed, declined and later entries are not open" \
+	"$(covers '[{"severity":"critical","status":"fixed"},{"severity":"critical","status":"declined"},
+		{"severity":"critical","later":true}]' "$crit")" false
+check "block_covers_markdown: open, regressed and status-less entries are" \
+	"$(covers '[{"severity":"critical","status":"open"},{"severity":"important","status":"regressed"},{"severity":"important"}]' \
+		'[{"severity":"critical"},{"severity":"important"},{"severity":"important"}]')" true
+check "block_covers_markdown: minor findings in the Markdown need no cover" \
+	"$(covers '[]' '[{"severity":"minor","title":"t"}]')" true
+
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \
 	"Yes (with fixes)=yes-with-fixes" "yes — with fixes=yes-with-fixes" "No — see Critical=no" "no.=no" \
@@ -423,13 +444,26 @@ jq -n '{schema: 1, round: 1, counts: {}, findings: [
 	{id: "F2", title: "PRIVATE instructions text", file: "secret/plan.md", line: 1},
 	{id: "F3", title: null, file: null}]}' >"$tmp/private.json"
 line=$(marker_line "$tmp/private.json" $'### Issues\n- **`src/a_b.js:3` — Visible\ntitle, with *emphasis*.** More.')
-check "marker: a visible title and file stay" "$(marker_record "$(generated "$line")" | jq -c '.findings[0] | [.title, .file]')" \
-	'["Visible   title, with emphasis","src/a_b.js"]'
+check "marker: a visible title and file stay, the title as the reader sees it" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[0] | [.title, .file]')" '["Visible title, with emphasis","src/a_b.js"]'
 check "marker: a title and file the reader can't see are left out" \
 	"$(marker_record "$(generated "$line")" | jq -c '.findings[1] | [has("title"), has("file"), .line]')" '[false,false,1]'
 check "marker: no private text" "$(grep -c -e PRIVATE -e secret <<<"$line" || true)" 0
 check "marker: round.json keeps the private text" "$(jq -r '.findings[1].title' "$tmp/private.json")" \
 	"PRIVATE instructions text"
+
+# A path is published only as the review shows it, and a title only as the reader sees it: underscores count.
+jq -n '{schema: 1, round: 1, counts: {}, findings: [
+	{id: "F1", title: "Leaks the api_key header", file: "api_key.go", line: 1},
+	{id: "F2", title: "Rename snake_case fields", file: "key.go", line: 2},
+	{id: "F3", title: "Uses `api_key` in *logs*", file: "pkg/apikey.go", line: 3}]}' >"$tmp/paths.json"
+line=$(marker_line "$tmp/paths.json" $'- **`apikey.go:1` — Leaks the apikey header.**\n- **Rename snake_case fields** in the store.\n- `pkg/apikey.go`: Uses api_key in logs')
+check "marker: apikey.go shown, api_key.go is not published, nor its underscore-less title" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[0] | [has("file"), has("title")]')" '[false,false]'
+check "marker: key.go inside apikey.go is not a shown path; an underscore title is" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[1] | [has("file"), .title]')" '[false,"Rename snake_case fields"]'
+check "marker: a whole path and a title behind Markdown marks are published as shown" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[2] | [.file, .title]')" '["pkg/apikey.go","Uses api_key in logs"]'
 
 # The size cap, step by step, on the exact assembled body: header, newline, marker, newline, review.
 jq '.later = [{id: "L1", severity: "minor", file: "src/render.ts", line: 7, title: "Comment says"}]' "$tmp/round.json" \
@@ -478,7 +512,17 @@ line=$(marker_line "$tmp/big.json" "$tmp/body.md")
 step "findings dropped" "$line" '(has("findings") | not) and .findings_dropped and .counts.open_blocking == 3
 	and .last_ids == {"F": 4, "L": 0} and .round == 2'
 pad_to $(($(fill "$line") + 1))
-check "marker cap: no room even for counts, no marker" "$(marker_line "$tmp/big.json" "$tmp/body.md")" ""
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "no room for counts: minimal marker" "$line" '. == {"schema": 1, "round": 2, "findings_dropped": true, "last_ids": {"F": 4, "L": 0}}'
+pad_to $(($(fill "$line") + 1))
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+pad_to "$(fill "$line")"
+line=$(marker_line "$tmp/big.json" "$tmp/body.md")
+step "minimal marker without last_ids" "$line" '. == {"schema": 1, "round": 2, "findings_dropped": true}'
+pad_to $(($(fill "$line") + 1))
+check "marker cap: no room even for the minimal marker, no marker" "$(marker_line "$tmp/big.json" "$tmp/body.md")" ""
 check "marker cap: round.json keeps everything" "$(jq -c '[(.findings | length), (.later | length)]' "$tmp/big.json")" \
 	"[4,1]"
 
@@ -576,14 +620,21 @@ later_body() { # <filler length>: the round 2 body as posted, with a filler para
 	head -c "$1" /dev/zero | tr '\0' x
 	printf '\n\n### Assessment\n\n**Ready to merge?** Yes\n'
 }
-filler=$((59776 - $(later_body 1 | jq -Rs length) + 1))
-later_body "$filler" >"$tmp/later-padded.md"
-check "later round without marker: setup, a 59,776-character body" "$(jq -Rs length "$tmp/later-padded.md")" 59776
 printf '%s\n' "$r2" >"$tmp/r2.json"
+# The review's case, 59,776 characters: only the minimal marker fits, and it says the findings list is gone.
+later_body $((59776 - $(later_body 1 | jq -Rs length) + 1)) >"$tmp/later-padded.md"
+check "later round, 59,776 characters: setup" "$(jq -Rs length "$tmp/later-padded.md")" 59776
+tail -n +2 "$tmp/later-padded.md" >"$tmp/r2-review.md"
+line=$(marker_line "$tmp/r2.json" "$tmp/r2-review.md")
+check "later round, 59,776 characters: the minimal marker, findings dropped" \
+	"$(marker_record "$(generated "$line")" | jq -c '[.round, .findings_dropped, has("findings")]')" '[2,true,false]'
+# Bigger still, no marker fits at all: the round is read back from its Markdown.
+later_body $((59960 - $(later_body 1 | jq -Rs length) + 1)) >"$tmp/later-padded.md"
+check "later round without marker: setup, a 59,960-character body" "$(jq -Rs length "$tmp/later-padded.md")" 59960
 tail -n +2 "$tmp/later-padded.md" >"$tmp/r2-review.md"
 line=$(marker_line "$tmp/r2.json" "$(head -c 300 "$tmp/r2-review.md")")
 check "later round without marker: setup, the marker fits a short review" "${line:0:24}" "<!-- gh-pr-review:round "
-check "later round without marker: setup, no room for the marker" "$(marker_line "$tmp/r2.json" "$tmp/r2-review.md")" ""
+check "later round without marker: setup, no room for any marker" "$(marker_line "$tmp/r2.json" "$tmp/r2-review.md")" ""
 rec=$(backfill_record "$(jq -n --rawfile body "$tmp/later-padded.md" '{body: $body, commit_id: "bbb",
 	submitted_at: "2026-01-03T00:00:00Z", user: {login: "rev"}, state: "APPROVED"}')" "$prev1" 2 "$pr")
 check "later round without marker: no findings list" "$(has_list "$rec")" false
