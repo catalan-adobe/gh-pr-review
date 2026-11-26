@@ -151,24 +151,34 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 # The first line of every body gh-pr-review posts.
 def generated_header: "<!-- gh-pr-review generated -->";
 
-# Text as a reader sees it, for matching: Markdown emphasis and backticks removed, whitespace runs as one space.
-def _visible: gsub("[*_`]"; "") | gsub("\\s+"; " ") | _trim;
+# Text as a reader sees it, for matching a title: bold/italic stars and backticks removed, whitespace runs as one
+# space. Underscores stay: "api_key" and "apikey" are different words.
+def _visible: gsub("[*`]"; "") | gsub("\\s+"; " ") | _trim;
+
+# A string as a regex that matches it literally.
+def _re_literal: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}/-])"; "\\\(.c)");
 
 # The marker line for a record, posted right below the generated header and above $body, the exact review text.
-# One HTML comment: every "--" in the JSON is written "-\u002d". A finding's title and file stay only when the
-# reader can see them in $body (after _visible; a title cut to 100 characters may match part of a line), so the
-# marker never publishes text the review does not show. The whole body (header, newline, marker, newline, review)
-# must fit in 60,000 characters, under GitHub's 65,536: it drops titles, then file, line, first_round and in_delta,
-# then later, then findings (findings_dropped: true). Counts and last_ids always stay. Nothing when even that does
-# not fit.
+# One HTML comment: every "--" in the JSON is written "-\u002d". The marker never publishes text the review does not
+# show. A file stays only when $body shows that exact path, as a whole path (in backticks, before ":line", or
+# between spaces or brackets). A title stays when $body holds it as it is; else when the review's visible text holds
+# it after only the * and ` marks are removed and whitespace is collapsed, and then the marker gets that visible
+# form. A title cut to 100 characters may match part of a line. Otherwise the field is left out.
+# The whole body (header, newline, marker, newline, review) must fit in 60,000 characters, under GitHub's 65,536: it
+# drops titles, then file, line, first_round and in_delta, then later, then findings (findings_dropped: true). Counts
+# and last_ids always stay. Nothing when even that does not fit.
 def marker_line($body):
 	($body | _visible) as $seen
-	| def shown: type == "string" and (_visible as $t | $t != "" and ($seen | contains($t)));
+	| def file_shown: type == "string" and . != "" and (_re_literal as $f
+		| $body | test("(^|[\\s`\\[(*\"'])" + $f + "(?=$|[\\s`\\])*:,;\"']|\\.(\\s|$))"));
+	def title_shown: if type != "string" or (_trim == "") then null
+		elif (. as $t | $body | contains($t)) then .
+		else _visible as $t | if $t != "" and ($seen | contains($t)) then $t else null end end;
 	def public: if type == "array" then map(if type == "object" then
 			(if has("title") and .title != null then
-				(.title | _title100) as $t | if $t | shown then .title = $t else del(.title) end
+				(.title | _title100 | title_shown) as $t | if $t != null then .title = $t else del(.title) end
 			else . end)
-			| (if has("file") and .file != null and (.file | shown | not) then del(.file) else . end)
+			| (if has("file") and .file != null and (.file | file_shown | not) then del(.file) else . end)
 		else . end) else . end;
 	def line: "<!-- gh-pr-review:round " + (tojson | gsub("--"; "-\\u002d")) + " -->";
 	def fits: (generated_header + "\n" + line + "\n" + $body | length) <= 60000;

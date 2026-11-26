@@ -192,13 +192,26 @@ jq -n '{schema: 1, round: 1, counts: {}, findings: [
 	{id: "F2", title: "PRIVATE instructions text", file: "secret/plan.md", line: 1},
 	{id: "F3", title: null, file: null}]}' >"$tmp/private.json"
 line=$(marker_line "$tmp/private.json" $'### Issues\n- **`src/a_b.js:3` — Visible\ntitle, with *emphasis*.** More.')
-check "marker: a visible title and file stay" "$(marker_record "$(generated "$line")" | jq -c '.findings[0] | [.title, .file]')" \
-	'["Visible   title, with emphasis","src/a_b.js"]'
+check "marker: a visible title and file stay, the title as the reader sees it" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[0] | [.title, .file]')" '["Visible title, with emphasis","src/a_b.js"]'
 check "marker: a title and file the reader can't see are left out" \
 	"$(marker_record "$(generated "$line")" | jq -c '.findings[1] | [has("title"), has("file"), .line]')" '[false,false,1]'
 check "marker: no private text" "$(grep -c -e PRIVATE -e secret <<<"$line" || true)" 0
 check "marker: round.json keeps the private text" "$(jq -r '.findings[1].title' "$tmp/private.json")" \
 	"PRIVATE instructions text"
+
+# A path is published only as the review shows it, and a title only as the reader sees it: underscores count.
+jq -n '{schema: 1, round: 1, counts: {}, findings: [
+	{id: "F1", title: "Leaks the api_key header", file: "api_key.go", line: 1},
+	{id: "F2", title: "Rename snake_case fields", file: "key.go", line: 2},
+	{id: "F3", title: "Uses `api_key` in *logs*", file: "pkg/apikey.go", line: 3}]}' >"$tmp/paths.json"
+line=$(marker_line "$tmp/paths.json" $'- **`apikey.go:1` — Leaks the apikey header.**\n- **Rename snake_case fields** in the store.\n- `pkg/apikey.go`: Uses api_key in logs')
+check "marker: apikey.go shown, api_key.go is not published, nor its underscore-less title" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[0] | [has("file"), has("title")]')" '[false,false]'
+check "marker: key.go inside apikey.go is not a shown path; an underscore title is" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[1] | [has("file"), .title]')" '[false,"Rename snake_case fields"]'
+check "marker: a whole path and a title behind Markdown marks are published as shown" \
+	"$(marker_record "$(generated "$line")" | jq -c '.findings[2] | [.file, .title]')" '["pkg/apikey.go","Uses api_key in logs"]'
 
 # The size cap, step by step, on the exact assembled body: header, newline, marker, newline, review.
 jq '.later = [{id: "L1", severity: "minor", file: "src/render.ts", line: 7, title: "Comment says"}]' "$tmp/round.json" \
