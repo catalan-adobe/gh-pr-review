@@ -20,7 +20,7 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 	echo '{"comments":[],"reviews":[]}' >"$stub/discussion.json"
 	echo '[]' >"$stub/rest-reviews.json"
 	echo '[]' >"$stub/rest-comments.json"
-	rm -f "$stub/git.missing" "$stub/git.rebased" "$stub/git.diff-fails" "$stub/git.far-base" "$stub/git.deepened"
+	rm -f "$stub/git.missing" "$stub/git.rebased" "$stub/git.retargeted" "$stub/git.diff-fails" "$stub/git.far-base" "$stub/git.deepened"
 	cat >"$stub/bin/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
@@ -36,7 +36,8 @@ case "\$*" in
 esac
 S
 	# git: HEAD is aaaa and the merge-base bbbb. Any other SHA resolves to itself, unless listed in git.missing. The
-	# previous head is an ancestor of the head unless git.rebased exists. git.diff-fails makes `git diff` fail.
+	# previous head is an ancestor of the head unless git.rebased exists, and the previous base one of the base unless
+	# git.retargeted exists. git.diff-fails makes `git diff` fail.
 	# git.far-base: no merge-base until a `fetch --deepen` (logged in git.deepened); "never": not even then.
 	cat >"$stub/bin/git" <<'S'
 #!/usr/bin/env bash
@@ -53,7 +54,9 @@ case "$*" in
 	;;
 *rev-parse*) echo aaaa ;;
 *"fetch "*--deepen*) printf '%s\n' "$*" >>"$s/git.deepened" ;;
-*"merge-base --is-ancestor"*) [[ ! -f "$s/git.rebased" ]] ;;
+*"merge-base --is-ancestor"*aaaa) [[ ! -f "$s/git.rebased" ]] ;;
+*"merge-base --is-ancestor"*bbbb) [[ ! -f "$s/git.retargeted" ]] ;;
+*"merge-base --is-ancestor"*) true ;;
 *merge-base*)
 	if [[ -f "$s/git.far-base" ]] && { [[ ! -f "$s/git.deepened" ]] || grep -qx never "$s/git.far-base"; }; then exit 1; fi
 	echo bbbb
@@ -547,6 +550,12 @@ two_rounds
 touch "$stub/git.rebased"
 run
 expect "rebased: a range-diff of the two versions" '[[ $(jq -r ".mode" <<<"$record") == rebased ]] && grep -qF "git range-diff $B1..$H2 bbbb..aaaa" "$stub/code-prompt.txt" && grep -q "The author rebased" "$stub/code-prompt.txt"'
+
+setup $'**Approach:** Sound' "$round3"
+two_rounds
+touch "$stub/git.retargeted"
+run
+expect "retargeted: a full round that says why" '[[ $(jq -r ".mode, .mode_reason" <<<"$record" | paste -sd, -) == "full,the PR'"'"'s base changed" ]] && ! grep -q "Outside what changed" "$stub/code-prompt.txt"'
 
 setup $'**Approach:** Sound' "$round3"
 two_rounds

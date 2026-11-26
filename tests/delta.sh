@@ -158,6 +158,32 @@ expect "base merged in with conflicts: a range-diff would not" \
 files=$(changed_files "$repo" "$out")
 expect "base merged in with conflicts: no delta files" '[[ -z $files ]]'
 
+# ── full: a stacked PR retargeted from its parent branch to main ─────────────
+# Last round the PR targeted parent: its base was parent's tip. Retargeted to main, parent's commit is in the PR now,
+# though the previous head is still an ancestor of the head: an incremental diff would show child.txt only.
+world
+commit m1 "a.txt=$ten"
+src checkout --quiet -b parent
+commit p1 parent.txt=from-parent
+src checkout --quiet -b feature
+commit c1 child.txt=one
+src push --quiet origin parent
+publish
+prev_head=$(src rev-parse HEAD) prev_base=$(src rev-parse parent)
+commit c2 child.txt=two
+publish
+repo=$(checkout 50)
+head=$(git -C "$repo" rev-parse pr-branch)
+base=$(git -C "$repo" merge-base pr-branch origin/main)
+expect "retargeted: setup, the PR now holds parent.txt too" \
+	'[[ $(git -C "$repo" diff --name-only "$base" "$head" | paste -sd, -) == "child.txt,parent.txt" ]]'
+out=$(pick_delta "$repo" "$prev_head" "$prev_base" "$head" "$base")
+expect "retargeted: full, and it says why" \
+	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,the PR'"'"'s base changed" && $(jq -c .commands <<<"$out") == "[]" ]]'
+# Retargeted back to parent: the base moved forward from main's m1 to parent's p1, which is fine.
+out=$(pick_delta "$repo" "$prev_head" "$base" "$head" "$prev_base")
+expect "retargeted: a base that moved forward stays incremental" '[[ $(jq -r .mode <<<"$out") == incremental ]]'
+
 # ── rebased: onto a moved base, with a changed patch ─────────────────────────
 world
 commit m1 "a.txt=$ten" c.txt=c1
