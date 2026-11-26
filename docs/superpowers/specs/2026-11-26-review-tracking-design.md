@@ -71,7 +71,7 @@ Out of scope:
 
 | Phase | What | Visible change | Needs |
 | --- | --- | --- | --- |
-| 1 | Round records | Posted reviews carry a hidden record; each round saves `round.json` | — |
+| 1 | Round records | Posted reviews carry a hidden record; each round saves `round.json`; `gh pr-review rounds <PR>` | — |
 | 2 | Local clones and review worktrees | No fresh clone; worktree at `<clone>.reviews/<branch>/<N>`; one state folder | — |
 | 3 | Incremental rounds and the loop check | Round 2+ checks old findings and reviews the delta; stuck loops stop | 1 (2 helps) |
 | 4 | `gh pr-review status` | One table across accounts, with labels and whose turn it is | 1 |
@@ -160,6 +160,13 @@ is enough. The tables in this spec came from a prototype of this parser.
 
 A Rethink round has no code review. Its blocking count is unknown, not zero, and the loop rules skip it.
 
+### Seeing the history: `gh pr-review rounds <PR>`
+
+Phase 1 ships one small command that reads the records of one PR (markers, else backfill) and prints a row per
+round: date, commit, commits since the last round, approach, "Ready to merge?", and the Critical, Important and
+Minor counts. `--json` prints the records. It is the first thing I can use, and it checks the parser on real PRs
+before `status` depends on it.
+
 ## Phase 2: Local clones and review worktrees
 
 ### Find the clone
@@ -171,8 +178,12 @@ For `<host>/<owner>/<repo>`, in this order:
    remote URL that matches (https or ssh, with or without `.git`). Some repos are cloned twice (adobe/skills,
    migration-lab, cf-agent-worker). Then the most recently fetched clone wins (`FETCH_HEAD` time), and the run
    prints which one it picked. The result is cached in `<state>/clones.json` and checked again on use.
-3. None found: a cache clone at `~/.cache/gh-pr-review/clones/<host>/<owner>/<repo>`, made once with
-   `--filter=blob:none` (full history, file contents on demand), reused after that.
+3. None found: a cache clone at `~/.cache/gh-pr-review/clones/<host>/<owner>/<repo>`, a bare full clone made once and
+   reused after that.
+
+A shallow or partial (blobless) clone is skipped, with a note, and the cache clone is used instead. In such a clone,
+`git show` and `git diff` fetch missing history or file contents on demand, which needs the network and the
+credentials that the reviewer's git sandbox removes. The script never deepens or changes my clone to fix that.
 
 `--clone <path>` overrides this for one run. `--fresh` keeps today's throwaway clone, in the state folder.
 
@@ -368,7 +379,7 @@ Stopping at the first bad round would have cut short #460 and #466, which recove
 gh pr-review status [--json | --md] [--all] [--stale-days <n>] [--mine | --reviewing] [--refresh]
 ```
 
-A first argument of `status`, `shepherd` or `gc` is a subcommand. Anything else is a PR, as today.
+A first argument of `rounds`, `status`, `shepherd` or `gc` is a subcommand. Anything else is a PR, as today.
 
 ### Which PRs
 
