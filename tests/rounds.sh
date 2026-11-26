@@ -73,6 +73,8 @@ expect "rounds --json: backfill keeps the review state as the decision" \
 	'[[ $(jq -r ".records[0] | .source, .decision" <<<"$out" | paste -sd, -) == "backfill,request-changes" ]]'
 expect "rounds --json: GitHub's position, commit and time win over the marker's" \
 	'[[ $(jq -r ".records[1] | .round, .head_sha, .posted_at" <<<"$out" | paste -sd, -) == "2,bbbbbbb2,2026-01-03T10:00:00Z" ]]'
+expect "rounds --json: a backfilled round keeps the history's ID floor" \
+	'[[ $(jq -c "[.records[0].last_ids.F, .records[2].last_ids.F]" <<<"$out") == "[3,3]" ]]'
 
 # Rounds posted at once, all marked round 1. One has neither commit_id nor submitted_at on GitHub (it sorts first),
 # one has no commit_id, and a pending review is not a round.

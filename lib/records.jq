@@ -76,13 +76,24 @@ def normalize_findings:
 			| select(.severity == "critical" or .severity == "important" or .severity == "minor"))
 	else [] end;
 
-# The highest "F<n>" in a record, or 0.
-def _last_finding_number: [(.findings // [])[]? | .id | strings | capture("^F(?<n>\\d+)$").n | tonumber] | max // 0;
+# The highest "<prefix><n>" ID in a record's findings, its later list and its last_ids, or 0. last_ids keeps the
+# highest numbers even when the lists are empty (a Rethink) or cut from the marker, so an ID is never given twice.
+def _last_number($prefix):
+	[((.findings // [])[]?, (.later // [])[]?) | objects | .id | strings
+		| capture("^" + $prefix + "(?<n>\\d+)$").n | tonumber]
+	+ [(.last_ids // {})[$prefix]? | numbers]
+	| max // 0;
 
-# round.json from the run's facts, the findings (block or parser) and the previous record (or null).
+# The ID floor of a history (an array of records): the highest F and L numbers any round used. Older markers have
+# no last_ids: their findings and later IDs seed it.
+def id_floor: map(objects) | {F: (map(_last_number("F")) | max // 0), L: (map(_last_number("L")) | max // 0)};
+
+# round.json from the run's facts, the findings (block or parser) and the previous record (or null). New findings
+# are numbered after $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record.
 def build_record($meta; $findings; $prev):
 	($meta.code_review != false) as $code_review
-	| (($prev // {}) | _last_finding_number) as $last
+	| ([($meta.id_floor // {}).F | numbers] + [($prev // {}) | _last_number("F")] | max) as $last
+	| ([($meta.id_floor // {}).L | numbers] + [($prev // {}) | _last_number("L")] | max) as $last_later
 	| ($meta.round | _num) as $round
 	| (if $code_review then $findings | normalize_findings else [] end) as $found
 	| ($found | to_entries | map({id: "F\(.key + $last + 1)", severity: .value.severity, status: "new",
@@ -107,6 +118,7 @@ def build_record($meta; $findings; $prev):
 		code_review: $code_review,
 		findings: $items,
 		later: [],
+		last_ids: {F: ($last + ($items | length)), L: $last_later},
 		counts: (if $code_review then
 			{open_blocking: (count("critical") + count("important")), critical: count("critical"),
 				important: count("important"), minor: count("minor"), new: ($items | length),

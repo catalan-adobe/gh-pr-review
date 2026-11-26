@@ -376,6 +376,8 @@ LOOP=$(loop_decide_json "$RECORDS" "$PR_SHAPE" "$HEAD_OID" "$LIFTED")
 LOOP_DECISION=$(jq -r '.decision' <<<"$LOOP")
 ROUND=$(jq -r '.next_round' <<<"$LOOP")
 PREVIOUS_RECORD=$(jq -c 'last // null' <<<"$RECORDS")
+# New findings are numbered after the highest ID anywhere in the history, so an ID never restarts.
+ID_FLOOR=$(jq -c -L "$LIB_DIR" 'include "records"; id_floor' <<<"$RECORDS")
 
 if [[ "$CHECK_ONLY" == "true" ]]; then
 	if [[ "$CHECK_JSON" == "true" ]]; then echo "$LOOP" >&3; else loop_text "$LOOP"; fi
@@ -874,11 +876,12 @@ write_round_record() {
 		--argjson number "$PR_NUM" --argjson round "$ROUND" --arg reviewer "$ME" --arg model "$MODEL" \
 		--arg base "$BASE_SHA" --arg head "$HEAD_SHA" --argjson previous "$PREVIOUS_RECORD" \
 		--arg approach "$approach" --arg ready "$ready" --argjson code_review "$code_review" \
+		--argjson id_floor "$ID_FLOOR" \
 		'{source: $source, pr: {host: $host, owner: $owner, repo: $repo, number: $number}, round: $round,
 		  mode: "full", reviewer: (if $reviewer == "" then null else $reviewer end), model: $model,
 		  base_sha: $base, head_sha: $head, previous_head_sha: ($previous.head_sha? // null),
 		  approach: $approach, ready: $ready, decision: null, posted_at: null,
-		  code_review: $code_review, preview: true}')
+		  code_review: $code_review, preview: true, id_floor: $id_floor}')
 	build_record "$meta" "$findings" "$PREVIOUS_RECORD" |
 		jq --argjson loop "$LOOP" --argjson forced "$FORCED" \
 			'.loop = ($loop | {label, flags, decision}) | .forced = $forced' >"$RECORD_FILE"

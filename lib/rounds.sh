@@ -24,6 +24,11 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 		body=$(jq -r '.body' <<<"$review")
 		record=$(marker_record "$body" || true)
 		if [[ -z "$record" ]]; then
+			# The previous record carries the history's ID floor, so backfilled IDs never restart either.
+			if [[ "$previous" != null ]]; then
+				previous=$(printf '%s\n%s\n' "$records" "$previous" |
+					jq -cs -L "${LIB_DIR:?}" 'include "records"; .[1] + {last_ids: (.[0] | id_floor)}')
+			fi
 			record=$(backfill_record "$review" "$previous" "$round" "$pr")
 		fi
 		facts=$(jq -c '{posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}

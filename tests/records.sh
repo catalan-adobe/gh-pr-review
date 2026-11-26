@@ -113,6 +113,26 @@ rethink=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <
 check "rethink: no findings" "$(jq -c '.findings' <<<"$rethink")" "[]"
 check "rethink: null counts" "$(jq -c '[.counts[]] | unique' <<<"$rethink")" "[null]"
 
+# ── finding IDs never restart ───────────────────────────────────────────────
+check "last_ids: the highest IDs of the round" "$(jq -c '.last_ids' <<<"$rec")" '{"F":13,"L":0}'
+one='[{"severity":"minor","title":"t"}]'
+r1=$(build_record "$meta" "$one" null)
+r2=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <<<"$meta")" "$one" "$r1")
+check "rethink: keeps last_ids" "$(jq -c '.last_ids' <<<"$r2")" '{"F":1,"L":0}'
+check "F1, then a Rethink, then a new finding: F2" "$(build_record "$meta" "$one" "$r2" | jq -r '.findings[0].id')" F2
+floor() { jq -c -L "$LIB_DIR" 'include "records"; id_floor' <<<"$1"; }
+check "id_floor: no history" "$(floor '[]')" '{"F":0,"L":0}'
+check "id_floor: F1 then a Rethink" "$(floor "[$r1, $r2]")" '{"F":1,"L":0}'
+check "id_floor: a compacted marker without findings keeps its last_ids" \
+	"$(floor '[{"findings":[{"id":"F2"}]},{"findings_dropped":true,"last_ids":{"F":9,"L":4}},{"code_review":false}]')" \
+	'{"F":9,"L":4}'
+check "id_floor: older markers without last_ids are seeded from their IDs" \
+	"$(floor '[{"findings":[{"id":"F3"},{"id":"F12"}],"later":[{"id":"L2"}]},{"findings":[{"id":"F5"}]}]')" \
+	'{"F":12,"L":2}'
+check "id_floor: the next ID comes after the floor, not the previous record" \
+	"$(build_record "$(jq -c '.id_floor = {F: 9, L: 4}' <<<"$meta")" "$one" "$r1" |
+		jq -c '[.findings[0].id, .last_ids]')" '["F10",{"F":10,"L":4}]'
+
 ok_block() { jq -c -L "$LIB_DIR" 'include "records"; map(findings_block_ok)' <<<"$1"; }
 check "findings_block_ok: good blocks" "$(ok_block '[[], [{"severity":"Critical","title":"t","file":null,"line":null}],
 	[{"severity":"minor","title":"t","file":"a.js","line":3}, {"severity":"important","title":"u"}]]')" \

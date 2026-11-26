@@ -193,6 +193,18 @@ run
 expect "records: earlier generated reviews count as rounds" '[[ $(jq -r ".round" <<<"$record") == 3 ]]'
 expect "records: finding IDs continue from the previous record" '[[ $(jq -r ".findings[0].id, .previous_head_sha" <<<"$record" | paste -sd, -) == "F4,old" ]]'
 
+# F7 two rounds back; the last marker was compacted (no findings) by an older version (no last_ids).
+compacted='{"schema":1,"round":2,"head_sha":"old","findings_dropped":true,"counts":{"open_blocking":0}}'
+jq -n --arg r1 '<!-- gh-pr-review:round {"schema":1,"round":1,"findings":[{"id":"F7","severity":"minor"}]} -->' \
+	--arg r2 "<!-- gh-pr-review:round $compacted -->" '[
+	{user: {login: "x"}, commit_id: "c1", submitted_at: "2026-01-01T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n" + $r1)},
+	{user: {login: "x"}, commit_id: "old", submitted_at: "2026-01-02T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n" + $r2)}]' \
+	>"$stub/rest-reviews.json"
+run
+expect "records: IDs continue after the highest in the whole history" \
+	'[[ $(jq -c "[.round, .findings[0].id, .last_ids.F]" <<<"$record") == "[3,\"F8\",8]" ]]'
+expect "records: the marker keeps last_ids" '[[ $body == *"\"last_ids\":{\"F\":8,\"L\":0}"* ]]'
+
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n```'
 run --no-post
 expect "records: --no-post keeps a preview record and posts nothing" '[[ -z $flag && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "true,null" ]]'
