@@ -128,6 +128,22 @@ record is saved as `round.json`. It holds only what the review already says:
 never the `--instructions` text, never the prompts. Rounds posted by anyone with
 this tool count, so the history is the same on every machine.
 
+`gh pr-review rounds <PR-URL | PR-number>` prints that history, one row per
+round. Reviews posted before the records existed are read back from their
+Markdown (`backfill`):
+
+```
+ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LABEL     SOURCE
+3      11-25 08:37  e55e68d  2         questionable  no     2     6    2      churning  backfill
+4      11-25 09:14  09b6b7c  1         questionable  no     1     9    1      churning  backfill
+next round: stop · churning · approach-stuck too-big · Settle the approach before the next round: …
+```
+
+The label says whether the loop converges: `early` (fewer than 3 rounds),
+`converging`, `ready`, `nit-loop` (a few Important findings that keep coming
+back) or `churning`. `--json` prints the records and the decision; `-u <login>`
+picks the gh account, as for a review.
+
 ## Troubleshooting
 
 - **Empty review** — pi may have failed or timed out; retry with
