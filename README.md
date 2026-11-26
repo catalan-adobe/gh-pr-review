@@ -56,6 +56,7 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--model <id>` | `github-copilot/gpt-5.6-sol` | Any pi model ID |
 | `-u`, `--user <login>` | active `gh` account | Use another logged-in `gh` account for this run only; global `gh auth` is not changed |
 | `--no-post` | posting on (with confirm) | Print the review only |
+| `--instructions <text>` | none | Extra guidance for both passes, for example `"Focus on db/; skip style nits"`. For a file: `--instructions "$(cat notes.md)"`. The tool does not post them, and the reviewer is told not to quote them, but the review can still reflect them: use `--no-post` to preview a review shaped by sensitive notes |
 | `--skip-approach` | off | Skip the maintainer's approach pass and run the code review only, for example when the approach is already agreed |
 | `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve, anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
 | `-y`, `--yes` | off | Skip the post confirmation |
@@ -109,7 +110,7 @@ your current directory, so you can inspect or re-post later:
 
 - `owner-prompt.md` and `approach.md`: the approach pass
 - `prompt.md` and `review.md`: the code review (absent after a Rethink)
-- `context/`: the PR description and discussion the approach pass reads
+- `context/`: the PR description, the discussion and the inline review threads both passes read
 - `repo/`: the checkout
 
 Add `pr-review-sessions/` to `.gitignore` if you run it inside a repo.
