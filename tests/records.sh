@@ -581,8 +581,8 @@ later_body "$filler" >"$tmp/later-padded.md"
 check "later round without marker: setup, a 59,776-character body" "$(jq -Rs length "$tmp/later-padded.md")" 59776
 printf '%s\n' "$r2" >"$tmp/r2.json"
 tail -n +2 "$tmp/later-padded.md" >"$tmp/r2-review.md"
-check "later round without marker: setup, the marker fits a short review" \
-	"$(marker_line "$tmp/r2.json" "$(head -c 300 "$tmp/r2-review.md")" | cut -c 1-24)" "<!-- gh-pr-review:round "
+line=$(marker_line "$tmp/r2.json" "$(head -c 300 "$tmp/r2-review.md")")
+check "later round without marker: setup, the marker fits a short review" "${line:0:24}" "<!-- gh-pr-review:round "
 check "later round without marker: setup, no room for the marker" "$(marker_line "$tmp/r2.json" "$tmp/r2-review.md")" ""
 rec=$(backfill_record "$(jq -n --rawfile body "$tmp/later-padded.md" '{body: $body, commit_id: "bbb",
 	submitted_at: "2026-01-03T00:00:00Z", user: {login: "rev"}, state: "APPROVED"}')" "$prev1" 2 "$pr")
