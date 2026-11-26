@@ -91,11 +91,12 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 # Prints the paths the delta touched, one per line, sorted and unique: the code that counts as "touched".
 #   incremental  the files changed between the previous head (or `from`) and the head.
 #   rebased      the files whose change in the PR differs between the old and the new version (index lines and
-#                hunk line numbers ignored, so the base moving under an unchanged patch does not count), plus the
-#                files the PR newly touches or no longer touches.
+#                hunk line numbers ignored, so the base moving under an unchanged patch does not count; a binary
+#                file compares its blob IDs), plus the files the PR newly touches or no longer touches.
 #   full         nothing.
+# Fails when git cannot list or compare the files: an unknown scope is not an empty one.
 changed_files() { # <repo-dir> <delta-json>
-	local repo=$1 mode prev_head prev_base head base from path old new
+	local repo=$1 mode prev_head prev_base head base from path old new names
 	{
 		IFS= read -r mode
 		IFS= read -r prev_head
@@ -107,18 +108,22 @@ changed_files() { # <repo-dir> <delta-json>
 	case "$mode" in
 	incremental)
 		# from: the previous head merged onto the new base, when the author merged the base in.
-		git -C "$repo" diff --name-only --no-renames -z "${from:-$prev_head}" "$head" | tr '\0' '\n' | LC_ALL=C sort -u
+		names=$(delta_names "$repo" "${from:-$prev_head}" "$head") || return 1
+		[[ -z "$names" ]] || LC_ALL=C sort -u <<<"$names"
 		;;
 	rebased)
-		{
-			git -C "$repo" diff --name-only --no-renames -z "$base" "$head"
-			git -C "$repo" diff --name-only --no-renames -z "$prev_base" "$prev_head"
-		} | tr '\0' '\n' | LC_ALL=C sort -u | while IFS= read -r path; do
-			old=$(delta_file_patch "$repo" "$prev_base" "$prev_head" "$path")
-			new=$(delta_file_patch "$repo" "$base" "$head" "$path")
+		names=$(delta_names "$repo" "$base" "$head") || return 1
+		old=$(delta_names "$repo" "$prev_base" "$prev_head") || return 1
+		names=$(printf '%s\n%s\n' "$names" "$old" | LC_ALL=C sort -u)
+		while IFS= read -r path; do
+			[[ -n "$path" ]] || continue
+			old=$(delta_file_patch "$repo" "$prev_base" "$prev_head" "$path") || return 1
+			new=$(delta_file_patch "$repo" "$base" "$head" "$path") || return 1
 			[[ "$old" == "$new" ]] || printf '%s\n' "$path"
-		done
+		done <<<"$names"
 		;;
+	full) ;;
+	*) return 1 ;;
 	esac
 }
 
@@ -164,13 +169,29 @@ delta_connect() { # <repo-dir> <prev-head> <head>
 		fetch --quiet --no-tags --deepen 50 --end-of-options origin "$3" >/dev/null 2>&1 || true
 }
 
+# The paths changed between two commits, one per line. Fails when git does.
+delta_names() { # <repo-dir> <from> <to>
+	(
+		set -o pipefail
+		git -C "$1" diff --name-only --no-renames -z "$2" "$3" | tr '\0' '\n'
+	)
+}
+
 delta_shallow() { # <repo-dir>
 	[[ "$(git -C "$1" rev-parse --is-shallow-repository 2>/dev/null)" == true ]]
 }
 
 # One file's patch between two commits, without what moves when the base moves: the `index` line (blob SHAs) and
-# the line numbers of the `@@` hunk headers. Literal pathspec: a path is a name, never a glob.
+# the line numbers of the `@@` hunk headers. A binary file's patch is one "Binary files … differ" line whatever the
+# content, so it gets its `git diff --raw` line instead (modes and full blob IDs). Literal pathspec: a path is a
+# name, never a glob. Fails when git does.
 delta_file_patch() { # <repo-dir> <from> <to> <path>
-	git --literal-pathspecs -C "$1" diff --no-color --no-ext-diff --no-textconv --no-renames "$2" "$3" -- "$4" |
-		sed -e '/^index /d' -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@ @@/'
+	local patch
+	patch=$(git --literal-pathspecs -C "$1" diff --no-color --no-ext-diff --no-textconv --no-renames "$2" "$3" -- "$4") ||
+		return 1
+	if grep -q '^Binary files ' <<<"$patch"; then
+		git --literal-pathspecs -C "$1" diff --raw --no-abbrev --no-renames "$2" "$3" -- "$4"
+	else
+		sed -e '/^index /d' -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@ @@/' <<<"$patch"
+	fi
 }

@@ -206,6 +206,54 @@ expect "rebased: range-diff failing falls back to full" \
 files=$(changed_files "$repo" "$out")
 expect "full: changed_files is empty" '[[ -z $files ]]'
 
+# ── rebased: a binary file ───────────────────────────────────────────────────
+# git prints "Binary files … differ" whatever the content: the blob IDs tell a changed binary from the same one.
+bin() { printf 'GIF89a\0%s\0' "$2" >"$tmp/src/$1"; } # <file> <content>: a file git sees as binary
+world
+commit m1 "a.txt=$ten"
+src checkout --quiet -b feature
+bin logo.gif v1
+bin icon.gif same
+commit f1 "b.txt=one"
+publish
+prev_head=$(src rev-parse HEAD) prev_base=$(src rev-parse main)
+src checkout --quiet main
+commit m2 c.txt=from-main
+src checkout --quiet -B feature main
+bin logo.gif v2
+bin icon.gif same
+commit f1 "b.txt=one"
+publish
+repo=$(checkout 50)
+head=$(git -C "$repo" rev-parse pr-branch)
+base=$(git -C "$repo" merge-base pr-branch origin/main)
+out=$(pick_delta "$repo" "$prev_head" "$prev_base" "$head" "$base")
+expect "binary: setup, rebased and git sees binary files" \
+	'[[ $(jq -r .mode <<<"$out") == rebased ]] && git -C "$repo" diff "$base" "$head" -- logo.gif | grep -q "^Binary files "'
+files=$(changed_files "$repo" "$out")
+expect "binary: changed_files lists the changed binary, not the same one" '[[ $files == logo.gif ]]'
+
+# ── changed_files: git failing is an error, not an empty list ────────────────
+cat >"$tmp/bin/git" <<S
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == diff ]] && exit 1; done
+exec "$real_git" "\$@"
+S
+for case_ in "rebased:$out" "incremental:$(pick_delta "$repo" "$head" "$base" "$head" "$base")"; do
+	mode=${case_%%:*}
+	rc=0
+	# Without pipefail, as a caller may run it: the error must not depend on the caller's options.
+	files=$(
+		set +o pipefail
+		PATH="$tmp/bin:$PATH"
+		changed_files "$repo" "${case_#*:}"
+	) || rc=$?
+	expect "$mode: a failing git diff fails changed_files" '[[ $rc != 0 && -z $files ]]'
+done
+rc=0
+changed_files "$repo" '{"mode":"strange"}' >/dev/null || rc=$?
+expect "changed_files: an unknown mode fails" '[[ $rc != 0 ]]'
+
 # ── full: force-push to unrelated history, the old head gone from the remote ─
 world
 commit m1 "a.txt=$ten"

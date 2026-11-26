@@ -17,7 +17,7 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 	echo '{"comments":[],"reviews":[]}' >"$stub/discussion.json"
 	echo '[]' >"$stub/rest-reviews.json"
 	echo '[]' >"$stub/rest-comments.json"
-	rm -f "$stub/git.missing" "$stub/git.rebased"
+	rm -f "$stub/git.missing" "$stub/git.rebased" "$stub/git.diff-fails"
 	cat >"$stub/bin/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
@@ -33,7 +33,7 @@ case "\$*" in
 esac
 S
 	# git: HEAD is aaaa and the merge-base bbbb. Any other SHA resolves to itself, unless listed in git.missing. The
-	# previous head is an ancestor of the head unless git.rebased exists.
+	# previous head is an ancestor of the head unless git.rebased exists. git.diff-fails makes `git diff` fail.
 	cat >"$stub/bin/git" <<'S'
 #!/usr/bin/env bash
 s=$(cd "$(dirname "$0")/.." && pwd)
@@ -50,7 +50,10 @@ case "$*" in
 *rev-parse*) echo aaaa ;;
 *"merge-base --is-ancestor"*) [[ ! -f "$s/git.rebased" ]] ;;
 *merge-base*) echo bbbb ;;
-*"diff --name-only"*) printf 'd.js\0' ;;
+*"diff --name-only"*)
+	[[ ! -f "$s/git.diff-fails" ]] || exit 1
+	printf 'd.js\0'
+	;;
 esac
 S
 	cat >"$stub/bin/pi" <<S
@@ -362,6 +365,13 @@ run
 expect "previous head gone: a full round that says why" '[[ $(jq -r ".mode" <<<"$record") == full ]] && grep -q "mode: full (previous head ${H2:0:12} not found after fetch)" "$stub/out.log"'
 expect "previous head gone: rule 1 only" 'grep -q "Check every earlier finding" "$stub/code-prompt.txt" && ! grep -q "Outside what changed" "$stub/code-prompt.txt" && grep -q "This round is a full review" "$stub/code-prompt.txt"'
 expect "previous head gone: the progress line says full review" '[[ $(sed -n 4p <<<"$body") == *"full review (previous head ${H2:0:12} not found after fetch)" ]]'
+
+setup $'**Approach:** Sound' "$round3"
+two_rounds
+touch "$stub/git.diff-fails"
+run
+expect "file list fails: a full round that says why" '[[ $(jq -r ".mode, .mode_reason" <<<"$record" | paste -sd, -) == "full,could not list the files the changes touched" ]] && grep -q "mode: full (could not list the files" "$stub/out.log"'
+expect "file list fails: no delta-files.txt, rule 1 only" '[[ -z $(session_file delta-files.txt) ]] && grep -q "Check every earlier finding" "$stub/code-prompt.txt" && ! grep -q "Outside what changed" "$stub/code-prompt.txt" && ! grep -q "delta-files.txt" "$stub/code-prompt.txt"'
 
 setup $'**Approach:** Sound' "$round3"
 two_rounds

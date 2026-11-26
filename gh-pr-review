@@ -483,8 +483,15 @@ else
 		"$(jq -r '.base_sha // ""' <<<"$FINDINGS_BASE")" "$HEAD_SHA" "$BASE_SHA") ||
 		DELTA='{"mode":"full","reason":"could not compare with the last round","commands":[]}'
 fi
+# delta-files.txt: the files the changes touched, for rule 3. A list git could not give is no proof that the other
+# files are untouched: the round is full instead.
+if DELTA_FILES=$(changed_files "$REVIEW_DIR" "$DELTA" 2>/dev/null); then
+	[[ "$(jq -r '.mode' <<<"$DELTA")" == full ]] || printf '%s\n' "$DELTA_FILES" | sed '/^$/d' >"$CONTEXT_DIR/delta-files.txt"
+else
+	DELTA=$(jq -c '.mode = "full" | .reason = "could not list the files the changes touched" | .commands = []
+		| del(.from)' <<<"$DELTA")
+fi
 ROUND_MODE=$(jq -r '.mode' <<<"$DELTA")
-changed_files "$REVIEW_DIR" "$DELTA" >"$CONTEXT_DIR/delta-files.txt" 2>/dev/null || : >"$CONTEXT_DIR/delta-files.txt"
 if [[ "$ROUND" -gt 1 ]]; then
 	if [[ "$ROUND_MODE" == full ]]; then
 		echo "    mode: full ($(jq -r '.reason' <<<"$DELTA"))"
