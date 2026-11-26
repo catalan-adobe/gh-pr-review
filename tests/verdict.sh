@@ -4,6 +4,9 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 # shellcheck source=lib/verdicts.sh
 source "$root/lib/verdicts.sh"
+# The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
+finished=false
+trap '[[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
 
 check() { # name label text expected
@@ -30,4 +33,5 @@ check "approach notes prose ignored" 'Approach' $'**Approach:** Rethink\n\nAppro
 check "approach rationale prose ignored" 'Approach' $'**Approach:** Sound\n\n**Approach rationale:** Rethink is unnecessary' 'sound'
 check "merge criteria prose ignored" 'ready to merge' $'**Ready to merge?** No\nReady to merge criteria: yes' 'no'
 check "plain label without bold" 'Approach' 'Approach: Questionable' 'questionable'
+finished=true
 exit "$fail"

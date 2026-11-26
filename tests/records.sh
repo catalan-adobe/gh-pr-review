@@ -10,7 +10,9 @@ source "$root/lib/verdicts.sh"
 source "$root/lib/records.sh"
 fixtures="$root/tests/fixtures/reviews"
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
+finished=false
+trap 'rm -rf "$tmp"; [[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
 
 check() { # name got want
@@ -509,4 +511,5 @@ check "backfill after backfill: IDs continue, previous head kept" \
 		--arg h "$(jq -r .head_sha <<<"$rec")" <<<"$rec2")" true
 check "backfill bullets: ready" "$(jq -r .ready <<<"$rec")" yes-with-fixes
 
+finished=true
 exit "$fail"

@@ -6,6 +6,9 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 LIB_DIR="$root/lib"
 # shellcheck source=lib/loop.sh
 source "$root/lib/loop.sh"
+# The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
+finished=false
+trap '[[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
 
 eq() { # name got want
@@ -207,4 +210,5 @@ eq "loop_text empty" "$(loop_text "$(loop_decide_json '[]' '{}' new false)")" "L
   label     none (no earlier rounds)
   blocking  none
   flags     none"
+finished=true
 exit "$fail"

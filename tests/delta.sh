@@ -9,7 +9,9 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
+finished=false
+trap 'rm -rf "$tmp"; [[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
 
 unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES GIT_CONFIG \
@@ -305,7 +307,7 @@ printf '%s\n' "\$*" >>"$tmp/git.log"
 exec "$real_git" "\$@"
 S
 chmod +x "$tmp/logbin/git"
-for bad in HEAD main --upload-pack=x "${prev_head:0:7}" "${prev_head}x" "${prev_head^^}"; do
+for bad in HEAD main --upload-pack=x "${prev_head:0:7}" "${prev_head}x" "$(tr a-f A-F <<<"$prev_head")"; do
 	: >"$tmp/git.log"
 	out=$(
 		PATH="$tmp/logbin:$PATH"
@@ -366,4 +368,5 @@ out=$(
 expect "shallow: the fetch failing is full, quietly" \
 	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,previous head ${prev_head:0:12} not found after fetch" ]]'
 
+finished=true
 exit "$fail"

@@ -8,6 +8,9 @@ stub=$(mktemp -d)
 	cat "$root"/lib/*.sh
 	sed -n '/^# ── post/,$p' "$root/gh-pr-review"
 } >"$stub/post.sh"
+# The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
+finished=false
+trap '[[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
 
 check() { # name review author me decision approach-verdict expected-flag [code-review, default: review] [record: none]
@@ -50,4 +53,5 @@ check "yes dash fixes" '**Ready to merge?** Yes — with fixes' bob me '' '' --c
 check "no record: a bare yes comments" '**Ready to merge?** Yes' bob me '' '' --comment '**Ready to merge?** Yes' none
 check "no record: an explicit approve stays" 'x' bob me approve '' --approve x none
 check "no dash reason" '**Ready to merge?** No — see Critical' bob me '' '' --request-changes
+finished=true
 exit "$fail"

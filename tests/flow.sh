@@ -5,6 +5,9 @@
 # shellcheck disable=SC2016,SC2034,SC2329 # SC2329: helpers such as no_session run inside expect's eval
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
+# The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
+finished=false
+trap '[[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
 
 setup() { # approach-output code-review-output [discussion-exit-code] [failing-pass: owner|code]
@@ -618,4 +621,5 @@ expect "round trip: the decision sees round 1 on this head" \
 	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>"$stub/out.log") && rc=0 || rc=$?
 expect "round trip: --check exits 5 on the same head" \
 	'[[ $rc == 5 && $(jq -r ".decision, .next_round, .series[0]" "$stub/check.json" | paste -sd, -) == "nothing-new,2,1" ]]'
+finished=true
 exit "$fail"
