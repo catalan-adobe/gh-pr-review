@@ -60,8 +60,8 @@ while [[ $# -gt 0 ]]; do
 		shift 2
 		;;
 	--instructions)
-		[[ $# -ge 2 && -n "${2//[[:space:]]/}" ]] || {
-			echo "Error: --instructions requires non-empty text" >&2
+		[[ $# -ge 2 && -n "${2//[[:space:]]/}" && "$2" != --* ]] || {
+			echo "Error: --instructions requires non-empty text (got: ${2:-nothing})" >&2
 			exit 1
 		}
 		INSTRUCTIONS="$2"
@@ -144,14 +144,14 @@ write_pr_context() {
 	}
 	# shortcut: the first 100 comments per thread only; page them if real threads run longer.
 	# shellcheck disable=SC2016 # $owner etc. are GraphQL variables, not shell ones
-	threads=$(gh api graphql --hostname "$GH_HOST_NAME" --paginate --slurp \
+	threads=$(gh api graphql --hostname "$GH_HOST_NAME" --paginate \
 		-f owner="$OWNER" -f name="$REPO" -F number="$PR_NUM" -f query='
 		query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
 		  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
 		    reviewThreads(first: 100, after: $endCursor) {
 		      pageInfo { hasNextPage endCursor }
 		      nodes { path line originalLine isResolved isOutdated
-		        comments(first: 100) { nodes { author { login } body createdAt } } } } } } }') || {
+		        comments(first: 100) { totalCount nodes { author { login } body createdAt } } } } } } }') || {
 		echo "Error: could not fetch the PR review threads (check gh auth and network)." >&2
 		exit 1
 	}
@@ -168,7 +168,7 @@ write_pr_context() {
 		echo ""
 		echo "# Inline review threads"
 		echo ""
-		jq -r '
+		jq -rs '
 			[.[].data.repository.pullRequest.reviewThreads.nodes[]]
 			| if length == 0 then "(no inline review threads)" else map(
 				(.line // .originalLine) as $line | .comments.nodes as $c
@@ -176,7 +176,7 @@ write_pr_context() {
 				| "## \(.path)\(if $line then ":\($line)" else "" end) · \($state)\n\n"
 				+ (if .isResolved then
 					"\($c[0].author.login): \(($c[0].body // "") | gsub("\\s+"; " ") | .[0:200])"
-					+ (($c | length) - 1 | if . == 0 then "" elif . == 1 then " (1 reply)"
+					+ (.comments.totalCount - 1 | if . == 0 then "" elif . == 1 then " (1 reply)"
 					   else " (\(.) replies)" end)
 				  else $c | map("**\(.author.login)** · \(.createdAt)\n\n\(.body)") | join("\n\n") end)
 				+ "\n") | join("\n") end
@@ -203,7 +203,8 @@ instructions_section() {
 	printf '## Reviewer instructions\n\n'
 	printf 'The person running this review added these instructions. Follow them where they conflict '
 	printf 'with the default checklist. The output format, the verdict line and the read-only rule '
-	printf 'still apply.\n\n%s\n\n' "$INSTRUCTIONS"
+	printf 'still apply. Use them, but do not quote or mention them in your reply: it may be posted '
+	printf 'on the PR.\n\n%s\n\n' "$INSTRUCTIONS"
 }
 
 # The posted body: the approach section, then the code review, then one footer. Empty in, empty out.

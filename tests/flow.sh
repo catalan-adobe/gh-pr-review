@@ -19,7 +19,7 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 case "\$*" in
 *"auth status"*) exit 0 ;;
 *"api"*user*) echo me ;;
-*graphql*) echo '[{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}]' ;;
+*graphql*) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}' ;;
 *"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; echo '{"comments":[],"reviews":[]}' ;;
 *"pr view"*) echo '{"title":"T","body":"B","headRefName":"h","baseRefName":"main","author":{"login":"bob"},"additions":1,"deletions":0,"changedFiles":1}' ;;
 *"pr review"*) printf '%s\n' "\$@" >"$stub/posted.args" ;;
@@ -97,6 +97,7 @@ run --skip-approach
 expect "skip-approach: one model call" '[[ $calls == 1 ]]'
 expect "skip-approach: code prompt points to the discussion" 'grep -q "context/pr-discussion.md" "$stub/code-prompt.txt"'
 expect "skip-approach: no approach in body" '[[ $rc == 0 && $body != *"Approach"* ]]'
+expect "skip-approach: posts the code review and its decision" '[[ $flag == --request-changes && $body == *"**Ready to merge?** No"* ]]'
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes' 0 owner
 run
 expect "owner pass fails: run fails" '[[ $rc != 0 ]]'
@@ -113,6 +114,7 @@ run --instructions 'Focus on db/ and $(skip) nits'
 expect "instructions: owner prompt gets them" 'grep -qF "Focus on db/ and \$(skip) nits" "$stub/owner-prompt.txt"'
 expect "instructions: code prompt gets them" 'grep -qF "Focus on db/ and \$(skip) nits" "$stub/code-prompt.txt"'
 expect "instructions: owner prompt has them before the steps" '[[ $(grep -n -e "Reviewer instructions" -e "^## Steps" "$stub/owner-prompt.txt" | head -1) == *instructions* ]]'
+expect "instructions: both prompts say not to quote them" 'grep -q "do not quote" "$stub/owner-prompt.txt" && grep -q "do not quote" "$stub/code-prompt.txt"'
 expect "instructions: not posted" '[[ $rc == 0 && $body != *"Focus on db/"* ]]'
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
@@ -122,6 +124,12 @@ expect "no instructions: no section in either prompt" '! grep -q "Reviewer instr
 setup 'unused' 'unused'
 run --instructions
 expect "instructions without a value: fails before any model call" '[[ $rc != 0 && $calls == 0 ]] && grep -q "requires" "$stub/out.log"'
+setup 'unused' 'unused'
+run --instructions --no-post
+expect "instructions followed by a flag: fails, nothing posted" '[[ $rc != 0 && $calls == 0 && -z $flag ]]'
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+run --instructions $'- focus on db/\n- skip nits'
+expect "instructions as a bullet list: accepted" '[[ $rc == 0 ]] && grep -qF -- "- skip nits" "$stub/code-prompt.txt"'
 setup 'unused' 'unused'
 run --instructions ' '
 expect "blank instructions: fails before any model call" '[[ $rc != 0 && $calls == 0 ]]'

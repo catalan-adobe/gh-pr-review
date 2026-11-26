@@ -4,7 +4,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 stub=$(mktemp -d)
 sed -n '/^# ── pr context/,/^}/p' "$root/gh-pr-review" >"$stub/lib.sh"
-no_threads='[{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}]'
+no_threads='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}'
 fail=0
 
 run() { # pr-json [threads-json] [graphql-exit-code] -> writes into $stub/ctx, sets out and rc
@@ -13,7 +13,9 @@ run() { # pr-json [threads-json] [graphql-exit-code] -> writes into $stub/ctx, s
 	cat >"$stub/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
-*graphql*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; cat "$stub/threads.json" ;;
+*--slurp*) echo "unknown flag: --slurp" >&2; exit 1 ;;
+*graphql*--paginate* | *--paginate*graphql*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; cat "$stub/threads.json" ;;
+*graphql*) head -c 1 "$stub/threads.json" ;;
 *) cat "$stub/pr.json" ;;
 esac
 S
@@ -59,13 +61,13 @@ if [[ $(grep -n '^## ' "$stub/ctx/pr-discussion.md" | head -1) == *bob* ]]; then
 fi
 
 thread() { # path line originalLine isResolved isOutdated -> one thread node with two comments
-	printf '{"path":"%s","line":%s,"originalLine":%s,"isResolved":%s,"isOutdated":%s,"comments":{"nodes":[
+	printf '{"path":"%s","line":%s,"originalLine":%s,"isResolved":%s,"isOutdated":%s,"comments":{"totalCount":2,"nodes":[
 	 {"author":{"login":"alice"},"body":"finding on %s\\nsecond line","createdAt":"2026-01-01T00:00:00Z"},
 	 {"author":{"login":"bob"},"body":"reply on %s","createdAt":"2026-01-02T00:00:00Z"}]}}' "$@" "$1" "$1"
 }
 page() { printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[%s]}}}}}' "$1"; }
 run '{"comments":[],"reviews":[]}' \
-	"[$(page "$(thread a.js 12 10 false false),$(thread b.js 3 3 true false)"),$(page "$(thread c.js null 7 false true)")]"
+	"$(page "$(thread a.js 12 10 false false),$(thread b.js 3 3 true false)")$(page "$(thread c.js null 7 false true)")"
 expect "open thread header" pr-discussion.md "## a.js:12 · open"
 expect "open thread keeps every comment" pr-discussion.md "reply on a.js"
 expect "open thread names the author" pr-discussion.md "alice"
@@ -74,6 +76,9 @@ expect "resolved thread keeps the start of the finding" pr-discussion.md "findin
 expect "resolved thread counts replies" pr-discussion.md "(1 reply)"
 expect_not "resolved thread drops replies" pr-discussion.md "reply on b.js"
 expect "outdated thread uses the original line" pr-discussion.md "## c.js:7 · outdated"
+big='{"path":"d.js","line":1,"originalLine":1,"isResolved":true,"isOutdated":false,"comments":{"totalCount":120,"nodes":[{"author":{"login":"alice"},"body":"long debate","createdAt":"2026-01-01T00:00:00Z"}]}}'
+run '{"comments":[],"reviews":[]}' "$(page "$big")"
+expect "reply count uses the total, not the fetched page" pr-discussion.md "(119 replies)"
 
 run '{"comments":[],"reviews":[]}' "" 4
 if [[ $rc != 0 && "$out" == *"Error: could not fetch"* ]]; then echo "ok   thread fetch failure is reported"; else
