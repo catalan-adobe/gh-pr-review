@@ -67,6 +67,19 @@ def findings_block_ok:
 		and (.file | . == null or type == "string")
 		and (.line | . == null or type == "number"));
 
+# True when the findings block reports at least the blockers the review's Markdown shows ($parsed: parse_findings of
+# the posted body): as many open Critical findings, and as many open Critical and Important ones together. An entry
+# with status fixed or declined, or with later: true, is not open; status and later may be absent. A block that
+# leaves out or downgrades a visible blocker ([] next to a Critical bullet) fails, and the round is parsed instead.
+def block_covers_markdown($parsed):
+	def open($sev): [.[] | objects | select(.later != true)
+		| select((.status // "new") | . != "fixed" and . != "declined")
+		| select((.severity | strings | ascii_downcase) == $sev)] | length;
+	def shown($sev): [($parsed // [])[]? | objects | select(.severity == $sev)] | length;
+	(if type == "array" then . else [] end)
+	| open("critical") >= shown("critical")
+		and open("critical") + open("important") >= shown("critical") + shown("important");
+
 # Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
 def normalize_findings:
 	if type == "array" then

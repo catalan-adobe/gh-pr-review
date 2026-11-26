@@ -154,7 +154,8 @@ The code-review prompt asks for one more block at the end of the reply: a fenced
 1. Cuts the block out before posting. The posted Markdown stays as it is today.
 2. Checks it with jq, and numbers new findings itself (F1, F2, … continuing from the last round). The model never
    invents IDs.
-3. Falls back to parsing the Markdown when the block is missing or invalid: count the findings under each severity
+3. Falls back to parsing the Markdown when the block is missing or invalid, or when it reports fewer open blockers
+   than the Markdown shows (an empty block next to a Critical bullet): count the findings under each severity
    heading and take `file:line` from the first code span. Findings come as `- **…` bullets or as `1. **…` numbered
    items (older reviews); both count. The record gets `"source": "parsed"`. A parse failure never blocks the post.
 

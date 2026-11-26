@@ -142,6 +142,27 @@ check "findings_block_ok: one bad entry spoils the block" "$(ok_block '[{}, [{"l
 	[{"severity":"minor","title":"t","file":3}], [{"severity":"minor","title":"t"}, "F2"]]')" \
 	"[false,false,false,false,false,false,false]"
 
+covers() { # block parsed -> block_covers_markdown
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson p "$2" 'include "records"; $b | block_covers_markdown($p)'
+}
+crit='[{"severity":"critical","title":"t"}]'
+check "block_covers_markdown: [] next to a Critical bullet does not cover it" "$(covers '[]' "$crit")" false
+check "block_covers_markdown: the same Critical covers it" "$(covers '[{"severity":"Critical","title":"x"}]' "$crit")" true
+check "block_covers_markdown: a Critical downgraded to Important does not cover it" \
+	"$(covers '[{"severity":"important","title":"x"}]' "$crit")" false
+check "block_covers_markdown: a Critical covers an Important" \
+	"$(covers '[{"severity":"critical","title":"x"}]' '[{"severity":"important","title":"t"}]')" true
+check "block_covers_markdown: a downgrade to minor does not cover an Important" \
+	"$(covers '[{"severity":"minor","title":"x"}]' '[{"severity":"important","title":"t"}]')" false
+check "block_covers_markdown: fixed, declined and later entries are not open" \
+	"$(covers '[{"severity":"critical","status":"fixed"},{"severity":"critical","status":"declined"},
+		{"severity":"critical","later":true}]' "$crit")" false
+check "block_covers_markdown: open, regressed and status-less entries are" \
+	"$(covers '[{"severity":"critical","status":"open"},{"severity":"important","status":"regressed"},{"severity":"important"}]' \
+		'[{"severity":"critical"},{"severity":"important"},{"severity":"important"}]')" true
+check "block_covers_markdown: minor findings in the Markdown need no cover" \
+	"$(covers '[]' '[{"severity":"minor","title":"t"}]')" true
+
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \
 	"Yes (with fixes)=yes-with-fixes" "yes — with fixes=yes-with-fixes" "No — see Critical=no" "no.=no" \
