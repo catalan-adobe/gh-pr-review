@@ -157,6 +157,7 @@ write_pr_context() {
 		echo "Error: could not fetch the PR discussion (check gh auth and network)." >&2
 		exit 1
 	}
+	printf '%s\n' "$json" >"$dir/discussion.json"
 	# shortcut: the first 100 comments per thread only; page them if real threads run longer.
 	# shellcheck disable=SC2016 # $owner etc. are GraphQL variables, not shell ones
 	threads=$(gh api graphql --hostname "$GH_HOST_NAME" --paginate \
@@ -313,7 +314,7 @@ echo "    model: ${MODEL}"
 echo ""
 
 PR_JSON=$(gh pr view "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" \
-	--json title,body,headRefName,baseRefName,author,additions,deletions,changedFiles 2>&1) ||
+	--json title,body,headRefName,headRefOid,baseRefName,author,additions,deletions,changedFiles 2>&1) ||
 	{
 		echo "Error fetching PR (check gh auth): $PR_JSON" >&2
 		exit 1
@@ -365,6 +366,16 @@ echo ""
 
 CONTEXT_DIR="${SESSION_DIR}/context"
 write_pr_context "$CONTEXT_DIR"
+
+# ── round ───────────────────────────────────────────────────────────────────────────
+# Earlier gh-pr-review reviews (by anyone) are earlier rounds; the latest one's marker carries the previous record.
+GENERATED_REVIEWS=$(jq -c '[.reviews[] | select((.body // "") | contains("<!-- gh-pr-review generated -->"))]
+	| sort_by(.submittedAt)' "$CONTEXT_DIR/discussion.json")
+ROUND=$(($(jq 'length' <<<"$GENERATED_REVIEWS") + 1))
+PREVIOUS_RECORD=$(marker_record "$(jq -r 'last.body // ""' <<<"$GENERATED_REVIEWS")" || true)
+[[ -n "$PREVIOUS_RECORD" ]] || PREVIOUS_RECORD=null
+echo "    round: ${ROUND}"
+echo ""
 
 # ── build owner (approach) prompt ───────────────────────────────────────────────────────────
 build_owner_prompt() {
@@ -678,12 +689,27 @@ If a section is empty, write: *(none found)*
 
 **Reasoning:** [1-2 sentence honest technical assessment]
 
+## Findings block (for tooling)
+
+After the Assessment, end your reply with one fenced code block tagged `json findings`. It holds a JSON array with
+one object per Critical, Important and Minor finding above, in the same order:
+`{"severity": "critical" | "important" | "minor", "file": "<path>" or null, "line": <number> or null, "title": "<the
+finding in one short sentence>"}`. Write `[]` when there are none. Keep the Markdown findings above exactly as they
+are: the block is extra, read by tooling, and removed before the review is posted. For example:
+
+```json findings
+[{"severity": "important", "file": "src/api.ts", "line": 141, "title": "Webhook payload is trusted without verification"}]
+```
+
 PART4
 	} >"$PROMPT_FILE"
 }
 
 # ── run pi ───────────────────────────────────────────────────────────────────
 REVIEW_FILE="${SESSION_DIR}/review.md"
+REVIEW_BODY_FILE="${SESSION_DIR}/review-body.md"
+FINDINGS_FILE="${SESSION_DIR}/findings.json"
+RECORD_FILE="${SESSION_DIR}/round.json"
 
 echo "    session: ${SESSION_DIR}"
 echo ""
@@ -729,7 +755,9 @@ else
 	echo "⏳  Running code review (this may take a few minutes)..."
 	echo ""
 	run_pi "$PROMPT_FILE" "$REVIEW_FILE"
-	CODE_REVIEW=$(cat "$REVIEW_FILE")
+	# The findings block is for the record only: the posted review is the reply without it.
+	cut_findings_block "$REVIEW_FILE" "$REVIEW_BODY_FILE" "$FINDINGS_FILE"
+	CODE_REVIEW=$(cat "$REVIEW_BODY_FILE")
 	# Only a Rethink may post the approach alone; an empty code review is a failed run.
 	if [[ -z "${CODE_REVIEW//[[:space:]]/}" ]]; then
 		echo "Error: the code review came back empty — pi may have failed or timed out." >&2
@@ -740,6 +768,41 @@ else
 fi
 
 REVIEW=$(assemble_review "$APPROACH" "$CODE_REVIEW")
+
+# ── record ─────────────────────────────────────────────────────────────────────────
+# round.json starts as a preview; the post block turns it into the posted round. A failure here never blocks the post.
+write_round_record() {
+	local findings source=model code_review=true approach ready meta
+	if [[ "$APPROACH_VERDICT" == rethink ]]; then
+		code_review=false
+		findings='[]'
+	elif jq -e 'type == "array"' "$FINDINGS_FILE" >/dev/null 2>&1; then
+		findings=$(jq -c . "$FINDINGS_FILE")
+	else
+		source=parsed
+		findings=$(parse_findings "$REVIEW_BODY_FILE") || findings='[]'
+	fi
+	case "$APPROACH_VERDICT" in
+	sound | questionable | rethink) approach="$APPROACH_VERDICT" ;;
+	*) if [[ "$SKIP_APPROACH" == "true" ]]; then approach=skipped; else approach=unknown; fi ;;
+	esac
+	ready=$(normalize_ready "$(last_verdict 'ready to merge' "$CODE_REVIEW")")
+	meta=$(jq -n --arg source "$source" --arg host "$GH_HOST_NAME" --arg owner "$OWNER" --arg repo "$REPO" \
+		--argjson number "$PR_NUM" --argjson round "$ROUND" --arg reviewer "$ME" --arg model "$MODEL" \
+		--arg base "$BASE_SHA" --arg head "$HEAD_SHA" --argjson previous "$PREVIOUS_RECORD" \
+		--arg approach "$approach" --arg ready "$ready" --argjson code_review "$code_review" \
+		'{source: $source, pr: {host: $host, owner: $owner, repo: $repo, number: $number}, round: $round,
+		  mode: "full", reviewer: (if $reviewer == "" then null else $reviewer end), model: $model,
+		  base_sha: $base, head_sha: $head, previous_head_sha: ($previous.head_sha? // null),
+		  approach: $approach, ready: $ready, decision: null, posted_at: null,
+		  code_review: $code_review, preview: true}')
+	build_record "$meta" "$findings" "$PREVIOUS_RECORD" >"$RECORD_FILE"
+}
+ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
+if ! write_round_record; then
+	echo "Warning: could not write the round record; the review is posted without it." >&2
+	RECORD_FILE=""
+fi
 
 # ── display ──────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -783,14 +846,24 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		esac
 	fi
 
-	ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
+	ME=${ME:-$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)}
 	if [[ "$DECISION" != "comment" && "$ME" == "$PR_AUTHOR" ]]; then
 		echo "Note: GitHub blocks ${DECISION} on your own PR; posting as comment."
 		DECISION=comment
 	fi
 
-	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s' "$REVIEW")
+	MARKER=""
+	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}" ]]; then
+		jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+			'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted"
+		MARKER=$(marker_line "$RECORD_FILE.posted" "${#REVIEW}")$'\n'
+	fi
+	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s%s' "$MARKER" "$REVIEW")
 
 	gh pr review "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" "--${DECISION}" --body "$COMMENT"
+	if [[ -n "$MARKER" ]]; then
+		mv "$RECORD_FILE.posted" "$RECORD_FILE"
+		printf '%s\n' "$COMMENT" >"$(dirname "$RECORD_FILE")/posted.md"
+	fi
 	echo "✓  Posted → https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}"
 fi

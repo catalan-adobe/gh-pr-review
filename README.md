@@ -109,11 +109,24 @@ Each run writes its files to `./pr-review-sessions/pr-review-XXXXX/` in
 your current directory, so you can inspect or re-post later:
 
 - `owner-prompt.md` and `approach.md`: the approach pass
-- `prompt.md` and `review.md`: the code review (absent after a Rethink)
+- `prompt.md` and `review.md`: the code review (absent after a Rethink); `review-body.md` is the reply
+  without its findings block, and `findings.json` the block itself
+- `round.json`: the round record (see below); `posted.md`: the exact body posted
 - `context/`: the PR description, the discussion and the inline review threads both passes read
 - `repo/`: the checkout
 
 Add `pr-review-sessions/` to `.gitignore` if you run it inside a repo.
+
+## Round history
+
+Every review this tool posts on a PR is one round. Each round carries a hidden
+record on GitHub, in an HTML comment right below the
+`<!-- gh-pr-review generated -->` line: the round number, the commits reviewed,
+the approach and "Ready to merge?" verdicts, and the findings (severity,
+`file:line`, a short title, an ID such as `F4` that later rounds keep). The same
+record is saved as `round.json`. It holds only what the review already says:
+never the `--instructions` text, never the prompts. Rounds posted by anyone with
+this tool count, so the history is the same on every machine.
 
 ## Troubleshooting
 

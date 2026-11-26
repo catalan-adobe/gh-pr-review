@@ -14,13 +14,14 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 	echo '{"github-copilot":{}}' >"$stub/home/.pi/agent/auth.json"
 	printf '%s' "$1" >"$stub/approach.out"
 	printf '%s' "$2" >"$stub/review.out"
+	echo '{"comments":[],"reviews":[]}' >"$stub/discussion.json"
 	cat >"$stub/bin/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
 *"auth status"*) exit 0 ;;
 *"api"*user*) echo me ;;
 *graphql*) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}' ;;
-*"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; echo '{"comments":[],"reviews":[]}' ;;
+*"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; cat "$stub/discussion.json" ;;
 *"pr view"*) echo '{"title":"T","body":"B","headRefName":"h","baseRefName":"main","author":{"login":"bob"},"additions":1,"deletions":0,"changedFiles":1}' ;;
 *"pr review"*) printf '%s\n' "\$@" >"$stub/posted.args" ;;
 esac
@@ -47,6 +48,7 @@ run() { # extra args...
 	calls=$(wc -l <"$stub/pi.calls" | tr -d ' ')
 	body=$(sed -n '/^--body$/,$p' "$stub/posted.args" 2>/dev/null | sed 1d || true)
 	flag=$(grep -x -- '--\(comment\|approve\|request-changes\)' "$stub/posted.args" 2>/dev/null || true)
+	record=$(cat "$stub"/work/pr-review-sessions/pr-review-*/round.json 2>/dev/null || true)
 }
 
 expect() { # name condition
@@ -133,4 +135,38 @@ expect "instructions as a bullet list: accepted" '[[ $rc == 0 ]] && grep -qF -- 
 setup 'unused' 'unused'
 run --instructions ' '
 expect "blank instructions: fails before any model call" '[[ $rc != 0 && $calls == 0 ]]'
+
+# ── round records
+block=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** Yes with fixes\n\n'"$block"
+run
+expect "records: the code prompt asks for the findings block" 'grep -q "json findings" "$stub/code-prompt.txt"'
+expect "records: the findings block is not posted" '[[ $rc == 0 && $body != *"json findings"* && $body == *"thing breaks"* ]]'
+expect "records: one round marker is posted" '[[ $(grep -c "gh-pr-review:round" <<<"$body") == 1 ]]'
+expect "records: the marker follows the generated marker" '[[ $body == "<!-- gh-pr-review generated -->"$'"'"'\n'"'"'"<!-- gh-pr-review:round "* ]]'
+expect "records: round.json has the model findings" '[[ $(jq -r ".source, .round, .findings[0].id, .findings[0].file, .preview, .decision" <<<"$record" | paste -sd, -) == "model,1,F1,a.js,false,comment" ]]'
+expect "records: posted.md is the posted body" '[[ -f $(ls -d "$stub"/work/pr-review-sessions/pr-review-*)/posted.md ]]'
+
+setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`b.js:9` — data loss.**\n\n**Ready to merge?** No'
+run
+expect "records: no block falls back to parsing" '[[ $rc == 0 && $(jq -r ".source, .findings[0].severity, .counts.open_blocking" <<<"$record" | paste -sd, -) == "parsed,critical,1" ]]'
+
+setup $'### Approach\n**Approach:** Rethink' 'never used'
+run
+expect "records: a Rethink has no code review" '[[ $(jq -r ".code_review, .counts.open_blocking" <<<"$record" | paste -sd, -) == "false,null" ]]'
+expect "records: a Rethink posts its marker" '[[ $body == *"gh-pr-review:round"* ]]'
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[{"severity":"minor","file":"c.js","line":1,"title":"nit"}]\n```'
+prev='{"schema":1,"round":2,"head_sha":"old","findings":[{"id":"F1","severity":"minor","status":"new"},{"id":"F3","severity":"important","status":"new"}]}'
+jq -n --arg prev "<!-- gh-pr-review:round $prev -->" '{comments: [], reviews: [
+	{author: {login: "x"}, state: "COMMENTED", submittedAt: "2026-01-01T00:00:00Z", body: "<!-- gh-pr-review generated -->\nold round"},
+	{author: {login: "y"}, state: "COMMENTED", submittedAt: "2026-01-02T00:00:00Z", body: "a human review"},
+	{author: {login: "x"}, state: "COMMENTED", submittedAt: "2026-01-03T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n" + $prev + "\nround two")}]}' >"$stub/discussion.json"
+run
+expect "records: earlier generated reviews count as rounds" '[[ $(jq -r ".round" <<<"$record") == 3 ]]'
+expect "records: finding IDs continue from the previous record" '[[ $(jq -r ".findings[0].id, .previous_head_sha" <<<"$record" | paste -sd, -) == "F4,old" ]]'
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n```'
+run --no-post
+expect "records: --no-post keeps a preview record and posts nothing" '[[ -z $flag && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "true,null" ]]'
 exit "$fail"
