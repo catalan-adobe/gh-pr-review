@@ -477,12 +477,17 @@ write_pr_context "$CONTEXT_DIR"
 # Round 2 and later build on the last round with a code review (a Rethink round has none): its open findings are
 # re-checked by ID, and what changed since its head is reviewed in full. Anything unusable makes a full round, a
 # record without its findings list included: the open findings it had cannot be re-checked, so nothing may be
-# skipped. PREVIOUS_OPEN counts only a list that is there.
+# skipped. PREVIOUS_OPEN and PREVIOUS_FIXED count only a list that is there: the open findings to re-check, and the
+# ones that round fixed, to catch a regression.
 FINDINGS_BASE=$(jq -c '[.[] | select(.code_review != false)] | last // null' <<<"$RECORDS")
 BASE_ROUND=$(jq -r '.round // empty' <<<"$FINDINGS_BASE")
 FINDINGS_KNOWN=$(jq -L "$LIB_DIR" 'include "records"; has_findings_list' <<<"$FINDINGS_BASE")
-PREVIOUS_OPEN=$(jq -L "$LIB_DIR" 'include "records"; if has_findings_list then [.findings[] | objects
-	| select(.status == "open" or .status == "new" or .status == "regressed")] | length else 0 end' <<<"$FINDINGS_BASE")
+previous_count() { # <jq status filter>
+	jq -L "$LIB_DIR" "include \"records\"; if has_findings_list then [.findings[] | objects | select($1)] | length
+		else 0 end" <<<"$FINDINGS_BASE"
+}
+PREVIOUS_OPEN=$(previous_count '.status == "open" or .status == "new" or .status == "regressed"')
+PREVIOUS_FIXED=$(previous_count '.status == "fixed"')
 if [[ "$FINDINGS_BASE" == null ]]; then
 	if [[ "$PREVIOUS_RECORD" == null ]]; then DELTA_REASON="no previous round"; else DELTA_REASON="no earlier code review"; fi
 	DELTA=$(jq -cn --arg reason "$DELTA_REASON" '{mode: "full", reason: $reason, commands: []}')
@@ -508,7 +513,8 @@ if [[ "$ROUND" -gt 1 ]]; then
 	if [[ "$ROUND_MODE" == full ]]; then
 		echo "    mode: full ($(jq -r '.reason' <<<"$DELTA"))"
 	else
-		echo "    mode: ${ROUND_MODE} since round ${BASE_ROUND} · ${PREVIOUS_OPEN} earlier findings to re-check"
+		echo "    mode: ${ROUND_MODE} since round ${BASE_ROUND} · ${PREVIOUS_OPEN} earlier findings to re-check," \
+			"${PREVIOUS_FIXED} fixed to watch"
 	fi
 	echo ""
 fi
@@ -519,20 +525,24 @@ round_body() { # <round>
 		| sort_by(.submittedAt) | .[$n - 1].body // ""' "$CONTEXT_DIR/discussion.json" | grep -v '^<!-- gh-pr-review' || true
 }
 
-# previous-review.md and previous-findings.md: the last code review and its open findings, for rule 1.
-if [[ "$PREVIOUS_OPEN" -gt 0 ]]; then
+# previous-review.md and previous-findings.md: the last code review, its open findings and the ones it fixed, for
+# rule 1. Written when either list has one: a fixed finding is listed so that, coming back, it keeps its ID and
+# counts as regressed instead of looking new.
+if [[ "$PREVIOUS_OPEN" -gt 0 || "$PREVIOUS_FIXED" -gt 0 ]]; then
 	round_body "$BASE_ROUND" >"$CONTEXT_DIR/previous-review.md"
 	finding_lines() { # <jq status filter>
-		jq -r ".findings[] | select($1)
+		jq -r ".findings[] | objects | select($1)
 			| [.id, .severity, ((.file // \"(no file)\") + (if .line then \":\\(.line)\" else \"\" end)), (.title // \"\")]
 			| join(\" · \")" <<<"$FINDINGS_BASE"
 	}
 	{
-		finding_lines '.status == "open" or .status == "new" or .status == "regressed"'
-		# Listed so that one coming back keeps its ID and counts as regressed, instead of looking new.
-		FIXED_LINES=$(finding_lines '.status == "fixed"')
-		if [[ -n "$FIXED_LINES" ]]; then
-			printf '\nFixed in round %s (report one only if the problem is back, as open):\n%s\n' "$BASE_ROUND" "$FIXED_LINES"
+		if [[ "$PREVIOUS_OPEN" -gt 0 ]]; then
+			finding_lines '.status == "open" or .status == "new" or .status == "regressed"'
+		fi
+		if [[ "$PREVIOUS_FIXED" -gt 0 ]]; then
+			[[ "$PREVIOUS_OPEN" == 0 ]] || echo
+			printf 'Fixed in round %s (report one only if the problem is back, as open):\n' "$BASE_ROUND"
+			finding_lines '.status == "fixed"'
 		fi
 	} >"$CONTEXT_DIR/previous-findings.md"
 fi
@@ -700,9 +710,9 @@ OWNER3
 }
 
 # ── build review prompt (temp file — no quoting issues) ──────────────────────
-# Round 2 and later. Rule 1 (re-check the earlier findings) needs open findings from the last code review; rules 2
-# and 3 (review what changed in full, only Critical outside it) need an incremental or rebased delta.
-later_round() { [[ "$PREVIOUS_OPEN" -gt 0 || "$ROUND_MODE" != full ]]; }
+# Round 2 and later. Rule 1 (re-check the earlier findings) needs open or fixed findings from the last code review;
+# rules 2 and 3 (review what changed in full, only Critical outside it) need an incremental or rebased delta.
+later_round() { [[ "$PREVIOUS_OPEN" -gt 0 || "$PREVIOUS_FIXED" -gt 0 || "$ROUND_MODE" != full ]]; }
 
 # shellcheck disable=SC2016 # Markdown backticks in printf formats, not command substitutions
 previous_round_section() {
@@ -726,10 +736,23 @@ Check each one against the current code and give it a status:
    - `open`: it is still there. A fix attempt that did not work stays open: say what is still wrong.
    - `declined`: only when the PR discussion gives a reason you accept. Quote it.
 
-   Every open ID listed appears once in the findings block, with its status. The file also lists the findings
-   fixed in that round: report one of those only if the problem is back, as `open`. Never invent IDs.
-
+   Every open ID listed is mandatory: it appears once in the findings block, with its status. Never invent IDs.
 RULE1
+		if [[ "$PREVIOUS_FIXED" -gt 0 ]]; then
+			printf '   The file then lists the findings fixed in round %s. Those are not mandatory: report one only if ' \
+				"$BASE_ROUND"
+			printf 'the problem is back, with its ID, as `open`.\n'
+		fi
+		printf '\n'
+	elif [[ "$PREVIOUS_FIXED" -gt 0 ]]; then
+		n=$((n + 1))
+		printf '%s. **Check whether an earlier finding came back.** Round %s fixed the findings listed in ' \
+			"$n" "$BASE_ROUND"
+		printf '%s/previous-findings.md (ID · severity · file:line · title), and left none open. Its review is in ' \
+			"$CONTEXT_DIR"
+		printf '%s/previous-review.md. If the current code has one of these problems again, report it with its ID, ' \
+			"$CONTEXT_DIR"
+		printf 'as `open`. Leave out the ones that are still fixed. Never invent IDs.\n\n'
 	fi
 	if [[ "$ROUND_MODE" != full ]]; then
 		n=$((n + 1))
@@ -1022,8 +1045,8 @@ Then, folded, and left out when empty:
 ## Findings block (for tooling)
 
 After the Assessment, end your reply with one fenced code block tagged `json findings`. It holds a JSON array: one
-object per earlier finding listed in previous-findings.md (every one of them, with its status), then one per new
-finding and per Later item:
+object per open earlier finding listed in previous-findings.md (every one of them, with its status), one per fixed
+finding that came back (as open), then one per new finding and per Later item:
 `{"id": "F3" or null, "status": "open" | "fixed" | "declined" | "new", "severity": "critical" | "important" |
 "minor", "file": "<path>" or null, "line": <number> or null, "title": "<the finding in one short sentence>",
 "in_delta": true | false, "later": true | false}`. An earlier finding keeps its ID; a new finding or Later item has

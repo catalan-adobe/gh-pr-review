@@ -343,6 +343,7 @@ setup $'### Approach\n\n**Approach:** Sound' "$round3"
 two_rounds
 run
 expect "round 3: incremental since round 2" '[[ $rc == 0 && $(jq -r ".round, .mode, .previous_head_sha" <<<"$record" | paste -sd, -) == "3,incremental,$H2" ]] && grep -q "mode: incremental since round 2" "$stub/out.log"'
+expect "round 3: open IDs are mandatory, fixed ones only if back" 'grep -q "Every open ID listed is mandatory" "$stub/code-prompt.txt" && grep -q "Those are not mandatory: report one only if the problem is back" "$stub/code-prompt.txt"'
 expect "round 3: the code prompt has the three rules" 'grep -q "## Previous round" "$stub/code-prompt.txt" && grep -q "Check every earlier finding" "$stub/code-prompt.txt" && grep -q "Review what changed since round 2 in full" "$stub/code-prompt.txt" && grep -q "Outside what changed, raise only Critical" "$stub/code-prompt.txt"'
 expect "round 3: the diff since the previous head" 'grep -qF "git diff --stat $H2..aaaa" "$stub/code-prompt.txt" && grep -qF "git diff $H2..aaaa" "$stub/code-prompt.txt"'
 expect "round 3: the later-round output format" 'grep -q "Fixed since the last round" "$stub/code-prompt.txt" && grep -q "\"id\": \"F3\" or null" "$stub/code-prompt.txt"'
@@ -402,6 +403,20 @@ setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n
 two_rounds
 run
 expect "unverified: a forgotten finding is carried as open, not re-checked" '[[ $(jq -r "[.findings[] | select(.unverified) | .id] | join(\" \")" <<<"$record") == "F1 F3" && $body == *"2 not re-checked"* && $flag == --comment ]]'
+
+# Round 2 fixed the last open finding: round 3 still watches it, and a comeback keeps its ID.
+fixed_only() {
+	add_round '{"schema":1,"source":"model","round":1,"head_sha":"'"$H1"'","base_sha":"'"$B1"'","approach":"sound","ready":"no","code_review":true,"findings":[{"id":"F1","severity":"important","status":"new","first_round":1,"file":"a.js","line":3,"title":"thing breaks"}],"counts":{"open_blocking":1,"critical":0,"important":1,"minor":0}}' $'### Issues\n- round one'
+	add_round '{"schema":1,"source":"model","round":2,"head_sha":"'"$H2"'","base_sha":"'"$B1"'","approach":"sound","ready":"yes","code_review":true,"findings":[{"id":"F1","severity":"important","status":"fixed","first_round":1,"file":"a.js","line":3,"title":"thing breaks"}],"counts":{"open_blocking":0,"critical":0,"important":0,"minor":0}}' $'### Issues\n- round two, all fixed'
+}
+setup $'**Approach:** Sound' $'**Ready to merge?** No\n\n```json findings\n[{"id":"F1","status":"open","severity":"important","file":"a.js","line":3,"title":"thing breaks again","in_delta":true,"later":false}]\n```'
+fixed_only
+run
+expect "only fixed before: previous-findings.md lists them" '[[ $(session_file previous-findings.md) == "Fixed in round 2 (report one only if the problem is back, as open):"$'"'"'\n'"'"'"F1 · important · a.js:3 · thing breaks" ]] && [[ $(session_file previous-review.md) == *"round two, all fixed"* ]]'
+expect "only fixed before: rule 1 asks whether one came back, nothing mandatory" 'grep -q "Check whether an earlier finding came back" "$stub/code-prompt.txt" && ! grep -q -e "Check every earlier finding" -e "is mandatory" "$stub/code-prompt.txt" && grep -q "Fixed since the last round" "$stub/code-prompt.txt"'
+expect "only fixed before: the comeback keeps its ID, regressed and blocking" '[[ $(jq -r "(.findings | map(.id + \":\" + .status) | join(\" \")), .counts.open_blocking" <<<"$record" | paste -sd, -) == "F1:regressed,1" && $body == *"1 regressed"* ]]'
+run --full
+expect "only fixed before, --full: still watches them" '[[ $(jq -r .mode <<<"$record") == full ]] && grep -q "Check whether an earlier finding came back" "$stub/code-prompt.txt"'
 
 # A marker cut to fit the size cap: the counts survive, the findings do not. Nothing can be re-checked by ID, so the
 # round reviews the whole PR, as a first code review.
