@@ -261,6 +261,36 @@ expect "binary: setup, rebased and git sees binary files" \
 files=$(changed_files "$repo" "$out")
 expect "binary: changed_files lists the changed binary, not the same one" '[[ $files == logo.gif ]]'
 
+# ── rebased: an edit moved between two identical blocks ──────────────────────
+# Without line numbers the two patches are the same text, though the change moved. The base never touched the file,
+# so the old and new versions of the file decide.
+block=$(printf '    x = 1\n    y = 2\n    z = 3\n    w = 4\n    v = 5')
+blocks() { # <block with the edit: 2 or 3>: four copies of the block, z = 3 changed in one of them
+	local i
+	for i in 1 2 3 4; do
+		if [[ $i == "$1" ]]; then printf '%s\n' "${block/z = 3/z = 4}"; else printf '%s\n' "$block"; fi
+	done
+}
+world
+commit m1 "x.txt=$(blocks 0)"
+src checkout --quiet -b feature
+commit f1 "x.txt=$(blocks 2)"
+publish
+prev_head=$(src rev-parse HEAD) prev_base=$(src rev-parse main)
+src checkout --quiet main
+commit m2 c.txt=from-main
+src checkout --quiet -B feature main
+commit f1 "x.txt=$(blocks 3)"
+publish
+repo=$(checkout 50)
+head=$(git -C "$repo" rev-parse pr-branch)
+base=$(git -C "$repo" merge-base pr-branch origin/main)
+out=$(pick_delta "$repo" "$prev_head" "$prev_base" "$head" "$base")
+expect "moved edit: setup, rebased, and the patches differ only in their line numbers" \
+	'[[ $(jq -r .mode <<<"$out") == rebased && "$(delta_file_patch "$repo" "$prev_base" "$prev_head" x.txt)" == "$(delta_file_patch "$repo" "$base" "$head" x.txt)" ]]'
+files=$(changed_files "$repo" "$out")
+expect "moved edit: changed_files lists the file" '[[ $files == x.txt ]]'
+
 # ── changed_files: git failing is an error, not an empty list ────────────────
 cat >"$tmp/bin/git" <<S
 #!/usr/bin/env bash

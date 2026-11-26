@@ -100,9 +100,10 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 
 # Prints the paths the delta touched, one per line, sorted and unique: the code that counts as "touched".
 #   incremental  the files changed between the previous head (or `from`) and the head.
-#   rebased      the files whose change in the PR differs between the old and the new version (index lines and
-#                hunk line numbers ignored, so the base moving under an unchanged patch does not count; a binary
-#                file compares its blob IDs), plus the files the PR newly touches or no longer touches.
+#   rebased      the files whose change in the PR differs between the old and the new version, plus the files the
+#                PR newly touches or no longer touches. A file the base did not change compares its old and new
+#                content. One the base changed compares the two patches, index lines and hunk line numbers ignored,
+#                so the base moving under an unchanged patch does not count (a binary file compares its blob IDs).
 #   full         nothing.
 # Fails when git cannot list or compare the files: an unknown scope is not an empty one.
 changed_files() { # <repo-dir> <delta-json>
@@ -127,8 +128,16 @@ changed_files() { # <repo-dir> <delta-json>
 		names=$(printf '%s\n%s\n' "$names" "$old" | LC_ALL=C sort -u)
 		while IFS= read -r path; do
 			[[ -n "$path" ]] || continue
-			old=$(delta_file_patch "$repo" "$prev_base" "$prev_head" "$path") || return 1
-			new=$(delta_file_patch "$repo" "$base" "$head" "$path") || return 1
+			old=$(delta_blob "$repo" "$prev_base" "$path") || return 1
+			new=$(delta_blob "$repo" "$base" "$path") || return 1
+			if [[ "$old" == "$new" ]]; then
+				# The base did not touch the file: the two versions of the PR's file say it all, where a moved hunk counts.
+				old=$(delta_blob "$repo" "$prev_head" "$path") || return 1
+				new=$(delta_blob "$repo" "$head" "$path") || return 1
+			else
+				old=$(delta_file_patch "$repo" "$prev_base" "$prev_head" "$path") || return 1
+				new=$(delta_file_patch "$repo" "$base" "$head" "$path") || return 1
+			fi
 			[[ "$old" == "$new" ]] || printf '%s\n' "$path"
 		done <<<"$names"
 		;;
@@ -189,6 +198,14 @@ delta_names() { # <repo-dir> <from> <to>
 
 delta_shallow() { # <repo-dir>
 	[[ "$(git -C "$1" rev-parse --is-shallow-repository 2>/dev/null)" == true ]]
+}
+
+# A file's mode, type and blob ID in a commit, or nothing when the commit does not have it. Fails when git does.
+delta_blob() { # <repo-dir> <commit> <path>
+	(
+		set -o pipefail
+		git --literal-pathspecs -C "$1" ls-tree -z --full-tree "$2" -- "$3" | tr '\0' '\n' | awk -F '\t' 'NR == 1 { print $1 }'
+	)
 }
 
 # One file's patch between two commits, without what moves when the base moves: the `index` line (blob SHAs) and
