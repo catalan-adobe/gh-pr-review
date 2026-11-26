@@ -3,13 +3,16 @@
 
 # Prints the PR's round records as a JSON array, oldest first: the hidden marker of each gh-pr-review review, or a
 # record rebuilt from the review's Markdown (backfill) when the review predates the markers. A generated review is one
-# whose first line is the generated marker (is_generated_review in lib/records.jq).
+# whose first line is the generated marker (is_generated_review in lib/records.jq). GitHub's facts win over the
+# marker's: the round is the review's position in submission order, posted_at its submission time, head_sha the
+# commit it was posted on and reviewer its author, so two reviews posted at once can't both be round K.
 fetch_round_records() { # <host> <owner> <repo> <N>
-	local reviews pr records='[]' previous=null round=0 review record body
+	local reviews pr records='[]' previous=null round=0 review record body facts
 	reviews=$(gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" | jq -cs -L "${LIB_DIR:?}" '
 		include "records";
-		add // [] | map(select(.body | is_generated_review))
-		| sort_by(.submitted_at) | .[] | {body, commit_id, submitted_at, user: {login: .user.login}}') || {
+		add // [] | map(select((.body | is_generated_review) and .state != "PENDING"))
+		| sort_by([.submitted_at // "", .id // 0]) | .[]
+		| {body, state, commit_id, submitted_at, user: {login: .user.login}}') || {
 		echo "Error: could not fetch the reviews of $2/$3#$4 (check gh auth and network)." >&2
 		return 1
 	}
@@ -23,6 +26,9 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 		if [[ -z "$record" ]]; then
 			record=$(backfill_record "$review" "$previous" "$round" "$pr")
 		fi
+		facts=$(jq -c '{posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
+			| with_entries(select(.value | type == "string" and . != ""))' <<<"$review")
+		record=$(jq -c --argjson round "$round" --argjson facts "$facts" '. + $facts + {round: $round}' <<<"$record")
 		records=$(jq -c --argjson record "$record" '. + [$record]' <<<"$records")
 		previous="$record"
 	done <<<"$reviews"
@@ -36,8 +42,9 @@ fetch_pr_shape() { # <host> <owner> <repo> <N>
 }
 
 # Prints true when a person other than the PR author reviewed or commented after <time>: that lifts a loop-check
-# stop. Bots (user.type "Bot", or a login ending in [bot]) and gh-pr-review rounds do not count, and neither does
-# the PR author: on my own PRs, fix agents post as me and must not lift their own stop.
+# stop. Only an identified person counts: no login (a deleted account, user null), bots (user.type "Bot", or a login
+# ending in [bot]) and gh-pr-review rounds do not, and neither does the PR author: on my own PRs, fix agents post as
+# me and must not lift their own stop.
 lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 	local out
 	# Captured first: a gh failure half-way must print one answer, not jq's partial one and then "false".
@@ -50,7 +57,8 @@ lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 		[.[] | .[]?] | any(.[];
 			((.submitted_at // .created_at // "") > $since)
 			and ((.user.type // "") != "Bot")
-			and ((.user.login // "") as $login | $login != $author and ($login | endswith("[bot]") | not))
+			and ((.user.login // "") as $login
+				| $login != "" and $login != $author and ($login | endswith("[bot]") | not))
 			and ((.body | is_generated_review) | not))'); then
 		printf '%s\n' "$out"
 	else

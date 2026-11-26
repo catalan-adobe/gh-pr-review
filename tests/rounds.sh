@@ -12,7 +12,8 @@ backfill_body="<!-- gh-pr-review generated -->${nl}### Approach${nl}**Approach:*
 backfill_body+="#### 🚨 Critical (Must Fix Before Merge)${nl}- **\`a.js:1\` — crit.**${nl}"
 backfill_body+="#### ⚠️ Important (Should Fix)${nl}- **\`b.js:2\` — imp one.**${nl}- **\`c.js:3\` — imp two.**${nl}"
 backfill_body+="#### 💡 Minor (Nice to Have)${nl}*(none found)*${nl}### Assessment${nl}**Ready to merge?** No"
-marker='{"schema":1,"source":"model","round":2,"head_sha":"bbbbbbb2","posted_at":"2026-01-03T10:00:00Z",'
+# The marker's round, head and time are stale on purpose: GitHub's position, commit_id and submitted_at win.
+marker='{"schema":1,"source":"model","round":7,"head_sha":"stale00","posted_at":"2030-01-01T00:00:00Z",'
 marker+='"approach":"sound","ready":"yes-with-fixes","code_review":true,"findings":[],'
 marker+='"counts":{"open_blocking":1,"critical":0,"important":1,"minor":1}}'
 marker_body="<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${marker} -->${nl}**Ready to merge?** Yes with fixes"
@@ -21,7 +22,7 @@ rethink_body="<!-- gh-pr-review generated -->${nl}### Approach${nl}**Approach:**
 jq -n --arg b "$backfill_body" --arg m "$marker_body" --arg r "$rethink_body" '[
 	{body: "plain human review", commit_id: "x", submitted_at: "2026-01-01T08:00:00Z", user: {login: "carol"}},
 	{body: $r, commit_id: "ddddddd4", submitted_at: "2026-01-04T10:00:00Z", user: {login: "me"}},
-	{body: $b, commit_id: "aaaaaaa1", submitted_at: "2026-01-02T10:00:00Z", user: {login: "me"}},
+	{body: $b, commit_id: "aaaaaaa1", submitted_at: "2026-01-02T10:00:00Z", user: {login: "me"}, state: "CHANGES_REQUESTED"},
 	{body: $m, commit_id: "bbbbbbb2", submitted_at: "2026-01-03T10:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
 jq -n '[{commit: {committer: {date: "2026-01-01T09:00:00Z"}}}, {commit: {committer: {date: "2026-01-02T12:00:00Z"}}},
 	{commit: {committer: {date: "2026-01-02T13:00:00Z"}}}, {commit: {committer: {date: "2026-01-03T12:00:00Z"}}}]' \
@@ -31,12 +32,14 @@ cat >"$stub/gh" <<S
 case "\$*" in
 *pulls/1/reviews*) cat "$stub/reviews.json" ;;
 *pulls/1/commits*) cat "$stub/commits.json" ;;
-*issues/1/comments* | *pulls/1/comments*) echo '[]' ;;
+*issues/1/comments*) cat "$stub/comments.json" ;;
+*pulls/1/comments*) echo '[]' ;;
 *"pr view"*) echo '{"additions":10,"deletions":2,"changedFiles":3,"headRefOid":"eeeeeee5","author":{"login":"bob"}}' ;;
 *) echo "unexpected gh call: \$*" >&2; exit 9 ;;
 esac
 S
 chmod +x "$stub/gh"
+echo '[]' >"$stub/comments.json"
 
 rounds() { # args... -> stdout of cmd_rounds
 	PATH="$stub:$PATH" LIB_DIR="$root/lib" GH_PR_REVIEW_USER='' bash -c '
@@ -65,6 +68,42 @@ expect "rounds: the next-round line" 'grep -q "^next round: run · early" <<<"$o
 
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "rounds --json: records and decision" '[[ $rc == 0 && $(jq -r "(.records | length), .decision.decision, .decision.next_round" <<<"$out" | paste -sd, -) == "3,run,4" ]]'
+
+expect "rounds --json: backfill keeps the review state as the decision" \
+	'[[ $(jq -r ".records[0] | .source, .decision" <<<"$out" | paste -sd, -) == "backfill,request-changes" ]]'
+expect "rounds --json: GitHub's position, commit and time win over the marker's" \
+	'[[ $(jq -r ".records[1] | .round, .head_sha, .posted_at" <<<"$out" | paste -sd, -) == "2,bbbbbbb2,2026-01-03T10:00:00Z" ]]'
+
+# Rounds posted at once, all marked round 1. One has neither commit_id nor submitted_at on GitHub (it sorts first),
+# one has no commit_id, and a pending review is not a round.
+one='{"schema":1,"round":1,"head_sha":"m1","posted_at":"2026-03-01T00:00:00Z","code_review":true,"counts":{"open_blocking":0}}'
+cp "$stub/reviews.json" "$stub/reviews.saved"
+jq -n --arg m "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${one} -->${nl}x" '[
+	{body: $m, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}},
+	{body: $m, commit_id: null, submitted_at: "2026-03-01T00:00:05Z", user: {login: "ann"}},
+	{body: $m, commit_id: null, submitted_at: null, user: null},
+	{body: $m, commit_id: "c9", submitted_at: null, user: {login: "me"}, state: "PENDING"}]' >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "rounds: duplicate marker rounds are numbered by submission order" \
+	'[[ $(jq -c "[.records[] | .round]" <<<"$out") == "[1,2,3]" ]]'
+expect "rounds: the marker's head and time stay when GitHub has none" \
+	'[[ $(jq -r ".records[0] | .head_sha, .posted_at" <<<"$out" | paste -sd, -) == "m1,2026-03-01T00:00:00Z" &&
+		$(jq -r ".records[1:][] | .head_sha, .reviewer" <<<"$out" | paste -sd, -) == "c1,me,m1,ann" ]]'
+cp "$stub/reviews.saved" "$stub/reviews.json"
+
+lifted() { # comments-json -> lifted_since's answer for a stop after 2026-01-04
+	printf '%s' "$1" >"$stub/comments.json"
+	PATH="$stub:$PATH" LIB_DIR="$root/lib" bash -c 'for f in "$LIB_DIR"/*.sh; do source "$f"; done
+		lifted_since h o r 1 2026-01-04T10:00:00Z bob' 2>&1
+}
+late='"created_at": "2026-02-01T00:00:00Z", "body": "x"'
+out=$(lifted "[{\"user\": {\"login\": \"dave\", \"type\": \"User\"}, $late}]")
+expect "lifted_since: another person lifts" '[[ $out == true ]]'
+out=$(lifted "[{\"user\": null, $late}]")
+expect "lifted_since: a comment with no user does not lift" '[[ $out == false ]]'
+out=$(lifted "[{\"user\": {\"login\": \"\", \"type\": \"User\"}, $late}]")
+expect "lifted_since: an empty login does not lift" '[[ $out == false ]]'
+echo '[]' >"$stub/comments.json"
 
 out=$(rounds) && rc=0 || rc=$?
 expect "rounds: a PR is required" '[[ $rc != 0 && $out == *Usage* ]]'
