@@ -42,6 +42,8 @@ echo call >>"$stub/pi.calls"
 if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] && exit 7
 	printf '%s' "\${*: -1}" >"$stub/owner-prompt.txt"; cat "$stub/approach.out"; else
 	[[ "${4:-}" == code ]] && exit 7
+	# A round someone else posts while this review runs.
+	[[ -f "$stub/reviews.after" ]] && cp "$stub/reviews.after" "$stub/rest-reviews.json"
 	printf '%s' "\${*: -1}" >"$stub/code-prompt.txt"; cat "$stub/review.out"; fi
 S
 	chmod +x "$stub/bin/"*
@@ -61,27 +63,44 @@ run_no_y() { # no extra args: the interactive path, with no terminal on stdin
 	collect
 }
 
-# Runs a command on a pseudo-terminal (util-linux or BSD script), typing <input> once the terminal is up.
-in_tty() { # input command...
+# Runs a command on a pseudo-terminal: util-linux or BSD script.
+in_tty() { # command...
 	local cmd
-	printf -v cmd '%q ' "${@:2}"
-	if script --version >/dev/null 2>&1; then
-		{
-			sleep 1
-			printf '%s' "$1"
-		} | script -qec "$cmd" /dev/null
-	else
-		{
-			sleep 1
-			printf '%s' "$1"
-		} | script -q /dev/null "${@:2}"
-	fi
+	printf -v cmd '%q ' "$@"
+	if script --version >/dev/null 2>&1; then script -qec "$cmd" /dev/null; else script -q /dev/null "$@"; fi
 }
 
-run_tty() { # input extra-args...: the interactive path, on a terminal, without -y
+# Types each answer once its prompt shows in the log (10 s at most each), then holds the terminal's input open until
+# the run is done, so script never sends an end of file the run could read as an answer.
+answer() { # log done-file prompt answer [prompt answer]...
+	local log="$1" done="$2" i
+	shift 2
+	while [[ $# -ge 2 ]]; do
+		for ((i = 0; i < 100; i++)); do
+			grep -qF -- "$1" "$log" 2>/dev/null && break
+			sleep 0.1
+		done
+		printf '%s\n' "$2"
+		shift 2
+	done
+	for ((i = 0; i < 600; i++)); do
+		[[ -f "$done" ]] && return 0
+		sleep 0.1
+	done
+}
+
+run_tty() { # prompt answer [prompt answer]...: the interactive path, on a terminal, without -y
 	fresh
-	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
-		in_tty "$1" bash "$root/gh-pr-review" https://github.com/o/r/pull/1 "${@:2}" >"$stub/out.log" 2>&1) && rc=0 || rc=$?
+	: >"$stub/out.log"
+	rm -f "$stub/tty.done"
+	answer "$stub/out.log" "$stub/tty.done" "$@" | (
+		cd "$stub/work" || exit 1
+		code=0
+		HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+			in_tty bash "$root/gh-pr-review" https://github.com/o/r/pull/1 >"$stub/out.log" 2>&1 || code=$?
+		touch "$stub/tty.done"
+		exit "$code"
+	) && rc=0 || rc=$?
 	collect
 }
 
@@ -345,10 +364,10 @@ run
 expect "no new commits: exit 5, no clone" '[[ $rc == 5 && $calls == 0 ]] && no_session'
 run --check
 expect "--check: no new commits exits 5" '[[ $rc == 5 ]]'
-run_tty $'n\n'
+run_tty "anyway?" n
 expect "no new commits, in a terminal: asks, and no exits 5" \
 	'[[ $rc == 5 && $calls == 0 ]] && grep -q "Run round 2 anyway? \[y/N\]" "$stub/out.log" && no_session'
-run_tty $'y\n\n'
+run_tty "anyway?" y "Post as review" ""
 expect "no new commits, in a terminal: yes runs the round, marked forced" \
 	'[[ $rc == 0 && $calls == 2 && $(jq -r ".round, .forced" <<<"$record" | paste -sd, -) == "2,true" ]]'
 run --force-round
@@ -367,6 +386,27 @@ run --skip-approach --check
 expect "after a Rethink on this head: --skip-approach --check exits 0" '[[ $rc == 0 && $calls == 0 ]]'
 run
 expect "after a Rethink on this head: a full run has nothing new" '[[ $rc == 5 && $calls == 0 ]]'
+
+# Overlapping runs: round 2, by ann, lands while this review runs.
+overlap() {
+	setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[{"severity":"minor","title":"nit"}]\n```'
+	rounds_with 2 >"$stub/rest-reviews.json"
+	rounds_with 2 3 | jq -c '.[1].user.login = "ann" | .[1].body |= sub("\"findings\":\\[\\]"; "\"findings\":[{\"id\":\"F5\"}]")' \
+		>"$stub/reviews.after"
+}
+overlap
+run
+expect "overlap, -y: nothing posted, exit 6, session kept" \
+	'[[ $rc == 6 && -z $flag && -n $record ]] && grep -q "round 2 by ann" "$stub/out.log"'
+overlap
+run_tty "Post as review" "" "Post anyway" n
+expect "overlap, in a terminal: no posts nothing, exit 6" \
+	'[[ $rc == 6 && -z $flag ]] && grep -q "Post anyway as round 3? \[y/N\]" "$stub/out.log"'
+overlap
+run_tty "Post as review" "" "Post anyway" y
+expect "overlap, in a terminal: yes posts as round 3, IDs after the new round" \
+	'[[ $rc == 0 && $flag == --approve && $(jq -r ".round, .findings[0].id, .findings[0].first_round, .previous_head_sha" <<<"$record" |
+		paste -sd, -) == "3,F6,3,h2" && $body == *"\"round\":3"* ]]'
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run

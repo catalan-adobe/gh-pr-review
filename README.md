@@ -174,6 +174,12 @@ as the author cannot lift its own stop. Comments without an identified user
 (a deleted account) do not count either. `--force-round` runs a round anyway,
 without asking, and the record says so (`forced`).
 
+Rounds are numbered in the order GitHub received them. Just before posting,
+the tool reads the rounds again: if someone posted one while this review ran,
+it says who, and asks "Post anyway as round N?" in a terminal (the findings
+are kept, renumbered for the new position). With `-y` it posts nothing, keeps
+the session folder, and exits with code 6.
+
 `gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
 or 5 (no new commits); `--check --json` prints the decision as JSON for
 scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
@@ -184,6 +190,7 @@ scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
 | 1 | Error |
 | 3 | Stopped by the loop check |
 | 5 | No new commits since the last round |
+| 6 | History changed while the review ran: someone posted another round; nothing posted |
 
 ## Troubleshooting
 
