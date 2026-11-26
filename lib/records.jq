@@ -56,6 +56,17 @@ def parse_findings:
 		else . end)
 	| .out;
 
+# True when the model's findings block can be used as it is: an array whose every entry is an object with a known
+# severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
+# back to the Markdown, so normalize_findings never drops a finding the reader can see.
+def findings_block_ok:
+	type == "array"
+	and all(.[]; type == "object"
+		and (.severity | type == "string" and (ascii_downcase | . == "critical" or . == "important" or . == "minor"))
+		and (.title | type == "string")
+		and (.file | . == null or type == "string")
+		and (.line | . == null or type == "number"));
+
 # Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
 def normalize_findings:
 	if type == "array" then
