@@ -80,6 +80,10 @@ Out of scope:
 
 Phase 6 is small and can ship with phase 2.
 
+The terminal dashboard, `gh pr-review dash`, has its own spec:
+[review dashboard](2026-11-26-review-dashboard-design.md). It reads `status --json` (phase 4) and adds no review
+logic of its own.
+
 ## Phase 1: Round records
 
 ### What a round is
@@ -342,6 +346,8 @@ The run computes the label of the rounds so far before it starts round K:
   - `--force-round` runs anyway, and the record says so.
   - The stop lifts when something changes: a human review, a new approach verdict, a `--full` round, or a label
     that is no longer Nit loop or Churning.
+- **Check only:** `gh pr-review <PR> --check [--json]` computes the label and the decision (run, warn, stop, or
+  nothing new) and exits with 0, 3 or 5, without running a round. The dashboard uses it before `r`.
 
 Calibration on the real history, before any prompt change (c = Converging or Early, R = Ready, n = Nit loop,
 C = Churning, - = Rethink):
@@ -441,6 +447,16 @@ me      adobe/skills#823  Early      2       9 7             questionable  3.2k 
 
 `--json` prints the full model: one object per PR with its records, label, flags and turn. Agents read this.
 `--md` prints the table as Markdown, for a daily note or a chat message.
+
+More outputs serve the terminal dashboard ([review dashboard](2026-11-26-review-dashboard-design.md)), which is a
+thin client over this command:
+
+- `--json` carries `"schema": 1` and follows the shape in the dashboard spec. `--cached` prints the last result
+  without touching the network.
+- `--short` prints one line from the cache only, such as `⚑4 ✓1 ↻2` (my turn, ready, jobs running), in under
+  50 ms. It fits a shell prompt or a multiplexer status bar.
+- `gh pr-review show <PR> --json` prints one PR in full: every round record with its findings, each round's review
+  body, the review threads, and the description.
 
 ## Phase 5: The shepherd
 
@@ -615,5 +631,5 @@ Real runs, with `--no-post`:
 2. Does `review-requested:@me` include team requests? If so, use `user-review-requested:@me` and add a `teams`
    switch.
 3. Follow-up issues: one checklist issue per PR (proposed), or one issue per finding?
-4. If jq gets heavy for `status` and the shepherd, move them to a Node script with no dependencies? Node 22 is
-   already required by pi.
+4. If jq gets heavy for `status` and the shepherd, move them into Rust next to the dashboard (`dash/`), or keep
+   the engine in Bash and jq? Proposal: keep Bash and jq until a real limit shows up.
