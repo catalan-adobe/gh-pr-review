@@ -58,3 +58,42 @@ Nothing was posted.
 The whole suite passes on macOS (BSD userland, jq 1.8.2) and in an Ubuntu 24.04 container (mawk, jq 1.7, no
 `column`). The first Linux run caught one bug: `column` turned the `–` placeholder into byte escapes outside a UTF-8
 locale. `rounds` now pads its table in jq.
+
+## PR 2: incremental rounds
+
+Date: 2026-11-26. Branch `review-tracking`. No round was posted.
+
+### Preview round 3 on adobe/skills#823
+
+`gh pr-review https://github.com/adobe/skills/pull/823 --no-post`, model `github-copilot/gpt-5.6-sol`. Rounds 1 and
+2 predate the records, so round 3 builds on the backfilled round 2: 8 findings with IDs F11 to F18.
+
+| Check | Result |
+| --- | --- |
+| Mode | `incremental`: the author merged `main` into the PR since round 2, so the delta starts from round 2's head merged onto the new base |
+| Files the delta touched | 11, all in the PR (a plain diff from round 2's head listed 32: 21 came from `main`) |
+| Earlier IDs accounted for | 8 of 8: 5 fixed, 2 open, 1 declined (with the author's reason quoted), 0 not re-checked |
+| New findings | 2 (F19, F20), both in the new commits. Later list: empty |
+| Open blocking | 3 (was 7): 1 Critical, 2 Important. Label `converging` (series 9, 7, 3) |
+| Progress line | `5 fixed · 2 still open · 2 new (2 in the new commits) · 1 declined · open blocking: 3 (was 7) · loop: converging`, the same numbers as `round.json` |
+| Owner pass | Got its round 2 verdict (Questionable) and the delta. It changed the verdict to Sound and wrote the full section |
+| Findings block | Present (10 entries), cut from the body. No loop line next to the progress line |
+
+The model set `in_delta: true` on the earlier findings too. It only matters for new findings (the progress line
+counts those), so the record keeps it as given.
+
+### Bugs this check found, fixed before the run above
+
+- **Backfill carried every earlier finding.** With statuses, a backfilled round carried the round before it as
+  "open, not re-checked", so the backfilled blocking series grew (adobe/skills#813: 9, 21, 29, …). An old review says
+  nothing about what was fixed, so backfill now uses the previous record for ID numbers only. The 12 calibration PRs
+  match the spec's table again.
+- **A merge of the base branch counted as the author's change.** A plain `git diff <previous head>..<head>` included
+  everything `main` brought in. The delta now compares with the previous head merged onto the new base
+  (`git merge-tree --write-tree`), and falls back to a range-diff when that merge conflicts.
+
+### Not checked yet
+
+- A rebase between two rounds on a real PR: none at hand. The rebase, force-push and shallow cases are covered by
+  `tests/delta.sh` with real git.
+- A posted round: waits for a yes.
