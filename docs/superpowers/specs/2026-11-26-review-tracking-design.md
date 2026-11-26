@@ -132,13 +132,15 @@ truth, so the count is the same on every machine and for every reviewer.
       "title": "Hands-off mode can force-publish pages the owner did not request" }
   ],
   "later": [ { "id": "L1", "file": "skills/extract/scripts/crawl.mjs", "line": 1370, "title": "…" } ],
-  "counts": { "open_blocking": 8, "new": 3, "fixed": 4, "declined": 0, "regressed": 1 },
+  "counts": { "open_blocking": 8, "critical": 2, "important": 6, "minor": 1,
+              "new": 3, "fixed": 4, "declined": 0, "regressed": 1 },
   "loop": { "label": "churning", "flags": ["approach-stuck", "too-big"] }
 }
 ```
 
 - `source`: `model` (the findings block), `parsed` (fallback on the Markdown), or `backfill` (an old review).
-- `severity`: critical, important or minor. Blocking means critical or important.
+- `severity`: critical, important or minor. Blocking means critical or important. `counts.critical`,
+  `counts.important` and `counts.minor` count the open findings of each severity, without Later items.
 - `status`: `new`, `open`, `fixed`, `declined`, or `regressed` (marked fixed in an earlier round, back now). In round
   1, and in every round before phase 3, all findings are `new`.
 - `approach`: sound, questionable, rethink, skipped, or unknown. `ready`: yes, yes-with-fixes, no, or unknown.
