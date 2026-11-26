@@ -3,8 +3,11 @@
 # Functions only. Git runs quietly in the review checkout: stdout carries the JSON or the paths, nothing else.
 
 # Prints `{mode, reason, commands, prev_head, prev_base, head, base}` as one compact JSON line. Modes:
-#   incremental  the previous head is an ancestor of the head: `git diff --stat` and `git diff` from it.
-#   rebased      the previous head is not an ancestor (rebase or force-push): a `git range-diff` of the two ranges.
+#   incremental  the previous head is an ancestor of the head: `git diff --stat` and `git diff` from it. When the
+#                author merged the base branch in since, the diff starts from the previous head merged onto the new
+#                base (a tree, in the extra field `from`), so what the base brought is left out.
+#   rebased      the previous head is not an ancestor (rebase or force-push), or a base merge that conflicts: a
+#                `git range-diff` of the two ranges.
 #   full         anything else, with a short human reason. The round then reviews the whole PR.
 # The four SHA fields are full SHAs when the checkout has the commit, else as given ("" when unknown); changed_files
 # reads them. Never fails: every git error ends in `full`.
@@ -24,12 +27,28 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 	fi
 	delta_connect "$repo" "$prev_head" "$head"
 
+	local why="previous head is not an ancestor of the head (rebase or force-push)" tree
 	if git -C "$repo" merge-base --is-ancestor "$prev_head" "$head" >/dev/null 2>&1; then
-		reason="previous head is an ancestor of the head"
-		[[ "$prev_head" != "$head" ]] || reason="no new commits since the previous round"
-		delta_json incremental "$reason" "$prev_head" "$prev_base" "$head" "$base" \
-			"git diff --stat ${prev_head}..${head}" "git diff ${prev_head}..${head}"
-		return 0
+		# The author merged the base branch in since: a plain diff would show everything the base brought. Compare with
+		# the previous head merged onto the new base instead, which leaves the author's own changes.
+		if sha=$(delta_resolve "$repo" "$base") &&
+			! git -C "$repo" merge-base --is-ancestor "$sha" "$prev_head" >/dev/null 2>&1; then
+			if tree=$(git -C "$repo" -c core.hooksPath=/dev/null merge-tree --write-tree "$prev_head" "$sha" 2>/dev/null); then
+				tree=${tree%%$'\n'*}
+				delta_json incremental "the base branch was merged in: compared with the previous head merged onto the new base" \
+					"$prev_head" "$prev_base" "$head" "$sha" "git diff --stat ${tree} ${head}" "git diff ${tree} ${head}" |
+					jq -c --arg from "$tree" '. + {from: $from}'
+				return 0
+			fi
+			# A merge with conflicts: compare the two versions of the PR instead.
+			why="the base branch was merged in with conflicts"
+		else
+			reason="previous head is an ancestor of the head"
+			[[ "$prev_head" != "$head" ]] || reason="no new commits since the previous round"
+			delta_json incremental "$reason" "$prev_head" "$prev_base" "$head" "$base" \
+				"git diff --stat ${prev_head}..${head}" "git diff ${prev_head}..${head}"
+			return 0
+		fi
 	fi
 
 	# Rebase or force-push: a plain diff would mix in what the base branch did, so compare the two ranges instead.
@@ -49,8 +68,7 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 	new="${base}..${head}"
 	# Try it before handing it to the reviewer: a range it cannot walk (shallow history, odd ranges) fails here.
 	if git -C "$repo" range-diff --no-color "$old" "$new" >/dev/null 2>&1; then
-		delta_json rebased "previous head is not an ancestor of the head (rebase or force-push)" \
-			"$prev_head" "$prev_base" "$head" "$base" "git range-diff $old $new"
+		delta_json rebased "$why" "$prev_head" "$prev_base" "$head" "$base" "git range-diff $old $new"
 	else
 		reason="range-diff failed on ${prev_base:0:12}..${prev_head:0:12} ${base:0:12}..${head:0:12}"
 		delta_json full "$reason" "$prev_head" "$prev_base" "$head" "$base"
@@ -59,23 +77,25 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 }
 
 # Prints the paths the delta touched, one per line, sorted and unique: the code that counts as "touched".
-#   incremental  the files changed between the previous head and the head.
+#   incremental  the files changed between the previous head (or `from`) and the head.
 #   rebased      the files whose change in the PR differs between the old and the new version (index lines and
 #                hunk line numbers ignored, so the base moving under an unchanged patch does not count), plus the
 #                files the PR newly touches or no longer touches.
 #   full         nothing.
 changed_files() { # <repo-dir> <delta-json>
-	local repo=$1 mode prev_head prev_base head base path old new
+	local repo=$1 mode prev_head prev_base head base from path old new
 	{
 		IFS= read -r mode
 		IFS= read -r prev_head
 		IFS= read -r prev_base
 		IFS= read -r head
 		IFS= read -r base
-	} < <(jq -r '.mode, .prev_head // "", .prev_base // "", .head // "", .base // ""' <<<"$2")
+		IFS= read -r from
+	} < <(jq -r '.mode, .prev_head // "", .prev_base // "", .head // "", .base // "", .from // ""' <<<"$2")
 	case "$mode" in
 	incremental)
-		git -C "$repo" diff --name-only --no-renames -z "$prev_head" "$head" | tr '\0' '\n' | LC_ALL=C sort -u
+		# from: the previous head merged onto the new base, when the author merged the base in.
+		git -C "$repo" diff --name-only --no-renames -z "${from:-$prev_head}" "$head" | tr '\0' '\n' | LC_ALL=C sort -u
 		;;
 	rebased)
 		{

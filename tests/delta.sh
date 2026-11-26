@@ -102,6 +102,52 @@ out=$(pick_delta "$repo" "$head" "$base" "$head" "$base")
 expect "incremental: same head says so" \
 	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "incremental,no new commits since the previous round" ]]'
 
+# ── incremental: the author merged the base branch in ────────────────────────
+world
+commit m1 "a.txt=$ten"
+src checkout --quiet -b feature
+commit f1 b.txt=one
+publish
+prev_head=$(src rev-parse HEAD) prev_base=$(src rev-parse main)
+src checkout --quiet main
+commit m2 c.txt=from-main "a.txt=$ten_changed"
+src checkout --quiet feature
+src merge --quiet --no-edit main
+commit f2 b.txt=two
+publish
+repo=$(checkout 50)
+head=$(git -C "$repo" rev-parse pr-branch)
+base=$(git -C "$repo" merge-base pr-branch origin/main)
+out=$(pick_delta "$repo" "$prev_head" "$prev_base" "$head" "$base")
+from=$(jq -r '.from // ""' <<<"$out")
+expect "base merged in: incremental, from the previous head merged onto the new base" \
+	'[[ $(jq -r .mode <<<"$out") == incremental && -n $from && $(jq -r .reason <<<"$out") == "the base branch was merged in"* ]]'
+expect "base merged in: the diff starts from that tree" \
+	'[[ $(jq -c .commands <<<"$out") == "[\"git diff --stat $from $head\",\"git diff $from $head\"]" ]]'
+expect "base merged in: the diff holds the author's change only" \
+	'[[ $(git -C "$repo" diff --name-only "$from" "$head") == b.txt ]]'
+files=$(changed_files "$repo" "$out")
+expect "base merged in: changed_files leaves out what the base brought" '[[ $files == b.txt ]]'
+
+world
+commit m1 "a.txt=$ten"
+src checkout --quiet -b feature
+commit f1 "a.txt=$ten_changed"
+publish
+prev_head=$(src rev-parse HEAD) prev_base=$(src rev-parse main)
+src checkout --quiet main
+commit m2 "a.txt=${ten/line 8/main 8}"
+src checkout --quiet feature
+src merge --quiet --no-edit main >/dev/null 2>&1 || true
+commit f2 "a.txt=${ten/line 8/both 8}"
+publish
+repo=$(checkout 50)
+head=$(git -C "$repo" rev-parse pr-branch)
+base=$(git -C "$repo" merge-base pr-branch origin/main)
+out=$(pick_delta "$repo" "$prev_head" "$prev_base" "$head" "$base")
+expect "base merged in with conflicts: a range-diff, and it says why" \
+	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "rebased,the base branch was merged in with conflicts" ]] && [[ $(jq -r ".commands[0]" <<<"$out") == "git range-diff "* ]]'
+
 # ── rebased: onto a moved base, with a changed patch ─────────────────────────
 world
 commit m1 "a.txt=$ten" c.txt=c1
