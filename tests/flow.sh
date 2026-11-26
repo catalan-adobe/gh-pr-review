@@ -477,9 +477,15 @@ expect "--json without --check: fails" '[[ $rc == 1 && $calls == 0 ]]'
 block=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"}]\n```'
 setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** Yes with fixes\n\n'"$block"
 run
-expect "round trip: round 1 posted" '[[ $rc == 0 && $flag == --comment ]]'
-jq -n --arg body "$body" '[{id: 11, user: {login: "me", type: "User"}, state: "COMMENTED", commit_id: "head1",
-	submitted_at: "2026-05-01T10:00:00Z", body: $body}]' >"$stub/rest-reviews.json"
+expect "round trip: round 1 posted, on the reviewed commit" '[[ $rc == 0 && $flag == --comment && $commit == head1 ]]'
+# GitHub's copy of what was posted: the body and the commit the review API got.
+landed() { # id state time -> appends the last posted review to the stub's history
+	jq --arg body "$body" --arg commit "$commit" --argjson id "$1" --arg state "$2" --arg at "$3" '. + [{id: $id,
+		user: {login: "me", type: "User"}, state: $state, commit_id: $commit, submitted_at: $at, body: $body}]' \
+		"$stub/rest-reviews.json" >"$stub/r.json"
+	mv "$stub/r.json" "$stub/rest-reviews.json"
+}
+landed 11 COMMENTED 2026-05-01T10:00:00Z
 (cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
 	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
 expect "round trip: rounds --json reads the posted record back" \
@@ -492,6 +498,47 @@ expect "round trip: the decision sees round 1 on this head" \
 	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>"$stub/out.log") && rc=0 || rc=$?
 expect "round trip: --check exits 5 on the same head" \
 	'[[ $rc == 5 && $(jq -r ".decision, .next_round, .series[0]" "$stub/check.json" | paste -sd, -) == "nothing-new,2,1" ]]'
+
+# The head and the history change on their own between and during the rounds.
+check_json() {
+	fresh
+	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>"$stub/out.log") && rc=0 || rc=$?
+	check=$(jq -r '.decision + "," + (.next_round | tostring)' "$stub/check.json" 2>/dev/null || true)
+}
+echo head2 >"$stub/heads"
+check_json
+expect "round trip: a push makes head2 eligible" '[[ $rc == 0 && $check == run,2 ]]'
+printf '%s' $'**Ready to merge?** Yes' >"$stub/review.out"
+printf 'head2\nhead3\n' >"$stub/heads"
+run
+expect "round trip: round 2 reads head2 while head3 lands: posted on head2, not approved" \
+	'[[ $rc == 0 && $commit == head2 && $flag == --comment &&
+		$(jq -r ".round, .head_sha, .previous_head_sha" <<<"$record" | paste -sd, -) == "2,head2,head1" ]]'
+landed 12 COMMENTED 2026-05-02T10:00:00Z
+echo head3 >"$stub/heads"
+check_json
+expect "round trip: head3 stays eligible after round 2" '[[ $rc == 0 && $check == run,3 ]]'
+echo 2 >"$stub/reviews.fail.after"
+run
+expect "round trip: the final history read fails: nothing posted, exit 1" '[[ $rc == 1 && -z $flag && -z $commit ]]'
+rm -f "$stub/reviews.fail.after" "$stub/reviews.fail"
+check_json
+expect "round trip: head3 is still eligible after the failed run" '[[ $rc == 0 && $check == run,3 ]]'
+jq '. + [{id: 13, user: {login: "ann", type: "User"}, state: "APPROVED", commit_id: "head3",
+	submitted_at: "2026-05-03T10:00:00Z", body: "<!-- gh-pr-review generated -->\n**Ready to merge?** Yes"}]' \
+	"$stub/rest-reviews.json" >"$stub/reviews.after"
+run
+expect "round trip: ann's round on head3 lands during round 3: nothing posted, exit 6" \
+	'[[ $rc == 6 && -z $flag ]] && grep -q "round 3 by ann" "$stub/out.log"'
+rm -f "$stub/reviews.after"
+check_json
+expect "round trip: ann's round covers head3: nothing new" '[[ $rc == 5 && $check == nothing-new,4 ]]'
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "round trip: the history has each round on the commit it read" \
+	'[[ $(jq -c "[.records[] | [.round, .head_sha, .reviewer]]" "$stub/rounds.json") == \
+		"[[1,\"head1\",\"me\"],[2,\"head2\",\"me\"],[3,\"head3\",\"ann\"]]" ]]'
 
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
