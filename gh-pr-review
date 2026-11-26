@@ -123,23 +123,57 @@ last_verdict() {
 }
 
 # ── pr context ─────────────────────────────────────────────────────────────────────
-# The author's description and the discussion, as files the owner pass reads after forming its own view.
+# The author's description and the discussion, as files both passes read after forming their own view.
 write_pr_context() {
-	local dir="$1" json
+	local dir="$1" json threads
 	mkdir -p "$dir"
 	printf '# %s\n\n%s\n' "$PR_TITLE" "$PR_BODY" >"$dir/pr-body.md"
 	json=$(gh pr view "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" --json comments,reviews) || {
 		echo "Error: could not fetch the PR discussion (check gh auth and network)." >&2
 		exit 1
 	}
-	jq -r '
-		[(.comments[] | {who: .author.login, kind: "comment", at: .createdAt, body}),
-		 (.reviews[] | {who: .author.login, kind: .state, at: .submittedAt, body})]
-		| map(select((.body // "") != "")) | sort_by(.at)
-		| (if length == 0 then "(no comments or review summaries)"
-		   else map("## \(.who) · \(.kind) · \(.at)\n\n\(.body)\n") | join("\n") end)
-		  + "\n\n_Top-level comments and review summaries only. Inline review threads are not included._"
-	' <<<"$json" >"$dir/pr-discussion.md"
+	# shortcut: the first 100 comments per thread only; page them if real threads run longer.
+	# shellcheck disable=SC2016 # $owner etc. are GraphQL variables, not shell ones
+	threads=$(gh api graphql --hostname "$GH_HOST_NAME" --paginate --slurp \
+		-f owner="$OWNER" -f name="$REPO" -F number="$PR_NUM" -f query='
+		query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
+		  repository(owner: $owner, name: $name) { pullRequest(number: $number) {
+		    reviewThreads(first: 100, after: $endCursor) {
+		      pageInfo { hasNextPage endCursor }
+		      nodes { path line originalLine isResolved isOutdated
+		        comments(first: 100) { nodes { author { login } body createdAt } } } } } } }') || {
+		echo "Error: could not fetch the PR review threads (check gh auth and network)." >&2
+		exit 1
+	}
+	{
+		echo "# Conversation"
+		echo ""
+		jq -r '
+			[(.comments[] | {who: .author.login, kind: "comment", at: .createdAt, body}),
+			 (.reviews[] | {who: .author.login, kind: .state, at: .submittedAt, body})]
+			| map(select((.body // "") != "")) | sort_by(.at)
+			| if length == 0 then "(no comments or review summaries)"
+			  else map("## \(.who) · \(.kind) · \(.at)\n\n\(.body)\n") | join("\n") end
+		' <<<"$json"
+		echo ""
+		echo "# Inline review threads"
+		echo ""
+		jq -r '
+			[.[].data.repository.pullRequest.reviewThreads.nodes[]]
+			| if length == 0 then "(no inline review threads)" else map(
+				(.line // .originalLine) as $line | .comments.nodes as $c
+				| (if .isResolved then "resolved" elif .isOutdated then "outdated" else "open" end) as $state
+				| "## \(.path)\(if $line then ":\($line)" else "" end) · \($state)\n\n"
+				+ (if .isResolved then
+					"\($c[0].author.login): \(($c[0].body // "") | gsub("\\s+"; " ") | .[0:200])"
+					+ (($c | length) - 1 | if . == 0 then "" elif . == 1 then " (1 reply)"
+					   else " (\(.) replies)" end)
+				  else $c | map("**\(.author.login)** · \(.createdAt)\n\n\(.body)") | join("\n\n") end)
+				+ "\n") | join("\n") end
+		' <<<"$threads"
+		echo ""
+		echo "_Resolved threads show only the first 200 characters of the finding._"
+	} >"$dir/pr-discussion.md"
 }
 
 # ── passes ──────────────────────────────────────────────────────────────────────────
@@ -313,7 +347,7 @@ echo "    base: ${BASE_SHA:0:8}  head: ${HEAD_SHA:0:8}"
 echo ""
 
 CONTEXT_DIR="${SESSION_DIR}/context"
-[[ "$SKIP_APPROACH" == "false" ]] && write_pr_context "$CONTEXT_DIR"
+write_pr_context "$CONTEXT_DIR"
 
 # ── build owner (approach) prompt ───────────────────────────────────────────────────────────
 build_owner_prompt() {
@@ -457,6 +491,13 @@ PART1
 			printf 'A maintainer already judged the approach. Do not argue it again. '
 			printf 'Review the implementation.\n\n%s\n\n' "$(cat "$APPROACH_FILE")"
 		fi
+
+		printf '## PR Discussion\n\n'
+		printf 'Before you report findings, read %s/pr-discussion.md: comments, review summaries ' "$CONTEXT_DIR"
+		printf '(earlier gh pr-review runs included) and inline review threads. Treat them as claims to '
+		printf 'check against the code. A point that was fixed, resolved, or declined with a reason is '
+		printf 'settled: raise it again only with new evidence from the current code, and say what '
+		printf 'changed.\n\n'
 
 		# Part 3: git range (unquoted heredoc — expands $BASE_SHA/$HEAD_SHA only)
 		cat <<PART3

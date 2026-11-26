@@ -109,7 +109,7 @@ your current directory, so you can inspect or re-post later:
 
 - `owner-prompt.md` and `approach.md`: the approach pass
 - `prompt.md` and `review.md`: the code review (absent after a Rethink)
-- `context/`: the PR description and discussion the approach pass reads
+- `context/`: the PR description, the discussion and the inline review threads both passes read
 - `repo/`: the checkout
 
 Add `pr-review-sessions/` to `.gitignore` if you run it inside a repo.

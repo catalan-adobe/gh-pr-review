@@ -10,6 +10,7 @@ fail=0
 setup() { # approach-output code-review-output [discussion-exit-code] [failing-pass: owner|code]
 	stub=$(mktemp -d)
 	mkdir -p "$stub/bin" "$stub/home/.pi/agent" "$stub/work"
+	: >"$stub/pi.calls"
 	echo '{"github-copilot":{}}' >"$stub/home/.pi/agent/auth.json"
 	printf '%s' "$1" >"$stub/approach.out"
 	printf '%s' "$2" >"$stub/review.out"
@@ -18,6 +19,7 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 case "\$*" in
 *"auth status"*) exit 0 ;;
 *"api"*user*) echo me ;;
+*graphql*) echo '[{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}]' ;;
 *"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; echo '{"comments":[],"reviews":[]}' ;;
 *"pr view"*) echo '{"title":"T","body":"B","headRefName":"h","baseRefName":"main","author":{"login":"bob"},"additions":1,"deletions":0,"changedFiles":1}' ;;
 *"pr review"*) printf '%s\n' "\$@" >"$stub/posted.args" ;;
@@ -41,7 +43,7 @@ S
 run() { # extra args...
 	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
 		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 -y "$@" >"$stub/out.log" 2>&1) && rc=0 || rc=$?
-	calls=$(cat "$stub/pi.calls" 2>/dev/null | wc -l | tr -d ' ')
+	calls=$(wc -l <"$stub/pi.calls" | tr -d ' ')
 	body=$(sed -n '/^--body$/,$p' "$stub/posted.args" 2>/dev/null | sed 1d || true)
 	flag=$(grep -x -- '--\(comment\|approve\|request-changes\)' "$stub/posted.args" 2>/dev/null || true)
 }
@@ -58,6 +60,8 @@ setup $'### Approach\n**Approach:** Sound' $'### Issues\n**Ready to merge?** Yes
 run
 expect "sound: two model calls" '[[ $calls == 2 ]]'
 expect "sound: code prompt gets the approach notes" 'grep -q "Maintainer.s approach notes" "$stub/code-prompt.txt"'
+expect "sound: code prompt points to the discussion" 'grep -q "context/pr-discussion.md" "$stub/code-prompt.txt"'
+expect "sound: code prompt says not to re-raise settled points" 'grep -q "new evidence" "$stub/code-prompt.txt"'
 expect "sound: posts approach then review" '[[ $body == *"**Approach:** Sound"*"**Ready to merge?** Yes"* ]]'
 expect "sound: approves on bare yes" '[[ $flag == --approve ]]'
 
@@ -85,9 +89,13 @@ expect "empty code review: names the session" 'grep -q "pr-review-sessions/pr-re
 
 setup 'unused' $'**Ready to merge?** No' 5
 run --skip-approach
+expect "skip-approach: discussion fetch failure fails the run" '[[ $rc != 0 && -z $flag ]]'
+
+setup 'unused' $'**Ready to merge?** No'
+run --skip-approach
 expect "skip-approach: one model call" '[[ $calls == 1 ]]'
-expect "skip-approach: no discussion fetch needed" '[[ $rc == 0 && $flag == --request-changes ]]'
-expect "skip-approach: no approach in body" '[[ $body != *"Approach"* ]]'
+expect "skip-approach: code prompt points to the discussion" 'grep -q "context/pr-discussion.md" "$stub/code-prompt.txt"'
+expect "skip-approach: no approach in body" '[[ $rc == 0 && $body != *"Approach"* ]]'
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes' 0 owner
 run
 expect "owner pass fails: run fails" '[[ $rc != 0 ]]'
