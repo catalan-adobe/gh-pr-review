@@ -219,7 +219,12 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 			| .[$review.state | strings] // null),
 		posted_at: $review.submitted_at,
 		code_review: $code_review
-	}; (if $code_review then $body | parse_findings else [] end); $prev);
+	}; (if $code_review then $body | parse_findings else [] end);
+		# An old review says nothing about which earlier findings were fixed: the previous record only numbers the IDs,
+		# so a backfilled round counts what it found, never carries the round before.
+		(if $prev == null then null
+		else {round: $prev.round, head_sha: $prev.head_sha,
+			last_ids: {F: ($prev | _last_number("F")), L: ($prev | _last_number("L"))}} end));
 
 # The marker line for a record, for a body of $len characters. One HTML comment: every "--" in the JSON is
 # written "-\u002d". Past 60,000 characters (body, newline and marker) it drops titles, then later, then findings.

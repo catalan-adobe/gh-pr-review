@@ -317,6 +317,12 @@ check "backfill numbered: approach and ready" "$(jq -r '[.approach, .ready, .cod
 check "backfill numbered: open_blocking" "$(jq .counts.open_blocking <<<"$rec")" 4
 
 rec=$(backfill_record "$(review bullets.md)" null 1 "$pr")
+rec2=$(backfill_record "$(review numbered.md)" "$rec" 2 "$pr")
+check "backfill after backfill: counts its own findings only, nothing carried" \
+	"$(jq -c '[.counts.open_blocking, .counts.unverified, ([.findings[] | select(.unverified)] | length)]' <<<"$rec2")" "[4,0,0]"
+check "backfill after backfill: IDs continue, previous head kept" \
+	"$(jq -r '[.findings[0].id == "F\($n + 1)", .previous_head_sha == $h] | all' --argjson n "$(jq '[.findings[].id[1:] | tonumber] | max' <<<"$rec")" \
+		--arg h "$(jq -r .head_sha <<<"$rec")" <<<"$rec2")" true
 check "backfill bullets: ready" "$(jq -r .ready <<<"$rec")" yes-with-fixes
 
 exit "$fail"
