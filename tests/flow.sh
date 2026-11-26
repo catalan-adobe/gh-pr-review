@@ -20,7 +20,7 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 	echo '{"comments":[],"reviews":[]}' >"$stub/discussion.json"
 	echo '[]' >"$stub/rest-reviews.json"
 	echo '[]' >"$stub/rest-comments.json"
-	rm -f "$stub/git.missing" "$stub/git.rebased" "$stub/git.retargeted" "$stub/git.diff-fails" "$stub/git.far-base" "$stub/git.deepened"
+	rm -f "$stub/git.head" "$stub/git.base" "$stub/git.missing" "$stub/git.rebased" "$stub/git.retargeted" "$stub/git.diff-fails" "$stub/git.far-base" "$stub/git.deepened"
 	cat >"$stub/bin/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
@@ -35,13 +35,15 @@ case "\$*" in
 *"pr review"*) printf '%s\n' "\$@" >"$stub/posted.args" ;;
 esac
 S
-	# git: HEAD is aaaa and the merge-base bbbb. Any other SHA resolves to itself, unless listed in git.missing. The
+	# git: HEAD is aaaa and the merge-base bbbb (or the SHAs in git.head and git.base). Any other SHA resolves to
+	# itself, unless listed in git.missing. The
 	# previous head is an ancestor of the head unless git.rebased exists, and the previous base one of the base unless
 	# git.retargeted exists. git.diff-fails makes `git diff` fail.
 	# git.far-base: no merge-base until a `fetch --deepen` (logged in git.deepened); "never": not even then.
 	cat >"$stub/bin/git" <<'S'
 #!/usr/bin/env bash
 s=$(cd "$(dirname "$0")/.." && pwd)
+H=$(cat "$s/git.head" 2>/dev/null || echo aaaa) B=$(cat "$s/git.base" 2>/dev/null || echo bbbb)
 for a in "$@"; do [[ "$a" == clone ]] && mkdir -p "${@: -1}"; done
 case "$*" in
 *"rev-parse --is-shallow-repository"*) echo false ;;
@@ -49,17 +51,17 @@ case "$*" in
 	sha=${*: -1}
 	sha=${sha%^\{commit\}}
 	if grep -qx -- "$sha" "$s/git.missing" 2>/dev/null; then exit 1; fi
-	[[ $sha == HEAD ]] && sha=aaaa
+	[[ $sha == HEAD ]] && sha=$H
 	echo "$sha"
 	;;
-*rev-parse*) echo aaaa ;;
+*rev-parse*) echo "$H" ;;
 *"fetch "*--deepen*) printf '%s\n' "$*" >>"$s/git.deepened" ;;
-*"merge-base --is-ancestor"*aaaa) [[ ! -f "$s/git.rebased" ]] ;;
-*"merge-base --is-ancestor"*bbbb) [[ ! -f "$s/git.retargeted" ]] ;;
+*"merge-base --is-ancestor"*" $H") [[ ! -f "$s/git.rebased" ]] ;;
+*"merge-base --is-ancestor"*" $B") [[ ! -f "$s/git.retargeted" ]] ;;
 *"merge-base --is-ancestor"*) true ;;
 *merge-base*)
 	if [[ -f "$s/git.far-base" ]] && { [[ ! -f "$s/git.deepened" ]] || grep -qx never "$s/git.far-base"; }; then exit 1; fi
-	echo bbbb
+	echo "$B"
 	;;
 *"diff --name-only"*)
 	[[ ! -f "$s/git.diff-fails" ]] || exit 1
@@ -654,5 +656,51 @@ expect "round trip: the decision sees round 1 on this head" \
 	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>"$stub/out.log") && rc=0 || rc=$?
 expect "round trip: --check exits 5 on the same head" \
 	'[[ $rc == 5 && $(jq -r ".decision, .next_round, .series[0]" "$stub/check.json" | paste -sd, -) == "nothing-new,2,1" ]]'
+
+# ── producer to consumer, three code-review rounds: each round reads the last one back as GitHub returns it
+H3=$(printf 'c3%.0s' {1..20})
+post_back() { # <commit> <date>: the body just posted, as a submitted review in the REST reviews and the discussion
+	jq -c --arg body "$body" --arg c "$1" --arg d "$2" '. + [{id: (length + 1), user: {login: "me", type: "User"},
+		state: "COMMENTED", commit_id: $c, submitted_at: $d, body: $body}]' "$stub/rest-reviews.json" >"$stub/r.tmp" &&
+		mv "$stub/r.tmp" "$stub/rest-reviews.json"
+	jq -c --arg body "$body" --arg d "$2" '.reviews += [{author: {login: "me"}, state: "COMMENTED", submittedAt: $d,
+		body: $body}]' "$stub/discussion.json" >"$stub/d.tmp" && mv "$stub/d.tmp" "$stub/discussion.json"
+}
+r1=$'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`c.js:9` — data loss.**\n'
+r1+=$'#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** No\n\n'
+r1+=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"},'
+r1+=$'{"severity":"critical","file":"c.js","line":9,"title":"data loss"}]\n```'
+setup $'**Approach:** Sound' "$r1"
+echo "$H1" >"$stub/git.head"
+echo "$B1" >"$stub/git.base"
+run
+expect "three rounds: round 1 posted" '[[ $rc == 0 && $(jq -r "[.findings[] | .id + \":\" + .file] | join(\" \")" <<<"$record") == "F1:a.js F2:c.js" ]]'
+post_back "$H1" 2026-06-01T10:00:00Z
+# Round 2 leaves F1 out of both the block and the Markdown: carried, not re-checked, and its file and title appear
+# nowhere in the body, so the marker drops them. F2's title is not shown word for word either.
+r2=$'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **F2 · `c.js:9`** — still loses data.\n'
+r2+=$'#### ⚠️ Important (Should Fix)\n*(none found)*\n#### 💡 Minor (Nice to Have)\n- **`d.js:4`** — typo in a comment.\n\n'
+r2+=$'**Ready to merge?** No\n\n```json findings\n[{"id":"F2","status":"open","severity":"critical","file":"c.js","line":9,'
+r2+=$'"title":"data loss","in_delta":false,"later":false},{"id":null,"status":"new","severity":"minor","file":"d.js",'
+r2+=$'"line":4,"title":"typo in a comment","in_delta":true,"later":false}]\n```'
+printf '%s' "$r2" >"$stub/review.out"
+echo "$H2" >"$stub/git.head"
+run
+expect "three rounds: round 2 incremental from round 1's head" \
+	'[[ $rc == 0 && $(jq -r ".round, .mode, .previous_head_sha" <<<"$record" | paste -sd, -) == "2,incremental,$H1" ]] && grep -qF "git diff --stat $H1..$H2" "$stub/code-prompt.txt"'
+expect "three rounds: round 2 carries F1, and its marker drops what the body does not show" \
+	'[[ $(jq -r "[.findings[] | .id + \":\" + .status + (if .unverified then \"?\" else \"\" end)] | join(\" \")" <<<"$record") == "F2:open F3:new F1:open?" ]] &&
+		[[ $(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" | jq -c "[.findings[] | select(.id != \"F3\") | [.id, .file, .title]]") == "[[\"F2\",\"c.js\",null],[\"F1\",null,null]]" ]]'
+post_back "$H2" 2026-06-02T10:00:00Z
+printf '%s' $'**Ready to merge?** No\n\n```json findings\n[]\n```' >"$stub/review.out"
+echo "$H3" >"$stub/git.head"
+run
+expect "three rounds: round 3 compares with round 2's head" \
+	'[[ $rc == 0 && $(jq -r ".round, .mode, .previous_head_sha" <<<"$record" | paste -sd, -) == "3,incremental,$H2" ]] &&
+		grep -qF "git diff --stat $H2..$H3" "$stub/code-prompt.txt" && grep -qF "git diff $H2..$H3" "$stub/code-prompt.txt"'
+expect "three rounds: every carried finding is identifiable, details recovered from round 1" \
+	'[[ $(session_file previous-findings.md) == "F2 · critical · c.js:9 · data loss"$'"'"'\n'"'"'"F3 · minor · d.js:4 · typo in a comment"$'"'"'\n'"'"'"F1 · important · a.js:3 · thing breaks" ]]'
+expect "three rounds: both blockers still count" '[[ $(jq -r ".counts.open_blocking, .counts.unverified" <<<"$record" | paste -sd, -) == "2,3" ]]'
+
 finished=true
 exit "$fail"

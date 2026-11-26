@@ -196,6 +196,21 @@ def _track($findings; $prev; $round; $mode; $floor; $delta_files):
 			| .out),
 		later: .later, last_ids: {F: .f, L: .l}};
 
+# A record whose findings miss a file, line or title (a marker leaves out what its review does not show, such as a
+# finding the model left out and the round carried) gets them back from the newest record in $history (an array of
+# records, oldest first) that has the same ID with that detail.
+def recover_details($history):
+	([($history // [])[] | objects | (.findings // [])[]? | objects | select(.id | type == "string")] | reverse)
+	as $earlier
+	| if (.findings | type) == "array" then
+		.findings |= map(if type == "object" and (.id | type == "string") then
+			.id as $id | [$earlier[] | select(.id == $id)] as $same
+			| .file = (.file // first($same[] | .file | strings) // null)
+			| .line = (.line // first($same[] | .line | numbers) // null)
+			| .title = (.title // first($same[] | .title | strings) // null)
+		else . end)
+	else . end;
+
 # The ID floor of a history (an array of records): the highest F and L numbers any round used. Older markers have
 # no last_ids: their findings and later IDs seed it.
 def id_floor: map(objects) | {F: (map(_last_number("F")) | max // 0), L: (map(_last_number("L")) | max // 0)};

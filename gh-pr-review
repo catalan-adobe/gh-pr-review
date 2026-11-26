@@ -547,10 +547,12 @@ round_body() { # <round>
 # counts as regressed instead of looking new.
 if [[ "$PREVIOUS_OPEN" -gt 0 || "$PREVIOUS_FIXED" -gt 0 ]]; then
 	round_body "$BASE_ROUND" >"$CONTEXT_DIR/previous-review.md"
+	# A detail the last marker left out (its review did not show it) comes back from an earlier round, by ID.
 	finding_lines() { # <jq status filter>
-		jq -r ".findings[] | objects | select($1)
+		jq -r -L "$LIB_DIR" --argjson base "$FINDINGS_BASE" "include \"records\"; . as \$history | \$base
+			| recover_details(\$history) | .findings[] | objects | select($1)
 			| [.id, .severity, ((.file // \"(no file)\") + (if .line then \":\\(.line)\" else \"\" end)), (.title // \"\")]
-			| join(\" · \")" <<<"$FINDINGS_BASE"
+			| join(\" · \")" <<<"$RECORDS"
 	}
 	{
 		if [[ "$PREVIOUS_OPEN" -gt 0 ]]; then

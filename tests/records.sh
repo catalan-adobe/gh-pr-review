@@ -329,6 +329,19 @@ check "id_floor: the next ID comes after the floor, not the previous record" \
 	"$(build_record "$(jq -c '.id_floor = {F: 9, L: 4}' <<<"$meta")" "$one" "$r1" |
 		jq -c '[.findings[0].id, .last_ids]')" '["F10",{"F":10,"L":4}]'
 
+# ── recover_details ─────────────────────────────────────────────────────────
+# Round 3's marker left out F1's file and title and F2's title; earlier rounds had them. The newest one wins.
+history=$(jq -nc '[{findings: [{id: "F1", file: "old.ts", line: 1, title: "first title"}, {id: "F2", title: "two"}]},
+	{findings: [{id: "F1", file: "a.ts", line: 3, title: "thing breaks"}]},
+	{findings_dropped: true},
+	{findings: [{id: "F1", severity: "important", line: 7}, {id: "F2", file: "c.ts", line: 9}, {id: "F9"}]}]')
+check "recover_details: missing details from the newest earlier round with the ID" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; .[-1] | recover_details($h) | [.findings[] | [.id, .file, .line, .title]]' \
+		--argjson h "$history" <<<"$history")" \
+	'[["F1","a.ts",7,"thing breaks"],["F2","c.ts",9,"two"],["F9",null,null,null]]'
+check "recover_details: no history, no change" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; recover_details(null) | .findings' <<<'{"findings":[{"id":"F1"}]}')" '[{"id":"F1","file":null,"line":null,"title":null}]'
+
 ok_block() { # <blocks> [known ids]
 	jq -c -L "$LIB_DIR" --argjson ids "${2:-[]}" 'include "records"; map(findings_block_ok($ids))' <<<"$1"
 }
