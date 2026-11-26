@@ -3,6 +3,7 @@
 #
 # Usage:
 #   gh pr-review <PR-URL | PR-number> [options]
+#   gh pr-review rounds <PR-URL | PR-number> [--json] [-u <login>]
 #   gh pr-review --doctor
 #
 # Options:
@@ -28,6 +29,34 @@
 #   GITHUB_TOKEN                For private repos (gh auth is usually sufficient)
 
 set -euo pipefail
+
+# ── lib ─────────────────────────────────────────────────────────────────────
+# Follow symlinks to the real script (`gh extension install .` links it), then load lib/*.sh.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+	LINK=$(readlink "$SELF")
+	if [[ "$LINK" == /* ]]; then SELF="$LINK"; else SELF="$(dirname "$SELF")/$LINK"; fi
+done
+LIB_DIR="$(cd "$(dirname "$SELF")" && pwd)/lib"
+for LIB_FILE in "$LIB_DIR"/*.sh; do
+	# shellcheck source=/dev/null
+	source "$LIB_FILE"
+done
+
+# ── subcommands ─────────────────────────────────────────────────────────────
+# A known first word is a subcommand; anything else is a PR to review.
+case "${1:-}" in
+rounds | status | show | shepherd | dash | gc)
+	SUBCOMMAND="$1"
+	shift
+	if declare -F "cmd_${SUBCOMMAND}" >/dev/null; then
+		"cmd_${SUBCOMMAND}" "$@"
+		exit $?
+	fi
+	echo "gh pr-review ${SUBCOMMAND}: not yet available" >&2
+	exit 1
+	;;
+esac
 
 # ── defaults ────────────────────────────────────────────────────────────────
 MODEL="${GH_PR_REVIEW_MODEL:-github-copilot/gpt-5.6-sol}"
@@ -116,21 +145,7 @@ if [[ "$DOCTOR" == "false" && -z "$TARGET" ]]; then
 fi
 
 # ── per-run gh account (env token only; never runs `gh auth switch`) ─────────
-if [[ -n "$GH_USER" ]]; then
-	GH_TOKEN=$(gh auth token --user "$GH_USER") || {
-		echo "Error: no gh login for '${GH_USER}' — see: gh auth status" >&2
-		exit 1
-	}
-	export GH_TOKEN GITHUB_TOKEN="$GH_TOKEN"
-fi
-
-# ── verdicts ───────────────────────────────────────────────────────────────────────
-# Lowercased value of the last "<label>:" or "<label>?" line (markdown marks allowed around the label).
-# The delimiter must follow the label, so prose such as "Approach notes: …" never matches.
-last_verdict() {
-	{ grep -iE "^[[:space:]*_>-]*$1[*_]*[?:]" <<<"$2" || true; } | tail -n1 |
-		sed 's/^[^?:]*[?:]//; s/[*_`.]//g; s/^ *//; s/ *$//' | tr '[:upper:]' '[:lower:]'
-}
+use_gh_user "$GH_USER"
 
 # ── pr context ─────────────────────────────────────────────────────────────────────
 # The author's description and the discussion, as files both passes read after forming their own view.
@@ -290,25 +305,7 @@ if [[ "$PREFLIGHT_FAILURES" -gt 0 ]]; then
 fi
 
 # ── resolve owner/repo/PR number ─────────────────────────────────────────────
-if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
-	REPO_JSON=$(gh repo view --json owner,name,url 2>/dev/null) || {
-		echo "Error: a bare PR number only works inside a repo clone." >&2
-		echo "cd into the repository, or pass the full PR URL." >&2
-		exit 1
-	}
-	OWNER=$(echo "$REPO_JSON" | jq -r '.owner.login')
-	REPO=$(echo "$REPO_JSON" | jq -r '.name')
-	PR_NUM="$TARGET"
-	GH_HOST_NAME=$(echo "$REPO_JSON" | jq -r '.url | split("/")[2]')
-elif [[ "$TARGET" =~ ^https?://([^/]+)/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
-	GH_HOST_NAME="${BASH_REMATCH[1]}"
-	OWNER="${BASH_REMATCH[2]}"
-	REPO="${BASH_REMATCH[3]}"
-	PR_NUM="${BASH_REMATCH[4]}"
-else
-	echo "Error: expected a GitHub PR URL or PR number, got: $TARGET" >&2
-	exit 1
-fi
+resolve_target "$TARGET"
 
 # ── fetch PR metadata ────────────────────────────────────────────────────────
 echo "🔍  PR #${PR_NUM} — ${OWNER}/${REPO}"

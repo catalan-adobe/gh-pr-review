@@ -4,7 +4,7 @@ set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 stub=$(mktemp -d)
 {
-	sed -n '/^# ── verdicts/,/^}/p' "$root/gh-pr-review"
+	cat "$root/lib/verdicts.sh"
 	sed -n '/^# ── post/,$p' "$root/gh-pr-review"
 } >"$stub/post.sh"
 fail=0
