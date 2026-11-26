@@ -145,14 +145,14 @@ def known_ids: if has_findings_list then [.findings[] | objects | .id | strings]
 # The findings of a code-review round, from the model's array and the previous record's findings.
 # Out: {findings, later, last_ids}. Known IDs keep their ID and first round, with the model's status (open on an
 # ID last marked fixed is regressed; declined without a reason, or a status outside fixed, open, declined, is open
-# and unverified, with the previous severity). Entries without an ID, or with an ID the previous record doesn't have, are new: F<n>, or L<n>
-# when Later applies: later true on an Important or Minor finding outside the delta, in an incremental or rebased
-# round ($mode), with a file that is not in $delta_files (the files the delta touched). A Critical one, one marked in
-# the delta, one in a touched file, one without a file, any when the file list is unknown (not an array) and any in
-# a full round stay findings. The first entry for an
-# ID wins. Previous open, new or regressed findings the reply leaves out are carried, unverified. A
-# previous record without its findings list (has_findings_list) knows no ID and carries nothing. New IDs start after
-# $floor ({F, L}: the highest numbers in the whole history) and the previous record's.
+# and unverified, with the previous severity). Entries without an ID, or with an ID the previous record doesn't
+# have, are new: F<n>, or L<n> when Later applies: later true on an Important or Minor finding outside the delta, in
+# an incremental or rebased round ($mode), with a file that is not in $delta_files (the files the delta touched). A
+# Critical one, one marked in the delta, one in a touched file, one without a file, any when the file list is unknown
+# (not an array) and any in a full round stay findings. The first entry for an ID wins. Previous open, new or
+# regressed findings the reply leaves out are carried, unverified. A previous record without its findings list
+# (has_findings_list) knows no ID and carries nothing. New IDs start after $floor ({F, L}: the highest numbers in the
+# whole history) and the previous record's.
 def _track($findings; $prev; $round; $mode; $floor; $delta_files):
 	(if $prev | has_findings_list then $prev.findings | map(objects | select(.id | type == "string")) else [] end)
 	as $old
@@ -172,7 +172,8 @@ def _track($findings; $prev; $round; $mode; $floor; $delta_files):
 					else {status: "open", unverified: true} end) as $s
 				| .findings += [{id: $e.id,
 					# A rejected status update (unverified) keeps the previous severity: it cannot downgrade a blocker.
-					severity: (if ($e.severity | _severity_ok) and ($s.unverified | not) then $e.severity else $p.severity end),
+					severity: (if ($e.severity | _severity_ok) and ($s.unverified | not) then $e.severity
+						else $p.severity end),
 					status: $s.status, first_round: ($p.first_round // $round), in_delta: $e.in_delta,
 					file: ($e.file // $p.file), line: ($e.line // $p.line), title: ($e.title // $p.title)}
 					+ (if $s.unverified then {unverified: true} else {} end)]
@@ -332,7 +333,8 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 			last_ids: {F: ($prev | _last_number("F")), L: ($prev | _last_number("L"))}} end))
 	| if $later_round | not then .
 	else ([$body | parse_findings[] | .id | strings | capture("^F(?<n>\\d+)$").n | tonumber] | max // 0) as $shown
-		| ([$body | split("\n")[0:8][] | capture("open blocking: (?<n>\\d+)").n | tonumber] | first // null) as $blocking
+		| ([$body | split("\n")[0:8][] | capture("open blocking: (?<n>\\d+)").n | tonumber] | first // null)
+		as $blocking
 		| del(.findings, .later) | .findings_dropped = true
 		| .last_ids.F = ([.last_ids.F, $shown] | max)
 		| if $blocking == null then .
