@@ -63,6 +63,7 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--check` | off | Run only the loop check (see below) and exit 0, 3 or 5. No clone, no model call |
 | `--json` | off | With `--check`: print the decision as JSON on stdout |
 | `--force-round` | off | Run a round even when the loop check stops it or nothing changed |
+| `--full` | off | Review the whole PR again, as in round 1. Earlier findings are still re-checked by ID |
 | `--doctor` | — | Check prerequisites and exit |
 
 Environment variables: `GH_PR_REVIEW_MODEL` (default model),
@@ -146,6 +147,43 @@ The label says whether the loop converges: `early` (fewer than 3 rounds),
 `converging`, `ready`, `nit-loop` (a few Important findings that keep coming
 back) or `churning`. `--json` prints the records and the decision; `-u <login>`
 picks the gh account, as for a review.
+
+## Round 2 and later
+
+From the second round, the reviewer builds on the last code review instead of
+starting over:
+
+1. **Earlier findings are re-checked by ID.** Each one comes back `fixed`,
+   `open` (a fix attempt that did not work stays open) or `declined` (only with
+   a reason from the PR discussion, quoted). A finding fixed earlier that comes
+   back is `regressed`. One the reviewer forgets is kept `open` and marked as
+   not re-checked: nothing disappears silently.
+2. **What changed since that round is reviewed in full**, at every severity:
+   `git diff <previous head>..<head>`, or `git range-diff` when the author
+   rebased.
+3. **Outside what changed, only Critical findings are raised.** Important and
+   Minor issues there go to a folded **Later** list. Later items don't block
+   the PR, and can become follow-up issues.
+
+The owner pass starts from its previous verdict, and keeps it in one line
+unless the changes or the discussion change it. After a Rethink it judges
+afresh.
+
+The posted review opens with a progress line counted from the round record,
+not from the model's text:
+
+```
+### Round 3 · since round 2
+4 fixed · 2 still open · 3 new (1 in the new commits) · open blocking: 5 (was 6) · loop: converging
+```
+
+Fixed findings and the Later list follow the open ones, folded. "Ready to
+merge? Yes" with blocking findings still open posts as a comment: the record
+wins.
+
+When the previous head is gone (a force-push) or the comparison fails, the
+round is a full review, and it says why. `--full` asks for one, for example
+after a rewrite.
 
 ## Loop check
 
