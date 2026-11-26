@@ -155,15 +155,17 @@ starting over:
 
 1. **Earlier findings are re-checked by ID.** Each one comes back `fixed`,
    `open` (a fix attempt that did not work stays open) or `declined` (only with
-   a reason from the PR discussion, quoted). A finding fixed earlier that comes
-   back is `regressed`. One the reviewer forgets is kept `open` and marked as
+   a reason from the PR discussion, quoted; without one it stays open). The
+   findings that round fixed are listed too: one that comes back keeps its ID
+   and is `regressed`. One the reviewer forgets is kept `open` and marked as
    not re-checked: nothing disappears silently.
 2. **What changed since that round is reviewed in full**, at every severity:
    `git diff <previous head>..<head>`, or `git range-diff` when the author
    rebased.
 3. **Outside what changed, only Critical findings are raised.** Important and
    Minor issues there go to a folded **Later** list. Later items don't block
-   the PR, and can become follow-up issues.
+   the PR, and can become follow-up issues. A Critical finding, or one in
+   what changed, is never Later.
 
 The owner pass starts from its previous verdict, and keeps it in one line
 unless the changes or the discussion change it. After a Rethink it judges
@@ -181,9 +183,11 @@ Fixed findings and the Later list follow the open ones, folded. "Ready to
 merge? Yes" with blocking findings still open posts as a comment: the record
 wins.
 
-When the previous head is gone (a force-push) or the comparison fails, the
-round is a full review, and it says why. `--full` asks for one, for example
-after a rewrite.
+When the comparison is not safe, the round is a full review, and it says why:
+the previous head is gone (a force-push), the base branch was merged in with
+conflicts, git cannot list the changed files, or the last round's record lost
+its findings to GitHub's size cap. `--full` asks for one, for example after a
+rewrite.
 
 ## Loop check
 
@@ -194,9 +198,18 @@ Important) of each round:
 - **Converging:** the count drops (to 1 or less, or by 30% over two rounds).
   The round runs.
 - **Nit loop** (3 or fewer, no Critical) or **Churning** (anything else) after
-  the first 3 rounds: a warning. The round runs, and the posted review starts
-  with a line such as
-  `**Loop:** Churning · blocking 9, 12, 8 · Split the PR: each part converges on its own`.
+  the first 3 rounds: a warning. The round runs. Its posted review opens with
+  the progress line (see above), which carries the loop label, and a
+  suggested move under it:
+
+  ```
+  ### Round 4 · since round 3
+  2 fixed · 6 still open · 4 new · open blocking: 10 (was 8) · loop: churning
+  **Next:** Split the PR: each part converges on its own
+  ```
+
+  Without a round record to count from, the review opens with the older
+  one-line form instead: `**Loop:** Churning · blocking 9, 12, 8 · …`.
 - **Two such rounds in a row:** the round stops before any clone or model
   call. In a terminal it asks first; with `-y` (scripts and agents) it exits
   with code 3. The suggested move comes from the history: settle the approach,
