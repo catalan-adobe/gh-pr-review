@@ -44,15 +44,52 @@ def _finding($severity):
 	end) as $where
 	| {severity: $severity, file: $where.file, line: $where.line, title: ($rest | _title)};
 
+# A later-round item that names an earlier finding: "**F1 · [a.ts:1]** — …" (the ID inside the bold) or
+# "**F1** · `a.ts:1` — …". Out: {id, line: the item without its ID, for _finding, after: the text after the bold},
+# or null.
+def _id_item:
+	sub("^(-|\\d+\\.)\\s+"; "") as $rest
+	| ([$rest | capture("^\\*\\*(?<id>F\\d+)\\s*·\\s*(?<r>.*)$")] | .[0]) as $in
+	| ([$rest | capture("^\\*\\*(?<id>F\\d+)\\*\\*[\\s·:]*(?<r>.*)$")] | .[0]) as $out
+	| if $in != null then {id: $in.id, line: ("- **" + $in.r), after: ($in.r | sub("^.*?\\*\\*"; ""))}
+	elif $out != null then {id: $out.id, line: ("- " + $out.r), after: $out.r}
+	else null end;
+
+# An item of the folded "Fixed since the last round" section: {id, status: "fixed"}, or {id, status: "declined",
+# reason} for "**F5** — declined: "the quoted reason"" (reason null when nothing follows). Null without an ID.
+def _fixed_item:
+	_id_item as $i
+	| if $i == null then null
+	else ([$i.after | capture("^[\\s·:—–-]*declined\\b[\\s:—–-]*(?<r>.*)$"; "i")] | .[0]) as $d
+		| if $d == null then {id: $i.id, status: "fixed"}
+		else {id: $i.id, status: "declined", reason: ($d.r | _trim | if . == "" then null else . end)} end
+	end;
+
+# The folded section a "<details>" or "<summary>" line opens: fixed, later, or other.
+def _folded: ascii_downcase | if test("fixed") then "fixed" elif test("later") then "later" else "other" end;
+
 # Markdown in, findings out: the "- **" and "<n>. **" items under each heading that names a severity, up to the
-# next heading. Fenced code is skipped.
+# next heading. Fenced code is skipped. Round 2 and later: an item that starts with an earlier ID ("**F1 · …") keeps
+# it, as open; the folded <details> sections are not open findings: the Fixed one gives its IDs as fixed (or
+# declined, with the quoted reason), the Later one is left out (its items carry no severity).
 def parse_findings:
-	reduce (split("\n")[] | sub("\r$"; "")) as $l ({severity: null, fence: false, out: []};
+	def item: test("^(-|\\d+\\.)\\s+\\*\\*");
+	reduce (split("\n")[] | sub("\r$"; "")) as $l ({severity: null, fence: false, folded: null, out: []};
 		if ($l | test("^\\s*(```|~~~)")) then .fence |= not
 		elif .fence then .
-		elif ($l | test("^#{1,6}\\s")) then .severity = ($l | _severity)
-		elif .severity != null and ($l | test("^(-|\\d+\\.)\\s+\\*\\*")) then
-			.severity as $s | .out += [$l | _finding($s)]
+		elif ($l | test("^\\s*<details\\b"; "i")) then
+			.folded = (if ($l | test("</details>"; "i")) then null elif ($l | test("<summary"; "i")) then ($l | _folded)
+				else "other" end)
+		elif .folded != null and ($l | test("</details>"; "i")) then .folded = null
+		elif .folded != null and ($l | test("^\\s*<summary"; "i")) then .folded = ($l | _folded)
+		elif ($l | test("^#{1,6}\\s")) then .folded = null | .severity = ($l | _severity)
+		elif .folded == "fixed" and ($l | item) then
+			($l | _fixed_item) as $f | if $f != null then .out += [$f] else . end
+		elif .folded != null then .
+		elif .severity != null and ($l | item) then
+			.severity as $s | ($l | _id_item) as $i
+			| if $i != null then .out += [($i.line | _finding($s)) + {id: $i.id, status: "open"}]
+			else .out += [$l | _finding($s)] end
 		else . end)
 	| .out;
 

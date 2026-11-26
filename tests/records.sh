@@ -262,6 +262,36 @@ rec=$(build_record "$meta2" '[]' "$empty")
 check "empty previous list: a known zero, kept in the progress line" \
 	"$(progress_line "$rec" "$empty" '{"label":null}' | tail -n 1)" "open blocking: 0 (was 0)"
 
+# The Markdown fallback on a later-round body (no findings block): IDs kept, folded sections not open findings.
+f=$(parse_findings "$fixtures/later-round.md")
+check "later round: open items keep their ID, both bullet forms" \
+	"$(jq -c '[.[] | select(.status == "open") | [.id, .severity, .file, .line]]' <<<"$f")" \
+	'[["F1","critical","a.ts",1],["F5","important","e.ts",5],["F2","important","b.ts",2]]'
+check "later round: the ID is not in the title" "$(item "$f" 0)" \
+	"critical | a.ts | 1 | Still trusts the payload when the header is empty."
+check "later round: a new item has no ID" "$(jq -c '[.[] | select(.id == null) | [.severity, .file, .title]]' <<<"$f")" \
+	'[["important","d.ts","The new retry loop has no upper bound."]]'
+check "later round: Fixed gives fixed and declined, with the quoted reason" \
+	"$(jq -c '[.[] | select(.status == "fixed" or .status == "declined") | [.id, .status, .reason, .severity]]' <<<"$f")" \
+	'[["F4","fixed",null,null],["F3","declined","\"Kept on purpose until the v2 API ships\" (@bob)",null]]'
+check "later round: the Later item and the Strengths are left out" "$(jq -c '[.[] | .file] | index("f.ts"), index("src/api.ts")' \
+	<<<"$f" | paste -sd, -)" "null,null"
+rec=$(r3 "$f")
+check "later round fallback: every ID once, nothing carried twice" \
+	"$(jq -c '[.findings[] | [.id, .status, (.unverified // false)]]' <<<"$rec")" \
+	'[["F1","open",false],["F5","open",false],["F2","regressed",false],["F6","new",false],["F4","fixed",false],["F3","declined",false]]'
+check "later round fallback: counts" "$(jq -c '.counts | [.open_blocking, .unverified, .later, .minor]' <<<"$rec")" \
+	'[4,0,0,0]'
+printf '#### ⚠️ Important\n\n- **F1 · `a.ts:1`** — open.\n\n<details><summary>Fixed (1)</summary>\n\n- **F4** — declined:\n- **F5** — declined: \n\n#### 💡 Minor\n\n- **[m.ts:1]** — after an unclosed details.\n' \
+	>"$tmp/unclosed.md"
+f=$(parse_findings "$tmp/unclosed.md")
+check "later round: a decline without a reason has none" "$(jq -c '[.[] | select(.status == "declined") | .reason]' <<<"$f")" \
+	'[null,null]'
+check "later round: a heading ends an unclosed <details>" "$(jq -c '[.[] | select(.severity == "minor") | .file]' <<<"$f")" \
+	'["m.ts"]'
+check "later round: an unreasoned decline stays open" "$(r3 "$f" | jq -c '[.findings[] | select(.id == "F4" or .id == "F5")
+	| [.id, .status, .unverified]]')" '[["F4","open",true],["F5","open",true]]'
+
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \
 	"Yes (with fixes)=yes-with-fixes" "yes — with fixes=yes-with-fixes" "No — see Critical=no" "no.=no" \

@@ -369,6 +369,16 @@ two_rounds
 run
 expect "owner: a changed verdict line wins over Unchanged" '[[ $(jq -r ".approach, .code_review" <<<"$record" | paste -sd, -) == "rethink,false" && $calls == 1 ]]'
 
+# No findings block in round 3: the Markdown fallback reads the later-round format.
+md3=$'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **F3 · `c.js:9`** — still loses data.\n'
+md3+=$'#### ⚠️ Important (Should Fix)\n- **[d.js:2]** — retry loop has no bound.\n#### 💡 Minor (Nice to Have)\n*(none found)*\n\n'
+md3+=$'<details><summary>Fixed since the last round (1)</summary>\n\n- **F1** — the check is in.\n\n</details>\n\n'
+md3+=$'<details><summary>Later (1)</summary>\n\n- **[e.js:5]** — old helper is slow.\n\n</details>\n\n**Ready to merge?** No'
+setup $'**Approach:** Sound' "$md3"
+two_rounds
+run
+expect "round 3 without a block: IDs from the Markdown, nothing counted twice" '[[ $(jq -r ".source, ([.findings[] | .id + \":\" + .status] | join(\" \")), .counts.open_blocking, .counts.unverified, .counts.minor" <<<"$record" | paste -sd, -) == "parsed,F3:open F4:new F1:fixed,2,0,0" ]]'
+
 setup $'**Approach:** Sound' "$round3"
 two_rounds
 touch "$stub/git.rebased"
