@@ -145,8 +145,16 @@ repo=$(checkout 50)
 head=$(git -C "$repo" rev-parse pr-branch)
 base=$(git -C "$repo" merge-base pr-branch origin/main)
 out=$(pick_delta "$repo" "$prev_head" "$prev_base" "$head" "$base")
-expect "base merged in with conflicts: a range-diff, and it says why" \
-	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "rebased,the base branch was merged in with conflicts" ]] && [[ $(jq -r ".commands[0]" <<<"$out") == "git range-diff "* ]]'
+expect "base merged in with conflicts: full, and it says why" \
+	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,the base branch was merged in with conflicts" && $(jq -c .commands <<<"$out") == "[]" ]]'
+# What the reviewer gets: the whole PR (git diff base..head), where the resolution is. A range-diff of the two
+# versions skips the merge commit, and would have shown only f1, unchanged.
+expect "base merged in with conflicts: the whole PR shows the resolution" \
+	'git -C "$repo" diff "$base" "$head" | grep -qx "+both 8"'
+expect "base merged in with conflicts: a range-diff would not" \
+	'! git -C "$repo" range-diff "$prev_base..$prev_head" "$base..$head" | grep -q "both 8"'
+files=$(changed_files "$repo" "$out")
+expect "base merged in with conflicts: no delta files" '[[ -z $files ]]'
 
 # ── rebased: onto a moved base, with a changed patch ─────────────────────────
 world

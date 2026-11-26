@@ -6,15 +6,15 @@
 #   incremental  the previous head is an ancestor of the head: `git diff --stat` and `git diff` from it. When the
 #                author merged the base branch in since, the diff starts from the previous head merged onto the new
 #                base (a tree, in the extra field `from`), so what the base brought is left out.
-#   rebased      the previous head is not an ancestor (rebase or force-push), or a base merge that conflicts: a
-#                `git range-diff` of the two ranges.
-#   full         anything else, with a short human reason. The round then reviews the whole PR.
+#   rebased      the previous head is not an ancestor (rebase or force-push): a `git range-diff` of the two ranges.
+#   full         anything else, with a short human reason, a base merge with conflicts included. The round then
+#                reviews the whole PR.
 # The previous head and base come from a marker on the PR, which anyone can edit: they count only as full object IDs
 # (40 or 64 hex digits), checked before git sees them. A name (HEAD, main), a short SHA or an option is `full`.
 # The four SHA fields are full SHAs when the checkout has the commit, else as given ("" when unknown); changed_files
 # reads them. Never fails: every git error ends in `full`.
 pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
-	local repo=$1 prev_head=$2 prev_base=$3 head=$4 base=$5 sha old new reason
+	local repo=$1 prev_head=$2 prev_base=$3 head=$4 base=$5 sha old new reason tree
 	if [[ -z "$prev_head" ]]; then
 		delta_json full "no previous round" "$prev_head" "$prev_base" "$head" "$base"
 		return 0
@@ -37,7 +37,6 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 	fi
 	delta_connect "$repo" "$prev_head" "$head"
 
-	local why="previous head is not an ancestor of the head (rebase or force-push)" tree
 	if git -C "$repo" merge-base --is-ancestor "$prev_head" "$head" >/dev/null 2>&1; then
 		# The author merged the base branch in since: a plain diff would show everything the base brought. Compare with
 		# the previous head merged onto the new base instead, which leaves the author's own changes.
@@ -50,8 +49,10 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 					jq -c --arg from "$tree" '. + {from: $from}'
 				return 0
 			fi
-			# A merge with conflicts: compare the two versions of the PR instead.
-			why="the base branch was merged in with conflicts"
+			# A merge with conflicts: the author's resolution lives in the merge commit, which range-diff skips. Only
+			# the whole PR shows it.
+			delta_json full "the base branch was merged in with conflicts" "$prev_head" "$prev_base" "$head" "$sha"
+			return 0
 		else
 			reason="previous head is an ancestor of the head"
 			[[ "$prev_head" != "$head" ]] || reason="no new commits since the previous round"
@@ -78,7 +79,8 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 	new="${base}..${head}"
 	# Try it before handing it to the reviewer: a range it cannot walk (shallow history, odd ranges) fails here.
 	if git -C "$repo" range-diff --no-color "$old" "$new" >/dev/null 2>&1; then
-		delta_json rebased "$why" "$prev_head" "$prev_base" "$head" "$base" "git range-diff $old $new"
+		delta_json rebased "previous head is not an ancestor of the head (rebase or force-push)" \
+			"$prev_head" "$prev_base" "$head" "$base" "git range-diff $old $new"
 	else
 		reason="range-diff failed on ${prev_base:0:12}..${prev_head:0:12} ${base:0:12}..${head:0:12}"
 		delta_json full "$reason" "$prev_head" "$prev_base" "$head" "$base"
