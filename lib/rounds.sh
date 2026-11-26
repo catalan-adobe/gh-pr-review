@@ -27,14 +27,33 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 	printf '%s\n' "$records"
 }
 
-# The PR's size and head, as `{lines, files, head}`.
+# The PR's size, head and author, as `{lines, files, head, author}`.
 fetch_pr_shape() { # <host> <owner> <repo> <N>
-	gh pr view "$4" --repo "$1/$2/$3" --json additions,deletions,changedFiles,headRefOid |
-		jq -c '{lines: (.additions + .deletions), files: .changedFiles, head: .headRefOid}'
+	gh pr view "$4" --repo "$1/$2/$3" --json additions,deletions,changedFiles,headRefOid,author |
+		jq -c '{lines: (.additions + .deletions), files: .changedFiles, head: .headRefOid, author: .author.login}'
+}
+
+# Prints true when a person other than the PR author reviewed or commented after <time>: that lifts a loop-check
+# stop. Bots (user.type "Bot", or a login ending in [bot]) and gh-pr-review rounds do not count, and neither does
+# the PR author: on my own PRs, fix agents post as me and must not lift their own stop.
+lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
+	{
+		gh api --hostname "$1" --paginate "repos/$2/$3/issues/$4/comments" &&
+			gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" &&
+			gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/comments"
+	} | jq -s --arg since "$5" --arg author "$6" '
+		[.[] | .[]?] | any(.[];
+			((.submitted_at // .created_at // "") > $since)
+			and ((.user.type // "") != "Bot")
+			and ((.user.login // "") as $login | $login != $author and ($login | endswith("[bot]") | not))
+			and (((.body // "") | contains("<!-- gh-pr-review generated -->")) | not))' || {
+		echo "Warning: could not read the PR's comments; the loop check ignores them." >&2
+		echo false
+	}
 }
 
 cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
-	local target="" as_json=false user="${GH_PR_REVIEW_USER:-}" records shape commits decision
+	local target="" as_json=false user="${GH_PR_REVIEW_USER:-}" records shape commits decision lifted
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 		--json)
@@ -76,7 +95,12 @@ cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 
 	records=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM")
 	shape=$(fetch_pr_shape "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM")
-	decision=$(loop_decide_json "$records" "$shape" "$(jq -r '.head // ""' <<<"$shape")" false)
+	lifted=false
+	if [[ $(jq 'length' <<<"$records") -gt 0 ]]; then
+		lifted=$(lifted_since "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" \
+			"$(jq -r 'last.posted_at // ""' <<<"$records")" "$(jq -r '.author // ""' <<<"$shape")")
+	fi
+	decision=$(loop_decide_json "$records" "$shape" "$(jq -r '.head // ""' <<<"$shape")" "$lifted")
 
 	if [[ "$as_json" == true ]]; then
 		jq -n --argjson records "$records" --argjson decision "$decision" '{records: $records, decision: $decision}'

@@ -59,7 +59,10 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--instructions <text>` | none | Extra guidance for both passes, for example `"Focus on db/; skip style nits"`. For a file: `--instructions "$(cat notes.md)"`. The tool does not post them, and the reviewer is told not to quote them, but the review can still reflect them: use `--no-post` to preview a review shaped by sensitive notes |
 | `--skip-approach` | off | Skip the maintainer's approach pass and run the code review only, for example when the approach is already agreed |
 | `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve, anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
-| `-y`, `--yes` | off | Skip the post confirmation |
+| `-y`, `--yes` | off | Skip the post confirmation. A loop-check stop then exits with code 3 instead of asking |
+| `--check` | off | Run only the loop check (see below) and exit 0, 3 or 5. No clone, no model call |
+| `--json` | off | With `--check`: print the decision as JSON on stdout |
+| `--force-round` | off | Run a round even when the loop check stops it or nothing changed |
 | `--doctor` | — | Check prerequisites and exit |
 
 Environment variables: `GH_PR_REVIEW_MODEL` (default model),
@@ -143,6 +146,39 @@ The label says whether the loop converges: `early` (fewer than 3 rounds),
 `converging`, `ready`, `nit-loop` (a few Important findings that keep coming
 back) or `churning`. `--json` prints the records and the decision; `-u <login>`
 picks the gh account, as for a review.
+
+## Loop check
+
+Before a round, the tool reads the PR's earlier rounds and decides whether
+another one is worth running. It counts the blocking findings (Critical and
+Important) of each round:
+
+- **Converging:** the count drops (to 1 or less, or by 30% over two rounds).
+  The round runs.
+- **Nit loop** (3 or fewer, no Critical) or **Churning** (anything else) after
+  the first 3 rounds: a warning. The round runs, and the posted review starts
+  with a line such as
+  `**Loop:** Churning · blocking 9, 12, 8 · Split the PR: each part converges on its own`.
+- **Two such rounds in a row:** the round stops before any clone or model
+  call. In a terminal it asks first; with `-y` (scripts and agents) it exits
+  with code 3. The suggested move comes from the history: settle the approach,
+  split the PR, or approve and file the rest as follow-ups.
+- **No new commits** since the last round: nothing to review, exit code 5.
+
+A stop lifts when a person other than the PR author reviews or comments after
+the last round. The author's own replies do not count, so a fix agent posting
+as the author cannot lift its own stop. `--force-round` runs a round anyway.
+
+`gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
+or 5 (no new commits); `--check --json` prints the decision as JSON for
+scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
+
+| Exit code | Meaning |
+| --- | --- |
+| 0 | Done |
+| 1 | Error |
+| 3 | Stopped by the loop check |
+| 5 | No new commits since the last round |
 
 ## Troubleshooting
 

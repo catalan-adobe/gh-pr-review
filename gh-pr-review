@@ -13,9 +13,14 @@
 #   --skip-approach Skip the maintainer's approach pass; run the code review only
 #   --instructions <text>  Extra guidance for both passes (a file: "$(cat notes.md)")
 #   --decision <d>  comment | approve | request-changes (default: from "Ready to merge?")
-#   -y, --yes       Skip confirmation prompt before posting
+#   -y, --yes       Skip confirmation prompt before posting (a loop-check stop then exits 3)
+#   --check         Run only the loop check: print it and exit 0 (run), 3 (stop) or 5 (no new commits)
+#   --json          With --check, print the decision as JSON
+#   --force-round   Run a round even when the loop check stops it or nothing changed
 #   --doctor        Check all prerequisites and exit
 #   -h, --help      Show this help
+#
+# Exit codes: 0 done, 1 error, 3 stopped by the loop check, 5 no new commits since the last round.
 #
 # Examples:
 #   gh pr-review https://github.com/owner/repo/pull/42
@@ -68,6 +73,9 @@ TARGET=""
 SKIP_APPROACH=false
 INSTRUCTIONS=""
 GH_USER="${GH_PR_REVIEW_USER:-}"
+CHECK_ONLY=false
+CHECK_JSON=false
+FORCE_ROUND=false
 
 # ── arg parsing ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -98,6 +106,18 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--skip-approach)
 		SKIP_APPROACH=true
+		shift
+		;;
+	--check)
+		CHECK_ONLY=true
+		shift
+		;;
+	--json)
+		CHECK_JSON=true
+		shift
+		;;
+	--force-round)
+		FORCE_ROUND=true
 		shift
 		;;
 	--no-post)
@@ -140,9 +160,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$DOCTOR" == "false" && -z "$TARGET" ]]; then
-	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [--skip-approach] [-y] [--doctor]" >&2
+	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [--skip-approach] [-y] [--check [--json]] [--force-round] [--doctor]" >&2
 	exit 1
 fi
+if [[ "$CHECK_JSON" == "true" && "$CHECK_ONLY" == "false" ]]; then
+	echo "Error: --json only goes with --check" >&2
+	exit 1
+fi
+# With --check --json, stdout carries the JSON only: everything else goes to stderr, the JSON to fd 3.
+exec 3>&1
+[[ "$CHECK_JSON" == "true" ]] && exec 1>&2
 
 # ── per-run gh account (env token only; never runs `gh auth switch`) ─────────
 use_gh_user "$GH_USER"
@@ -270,6 +297,9 @@ run_preflight() {
 		pf_fail "gh not authenticated" "run: gh auth login"
 	fi
 
+	# --check reads GitHub only: it needs no model.
+	[[ "$CHECK_ONLY" == "true" ]] && return 0
+
 	if command -v pi &>/dev/null; then
 		pf_ok "pi installed"
 	else
@@ -332,6 +362,69 @@ echo "    ${PR_TITLE}"
 echo "    @${PR_AUTHOR}  ·  +${ADDITIONS} -${DELETIONS}  ·  ${N_FILES} files changed"
 echo ""
 
+# ── loop check ─────────────────────────────────────────────────────────────────────
+# Earlier gh-pr-review reviews (by anyone) are earlier rounds. Before any clone or model call, decide whether this
+# round should run: not when nothing changed, and not when the loop has stopped converging (see `gh pr-review rounds`).
+HEAD_OID=$(echo "$PR_JSON" | jq -r '.headRefOid // empty')
+RECORDS=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM")
+LIFTED=false
+if [[ $(jq 'length' <<<"$RECORDS") -gt 0 ]]; then
+	LIFTED=$(lifted_since "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$(jq -r 'last.posted_at // ""' <<<"$RECORDS")" "$PR_AUTHOR")
+fi
+PR_SHAPE=$(jq -cn --argjson lines "$((ADDITIONS + DELETIONS))" --argjson files "$N_FILES" '{lines: $lines, files: $files}')
+LOOP=$(loop_decide_json "$RECORDS" "$PR_SHAPE" "$HEAD_OID" "$LIFTED")
+LOOP_DECISION=$(jq -r '.decision' <<<"$LOOP")
+ROUND=$(jq -r '.next_round' <<<"$LOOP")
+PREVIOUS_RECORD=$(jq -c 'last // null' <<<"$RECORDS")
+
+if [[ "$CHECK_ONLY" == "true" ]]; then
+	if [[ "$CHECK_JSON" == "true" ]]; then echo "$LOOP" >&3; else loop_text "$LOOP"; fi
+	case "$LOOP_DECISION" in
+	stop) exit 3 ;;
+	nothing-new) exit 5 ;;
+	*) exit 0 ;;
+	esac
+fi
+
+FORCED=false
+case "$LOOP_DECISION" in
+nothing-new)
+	if [[ "$FORCE_ROUND" == "true" ]]; then
+		FORCED=true
+		echo "    No new commits since round $((ROUND - 1)); running anyway (--force-round)."
+	else
+		echo "No new commits since round $((ROUND - 1)) (${HEAD_OID:0:7}): nothing to review. --force-round runs anyway."
+		exit 5
+	fi
+	;;
+stop)
+	loop_text "$LOOP" >&2
+	if [[ "$FORCE_ROUND" == "true" ]]; then
+		FORCED=true
+	elif [[ -t 0 && "$YES" == "false" ]]; then
+		read -r -p "Run round ${ROUND} anyway? [y/N] " LOOP_ANSWER
+		[[ "$LOOP_ANSWER" == [Yy]* ]] || {
+			echo "Stopped by the loop check."
+			exit 3
+		}
+		FORCED=true
+	else
+		echo "Stopped by the loop check (exit 3). --force-round runs anyway." >&2
+		exit 3
+	fi
+	;;
+warn)
+	echo "    Loop: $(jq -r '.label + " (" + .reason + ")"' <<<"$LOOP")"
+	;;
+esac
+# A loop that stopped converging says so at the top of the posted review.
+LOOP_LINE=""
+if jq -e '.label == "nit-loop" or .label == "churning"' <<<"$LOOP" >/dev/null; then
+	LOOP_LINE=$(loop_line "$LOOP")
+fi
+echo "    round: ${ROUND}"
+echo ""
+
 # ── clone + checkout ─────────────────────────────────────────────────────────
 SESSIONS_DIR="$(pwd)/pr-review-sessions"
 mkdir -p "$SESSIONS_DIR"
@@ -366,16 +459,6 @@ echo ""
 
 CONTEXT_DIR="${SESSION_DIR}/context"
 write_pr_context "$CONTEXT_DIR"
-
-# ── round ───────────────────────────────────────────────────────────────────────────
-# Earlier gh-pr-review reviews (by anyone) are earlier rounds; the latest one's marker carries the previous record.
-GENERATED_REVIEWS=$(jq -c '[.reviews[] | select((.body // "") | contains("<!-- gh-pr-review generated -->"))]
-	| sort_by(.submittedAt)' "$CONTEXT_DIR/discussion.json")
-ROUND=$(($(jq 'length' <<<"$GENERATED_REVIEWS") + 1))
-PREVIOUS_RECORD=$(marker_record "$(jq -r 'last.body // ""' <<<"$GENERATED_REVIEWS")" || true)
-[[ -n "$PREVIOUS_RECORD" ]] || PREVIOUS_RECORD=null
-echo "    round: ${ROUND}"
-echo ""
 
 # ── build owner (approach) prompt ───────────────────────────────────────────────────────────
 build_owner_prompt() {
@@ -767,7 +850,7 @@ else
 	fi
 fi
 
-REVIEW=$(assemble_review "$APPROACH" "$CODE_REVIEW")
+REVIEW=$(assemble_review "$LOOP_LINE" "$APPROACH" "$CODE_REVIEW")
 
 # ── record ─────────────────────────────────────────────────────────────────────────
 # round.json starts as a preview; the post block turns it into the posted round. A failure here never blocks the post.
@@ -796,7 +879,9 @@ write_round_record() {
 		  base_sha: $base, head_sha: $head, previous_head_sha: ($previous.head_sha? // null),
 		  approach: $approach, ready: $ready, decision: null, posted_at: null,
 		  code_review: $code_review, preview: true}')
-	build_record "$meta" "$findings" "$PREVIOUS_RECORD" >"$RECORD_FILE"
+	build_record "$meta" "$findings" "$PREVIOUS_RECORD" |
+		jq --argjson loop "$LOOP" --argjson forced "$FORCED" \
+			'.loop = ($loop | {label, flags, decision}) | .forced = $forced' >"$RECORD_FILE"
 }
 ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
 if ! write_round_record; then

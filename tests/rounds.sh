@@ -31,7 +31,8 @@ cat >"$stub/gh" <<S
 case "\$*" in
 *pulls/1/reviews*) cat "$stub/reviews.json" ;;
 *pulls/1/commits*) cat "$stub/commits.json" ;;
-*"pr view"*) echo '{"additions":10,"deletions":2,"changedFiles":3,"headRefOid":"eeeeeee5"}' ;;
+*issues/1/comments* | *pulls/1/comments*) echo '[]' ;;
+*"pr view"*) echo '{"additions":10,"deletions":2,"changedFiles":3,"headRefOid":"eeeeeee5","author":{"login":"bob"}}' ;;
 *) echo "unexpected gh call: \$*" >&2; exit 9 ;;
 esac
 S

@@ -2,7 +2,7 @@
 # Runs the whole gh-pr-review script with stub git, gh and pi, and checks the orchestration:
 # how many model calls run, what the code review gets, and what is posted.
 # Conditions are single-quoted on purpose: expect() evals them after each run sets rc, calls, body and flag.
-# shellcheck disable=SC2016,SC2034
+# shellcheck disable=SC2016,SC2034,SC2329 # SC2329: helpers such as no_session run inside expect's eval
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 fail=0
@@ -15,14 +15,19 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 	printf '%s' "$1" >"$stub/approach.out"
 	printf '%s' "$2" >"$stub/review.out"
 	echo '{"comments":[],"reviews":[]}' >"$stub/discussion.json"
+	echo '[]' >"$stub/rest-reviews.json"
+	echo '[]' >"$stub/rest-comments.json"
 	cat >"$stub/bin/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
+*pulls/1/reviews*) cat "$stub/rest-reviews.json" ;;
+*issues/1/comments*) cat "$stub/rest-comments.json" ;;
+*pulls/1/comments*) echo '[]' ;;
 *"auth status"*) exit 0 ;;
 *"api"*user*) echo me ;;
 *graphql*) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}' ;;
 *"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; cat "$stub/discussion.json" ;;
-*"pr view"*) echo '{"title":"T","body":"B","headRefName":"h","baseRefName":"main","author":{"login":"bob"},"additions":1,"deletions":0,"changedFiles":1}' ;;
+*"pr view"*) echo '{"title":"T","body":"B","headRefName":"h","baseRefName":"main","author":{"login":"bob"},"additions":1,"deletions":0,"changedFiles":1,"headRefOid":"head1"}' ;;
 *"pr review"*) printf '%s\n' "\$@" >"$stub/posted.args" ;;
 esac
 S
@@ -42,9 +47,26 @@ S
 	chmod +x "$stub/bin/"*
 }
 
-run() { # extra args...
+run() { # extra args... (always -y; run_no_y for the interactive path, with no terminal on stdin)
+	fresh
 	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
 		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 -y "$@" >"$stub/out.log" 2>&1) && rc=0 || rc=$?
+	collect
+}
+
+run_no_y() { # no extra args: the interactive path, with no terminal on stdin
+	fresh
+	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 </dev/null >"$stub/out.log" 2>&1) && rc=0 || rc=$?
+	collect
+}
+
+fresh() { # each run starts with no model calls, nothing posted and no session
+	: >"$stub/pi.calls"
+	rm -rf "$stub/posted.args" "$stub/work/pr-review-sessions"
+}
+
+collect() {
 	calls=$(wc -l <"$stub/pi.calls" | tr -d ' ')
 	body=$(sed -n '/^--body$/,$p' "$stub/posted.args" 2>/dev/null | sed 1d || true)
 	flag=$(grep -x -- '--\(comment\|approve\|request-changes\)' "$stub/posted.args" 2>/dev/null || true)
@@ -158,10 +180,10 @@ expect "records: a Rethink posts its marker" '[[ $body == *"gh-pr-review:round"*
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[{"severity":"minor","file":"c.js","line":1,"title":"nit"}]\n```'
 prev='{"schema":1,"round":2,"head_sha":"old","findings":[{"id":"F1","severity":"minor","status":"new"},{"id":"F3","severity":"important","status":"new"}]}'
-jq -n --arg prev "<!-- gh-pr-review:round $prev -->" '{comments: [], reviews: [
-	{author: {login: "x"}, state: "COMMENTED", submittedAt: "2026-01-01T00:00:00Z", body: "<!-- gh-pr-review generated -->\nold round"},
-	{author: {login: "y"}, state: "COMMENTED", submittedAt: "2026-01-02T00:00:00Z", body: "a human review"},
-	{author: {login: "x"}, state: "COMMENTED", submittedAt: "2026-01-03T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n" + $prev + "\nround two")}]}' >"$stub/discussion.json"
+jq -n --arg prev "<!-- gh-pr-review:round $prev -->" '[
+	{user: {login: "x", type: "User"}, state: "COMMENTED", commit_id: "c1", submitted_at: "2026-01-01T00:00:00Z", body: "<!-- gh-pr-review generated -->\nold round"},
+	{user: {login: "y", type: "User"}, state: "COMMENTED", commit_id: "c2", submitted_at: "2026-01-02T00:00:00Z", body: "a human review"},
+	{user: {login: "x", type: "User"}, state: "COMMENTED", commit_id: "old", submitted_at: "2026-01-03T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n" + $prev + "\nround two")}]' >"$stub/rest-reviews.json"
 run
 expect "records: earlier generated reviews count as rounds" '[[ $(jq -r ".round" <<<"$record") == 3 ]]'
 expect "records: finding IDs continue from the previous record" '[[ $(jq -r ".findings[0].id, .previous_head_sha" <<<"$record" | paste -sd, -) == "F4,old" ]]'
@@ -169,4 +191,78 @@ expect "records: finding IDs continue from the previous record" '[[ $(jq -r ".fi
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n```'
 run --no-post
 expect "records: --no-post keeps a preview record and posts nothing" '[[ -z $flag && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "true,null" ]]'
+
+# ── loop check
+rounds_with() { # blocking per earlier round... -> REST reviews whose markers carry those counts
+	local i=0 b out='[]' rec
+	for b in "$@"; do
+		i=$((i + 1))
+		rec=$(jq -cn --argjson r "$i" --argjson b "$b" '{schema: 1, source: "model", round: $r, head_sha: "h\($r)",
+			posted_at: "2026-01-0\($r)T00:00:00Z", approach: "sound", ready: "no", code_review: true, findings: [],
+			counts: {open_blocking: $b, critical: 0, important: $b, minor: 0}}')
+		out=$(jq -c --arg rec "$rec" --argjson r "$i" '. + [{user: {login: "me", type: "User"}, commit_id: "h\($r)",
+			submitted_at: "2026-01-0\($r)T00:00:00Z",
+			body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + $rec + " -->\nround")}]' <<<"$out")
+	done
+	echo "$out"
+}
+comment_by() { # login type -> one issue comment after the last round
+	jq -n --arg login "$1" --arg type "$2" '[{user: {login: $login, type: $type}, created_at: "2026-02-01T00:00:00Z", body: "a reply"}]'
+}
+no_session() { [[ ! -d "$stub/work/pr-review-sessions" ]]; }
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+rounds_with 9 12 8 10 >"$stub/rest-reviews.json"
+run
+expect "loop stop: exit 3 with -y" '[[ $rc == 3 && $calls == 0 && -z $flag ]]'
+expect "loop stop: no clone" 'no_session'
+expect "loop stop: the diagnosis" 'grep -q "Loop check for round 5: stop" "$stub/out.log"'
+run_no_y
+expect "loop stop: no terminal, no prompt, exit 3" '[[ $rc == 3 && $calls == 0 ]] && ! grep -q "anyway? \[y/N\]" "$stub/out.log"'
+run --force-round
+expect "loop stop: --force-round runs the round" '[[ $rc == 0 && $calls == 2 && $(jq -r ".forced, .round, .loop.decision" <<<"$record" | paste -sd, -) == "true,5,stop" ]]'
+expect "loop stop: a forced round shows the loop line" '[[ $body == *"**Loop:** Churning"* ]]'
+comment_by dave User >"$stub/rest-comments.json"
+run
+expect "loop stop: a comment by another person lifts it" '[[ $rc == 0 && $calls == 2 && $(jq -r ".loop.decision" <<<"$record") == warn ]]'
+comment_by bob User >"$stub/rest-comments.json"
+run
+expect "loop stop: the PR author's comment does not lift it" '[[ $rc == 3 && $calls == 0 ]]'
+comment_by ci-helper Bot >"$stub/rest-comments.json"
+run
+expect "loop stop: a bot's comment does not lift it" '[[ $rc == 3 && $calls == 0 ]]'
+echo '[]' >"$stub/rest-comments.json"
+run --check
+expect "--check: stop exits 3 without clone or pi" '[[ $rc == 3 && $calls == 0 ]] && no_session && grep -q "Loop check for round 5: stop" "$stub/out.log"'
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>/dev/null) && rc=0 || rc=$?
+expect "--check --json: stdout is the decision JSON only" '[[ $rc == 3 && $(jq -r ".decision, .label, .next_round" "$stub/check.json" | paste -sd, -) == "stop,churning,5" ]]'
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+rounds_with 9 12 8 >"$stub/rest-reviews.json"
+run
+expect "loop warn: the round runs" '[[ $rc == 0 && $calls == 2 ]]'
+expect "loop warn: the loop line comes right after the markers" '[[ $(sed -n 3p <<<"$body") == "**Loop:** Churning · blocking 9, 12, 8 · "* ]]'
+expect "loop warn: the decision still comes from Ready to merge" '[[ $flag == --approve ]]'
+run --check
+expect "--check: warn exits 0, no model call" '[[ $rc == 0 && $calls == 0 ]]'
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+rounds_with 2 >"$stub/rest-reviews.json"
+jq '.[0].commit_id = "head1" | .[0].body |= sub("\"head_sha\":\"h1\""; "\"head_sha\":\"head1\"")' "$stub/rest-reviews.json" >"$stub/r.json"
+mv "$stub/r.json" "$stub/rest-reviews.json"
+run
+expect "no new commits: exit 5, no clone" '[[ $rc == 5 && $calls == 0 ]] && no_session'
+run --check
+expect "--check: no new commits exits 5" '[[ $rc == 5 ]]'
+run --force-round
+expect "no new commits: --force-round runs" '[[ $rc == 0 && $calls == 2 && $(jq -r ".forced" <<<"$record") == true ]]'
+
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+run
+expect "first round: round 1, no loop line" '[[ $rc == 0 && $(jq -r ".round, .loop.decision, .forced" <<<"$record" | paste -sd, -) == "1,run,false" && $body != *"**Loop:**"* ]]'
+run --check
+expect "--check: no rounds yet exits 0" '[[ $rc == 0 ]]'
+run --json
+expect "--json without --check: fails" '[[ $rc == 1 && $calls == 0 ]]'
 exit "$fail"
