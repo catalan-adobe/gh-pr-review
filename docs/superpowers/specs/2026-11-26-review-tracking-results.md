@@ -92,8 +92,18 @@ counts those), so the record keeps it as given.
   everything `main` brought in. The delta now compares with the previous head merged onto the new base
   (`git merge-tree --write-tree`), and falls back to a range-diff when that merge conflicts.
 
+### Posted round 3 on adobe/skills#823
+
+With approval, the previewed review above was posted as a comment (my own PR) through the tool's posting functions:
+the same body, the round marker, `gh pr review --comment`. The head was unchanged since the preview.
+
+- On GitHub the review opens with the progress line. Body 11,208 characters, marker 3,264.
+- `gh pr-review rounds` reads round 3 from its marker: `source: model`, 1 Critical, 2 Important and 1 Minor open,
+  label `converging`, 4 commits since round 2.
+- `gh pr-review <PR> --check` then says "no new commits since round 3" (exit 5).
+
 ### Not checked yet
 
 - A rebase between two rounds on a real PR: none at hand. The rebase, force-push and shallow cases are covered by
   `tests/delta.sh` with real git.
-- A posted round: waits for a yes.
+- A full posted run through the interactive prompt (the agent's shell has no terminal).
