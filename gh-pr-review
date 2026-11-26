@@ -937,6 +937,19 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # ── post ─────────────────────────────────────────────────────────────────────
+# The PR's head commit now, read again just before posting (one retry). Fails when GitHub can't say.
+pr_head_now() {
+	local json try
+	for try in 1 2; do
+		if json=$(gh pr view "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" --json headRefOid 2>/dev/null) &&
+			jq -er '.headRefOid | strings | select(. != "")' <<<"$json" 2>/dev/null; then
+			return 0
+		fi
+		[[ "$try" == 2 ]] || sleep 1
+	done
+	return 1
+}
+
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	if [[ -z "$DECISION" && "${APPROACH_VERDICT:-}" == rethink ]]; then
 		DECISION=request-changes
@@ -1010,6 +1023,21 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		echo "Warning: could not read the PR's rounds again; posting without checking for a newer round." >&2
 	fi
 
+	# The review covers HEAD_SHA and is posted on it (commit_id). A push while it ran is not reviewed: never approve it.
+	HEAD_NOTE=""
+	if ! NOW_HEAD=$(pr_head_now); then
+		echo "Could not read the PR's head before posting; this review covers ${HEAD_SHA:0:7}."
+		HEAD_NOTE=unknown
+	elif [[ "$NOW_HEAD" != "$HEAD_SHA" ]]; then
+		HEAD_NOTE="The PR moved to ${NOW_HEAD:0:7} during the review; this review covers ${HEAD_SHA:0:7}."
+		echo "$HEAD_NOTE"
+		REVIEW=$(printf '**Note:** %s\n\n%s' "$HEAD_NOTE" "$REVIEW")
+	fi
+	if [[ -n "$HEAD_NOTE" && "$DECISION" == approve ]]; then
+		DECISION=comment
+		echo "Posting as comment, not approve: an approval must cover the PR's head."
+	fi
+
 	MARKER=""
 	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}" ]]; then
 		jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -1026,7 +1054,19 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	fi
 	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s%s' "$MARKER" "$REVIEW")
 
-	gh pr review "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" "--${DECISION}" --body "$COMMENT"
+	case "$DECISION" in
+	approve) EVENT=APPROVE ;;
+	request-changes) EVENT=REQUEST_CHANGES ;;
+	*) EVENT=COMMENT ;;
+	esac
+	# Bound to the reviewed commit, so a push while the review ran is still unreviewed. The body goes through a file.
+	printf '%s' "$COMMENT" | jq -Rs --arg commit "$HEAD_SHA" --arg event "$EVENT" \
+		'{commit_id: $commit, event: $event, body: .}' >"${SESSION_DIR}/post.json"
+	if ! gh api --hostname "$GH_HOST_NAME" --method POST "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" \
+		--input "${SESSION_DIR}/post.json" >/dev/null; then
+		echo "Error: GitHub did not take the review; nothing was posted. Session: ${SESSION_DIR}" >&2
+		exit 1
+	fi
 	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}.posted" ]]; then
 		mv "$RECORD_FILE.posted" "$RECORD_FILE"
 	fi

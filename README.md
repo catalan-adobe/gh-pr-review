@@ -180,6 +180,12 @@ it says who, and asks "Post anyway as round N?" in a terminal (the findings
 are kept, renumbered for the new position). With `-y` it posts nothing, keeps
 the session folder, and exits with code 6.
 
+The review is posted on the commit it read (the review API's `commit_id`), so
+its round covers that commit only. If the PR moved while the review ran, the
+review says so ("the PR moved to … during the review; this review covers …")
+and is never an approval, even with `--decision approve`: it posts as a
+comment. The new commits stay unreviewed, and `--check` runs on them.
+
 `gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
 or 5 (no new commits); `--check --json` prints the decision as JSON for
 scripts. `gh pr-review rounds <PR>` shows the same decision under the history.

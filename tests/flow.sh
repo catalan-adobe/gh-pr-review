@@ -17,9 +17,14 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 	echo '{"comments":[],"reviews":[]}' >"$stub/discussion.json"
 	echo '[]' >"$stub/rest-reviews.json"
 	echo '[]' >"$stub/rest-comments.json"
+	# The PR head the Nth "pr view" returns: line N of heads, or its last line. The clone checks out line 1.
+	echo head1 >"$stub/heads"
 	cat >"$stub/bin/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
+*"--method POST"*pulls/1/reviews*)
+	[[ -f "$stub/post.fail" ]] && exit 1
+	while [[ \$# -gt 0 ]]; do [[ "\$1" == --input ]] && cp "\$2" "$stub/posted.json"; shift; done ;;
 *pulls/1/reviews*) cat "$stub/rest-reviews.json" ;;
 *issues/1/comments*) cat "$stub/rest-comments.json" ;;
 *pulls/1/comments*) echo '[]' ;;
@@ -27,14 +32,18 @@ case "\$*" in
 *"api"*user*) echo me ;;
 *graphql*) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}' ;;
 *"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; cat "$stub/discussion.json" ;;
-*"pr view"*) echo '{"title":"T","body":"B","headRefName":"h","baseRefName":"main","author":{"login":"bob"},"additions":1,"deletions":0,"changedFiles":1,"headRefOid":"head1"}' ;;
-*"pr review"*) printf '%s\n' "\$@" >"$stub/posted.args" ;;
+*"pr view"*)
+	n=\$((\$(cat "$stub/heads.n" 2>/dev/null || echo 0) + 1))
+	echo "\$n" >"$stub/heads.n"
+	head=\$(sed -n "\${n}p" "$stub/heads")
+	[[ -n "\$head" ]] || head=\$(tail -1 "$stub/heads")
+	echo '{"title":"T","body":"B","headRefName":"h","baseRefName":"main","author":{"login":"bob"},"additions":1,"deletions":0,"changedFiles":1,"headRefOid":"'"\$head"'"}' ;;
 esac
 S
-	cat >"$stub/bin/git" <<'S'
+	cat >"$stub/bin/git" <<S
 #!/usr/bin/env bash
-for a in "$@"; do [[ "$a" == clone ]] && mkdir -p "${@: -1}"; done
-case "$*" in *rev-parse*) echo aaaa ;; *merge-base*) echo bbbb ;; esac
+for a in "\$@"; do [[ "\$a" == clone ]] && mkdir -p "\${@: -1}"; done
+case "\$*" in *rev-parse*) head -1 "$stub/heads" ;; *merge-base*) echo bbbb ;; esac
 S
 	cat >"$stub/bin/pi" <<S
 #!/usr/bin/env bash
@@ -106,13 +115,16 @@ run_tty() { # prompt answer [prompt answer]...: the interactive path, on a termi
 
 fresh() { # each run starts with no model calls, nothing posted and no session
 	: >"$stub/pi.calls"
-	rm -rf "$stub/posted.args" "$stub/work/pr-review-sessions"
+	rm -rf "$stub/posted.json" "$stub/heads.n" "$stub/work/pr-review-sessions"
 }
 
 collect() {
 	calls=$(wc -l <"$stub/pi.calls" | tr -d ' ')
-	body=$(sed -n '/^--body$/,$p' "$stub/posted.args" 2>/dev/null | sed 1d || true)
-	flag=$(grep -x -- '--\(comment\|approve\|request-changes\)' "$stub/posted.args" 2>/dev/null || true)
+	# What the review API got: the body, the event as the old gh pr review flag, and the commit it is bound to.
+	body=$(jq -r '.body' "$stub/posted.json" 2>/dev/null || true)
+	flag=$(jq -r '{APPROVE: "--approve", COMMENT: "--comment", REQUEST_CHANGES: "--request-changes"}[.event] // "?"' \
+		"$stub/posted.json" 2>/dev/null || true)
+	commit=$(jq -r '.commit_id' "$stub/posted.json" 2>/dev/null || true)
 	record=$(cat "$stub"/work/pr-review-sessions/pr-review-*/round.json 2>/dev/null || true)
 }
 
@@ -454,4 +466,30 @@ expect "round trip: the decision sees round 1 on this head" \
 	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>"$stub/out.log") && rc=0 || rc=$?
 expect "round trip: --check exits 5 on the same head" \
 	'[[ $rc == 5 && $(jq -r ".decision, .next_round, .series[0]" "$stub/check.json" | paste -sd, -) == "nothing-new,2,1" ]]'
+
+# ── the review is bound to the commit it read
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+run
+expect "commit: the review is posted on the reviewed commit, through the review API" '[[ $rc == 0 && $commit == head1 && $flag == --approve ]]'
+printf 'head1\nhead2\n' >"$stub/heads"
+run
+expect "head moved during the review: posted on the reviewed commit, as a comment, not an approval" \
+	'[[ $rc == 0 && $commit == head1 && $flag == --comment && $(jq -r .head_sha <<<"$record") == head1 ]]'
+expect "head moved during the review: the run and the review say so" \
+	'grep -q "The PR moved to head2 during the review; this review covers head1." "$stub/out.log" &&
+		[[ $body == *"**Note:** The PR moved to head2 during the review; this review covers head1."* ]]'
+run --decision approve
+expect "head moved during the review: an explicit approve is a comment too" '[[ $rc == 0 && $commit == head1 && $flag == --comment ]]'
+printf 'head1\nhead2\n' >"$stub/heads"
+run
+jq -n --arg body "$body" --arg commit "$commit" '[{id: 1, user: {login: "me", type: "User"}, state: "COMMENTED",
+	commit_id: $commit, submitted_at: "2026-05-01T10:00:00Z", body: $body}]' >"$stub/rest-reviews.json"
+echo head2 >"$stub/heads"
+run --check
+expect "head moved during the review: --check on the new head runs" '[[ $rc == 0 ]] && grep -q "Loop check for round 2: run" "$stub/out.log"'
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+touch "$stub/post.fail"
+run
+expect "the review API refuses: exit 1, the session kept, the record still a preview" \
+	'[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] && grep -q "nothing was posted" "$stub/out.log"'
 exit "$fail"
