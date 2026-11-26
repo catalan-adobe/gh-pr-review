@@ -47,6 +47,9 @@ Out of scope:
   optional launcher for a later phase, not a requirement.
 - **When herdr comes (phase D5):** a popup key binding and a "reviews" tab; jobs and agents in herdr panes.
 - **Agent for `a`:** pi by default, configurable.
+- **Markdown:** `tui-markdown` renders review bodies.
+- **`r` posts:** after its confirm dialog, the round runs and posts, as on the command line. `p` stays the way to
+  preview.
 
 ## Architecture
 
@@ -120,8 +123,8 @@ herdr tab bar.
 
 ### Inside the binary
 
-- **Crates:** `ratatui` and `crossterm` for the UI, `serde` and `serde_json` for the data, `tui-markdown` (or
-  `pulldown-cmark` with our own styling, if it falls short) for review bodies, `nucleo` for the filter and the
+- **Crates:** `ratatui` and `crossterm` for the UI, `serde` and `serde_json` for the data, `tui-markdown` for
+  review bodies, `nucleo` for the filter and the
   command palette, `notify` to watch the state folder.
 - **Modules:** `model` (types for the JSON), `cli` (runs `gh pr-review`, with timeouts, in worker threads), `jobs`
   (jobs and their `Launcher`), `ui` (list, detail tabs, sparkline, Markdown, log view, help overlay, confirm dialog,
@@ -382,9 +385,8 @@ D1 can start before tracking phase 4 ships: it is built and tested against synth
 
 ## Open questions
 
-1. Is `tui-markdown` good enough for review bodies (tables, nested lists, code spans), or do we style
-   `pulldown-cmark` events ourselves?
-2. Should a round started from the dashboard post right away, or always start as a preview (`p`) that `r` then
-   posts? Proposal: `r` posts after the confirm, as on the command line.
-3. D5 only, for herdr: does `herdr tab focus` from a popup close the popup? The shape of a `tab_bar_right` entry of
-   type `command`. `herdr worktree open` or a plain tab for the worktree?
+Left for phase D5, when the herdr launcher is built:
+
+1. Does `herdr tab focus` from a popup close the popup?
+2. The shape of a `tab_bar_right` entry of type `command` (its fields, its refresh interval).
+3. `herdr worktree open` or a plain tab for the worktree?
