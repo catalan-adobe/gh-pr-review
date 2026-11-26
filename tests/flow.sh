@@ -273,6 +273,11 @@ run
 expect "records: an unusable block entry falls back to parsing the whole round" \
 	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .findings[0].file" <<<"$record" | paste -sd, -) == "parsed,1,b.js" ]]'
 
+setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`n.go:4` — Nil dereference.**\n\n**Ready to merge?** No\n\n```json findings\n[{"id":"F999","status":"open","title":"Nil dereference"}]\n```'
+run
+expect "records: an invented ID without a severity falls back to the Markdown" \
+	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .findings[0].id, .findings[0].file" <<<"$record" | paste -sd, -) == "parsed,1,F1,n.go" ]]'
+
 setup $'### Approach\n**Approach:** Rethink' 'never used'
 run
 expect "records: a Rethink has no code review" '[[ $(jq -r ".code_review, .counts.open_blocking" <<<"$record" | paste -sd, -) == "false,null" ]]'

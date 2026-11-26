@@ -95,13 +95,14 @@ def parse_findings:
 
 # True when the model's findings block can be used as it is: an array whose every entry is an object with a known
 # severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
-# back to the Markdown, so normalize_findings never drops a finding the reader can see.
-def findings_block_ok:
+# back to the Markdown, so normalize_findings never drops a finding the reader can see. $ids: the IDs of the last
+# code review (known_ids; [] in round 1). Only an entry with one of them may give just its status, the rest coming
+# from that record: any other ID is a new finding to the record builder, and needs a severity and a title.
+def findings_block_ok($ids):
 	def severity_ok: type == "string" and (ascii_downcase | . == "critical" or . == "important" or . == "minor");
 	type == "array"
 	and all(.[]; type == "object"
-		# Round 2 and later: an entry with an earlier ID may give only its status; the rest comes from the last record.
-		and ((.id | type == "string") as $known
+		and ((.id | type == "string" and (_trim as $id | $ids | index([$id]) != null)) as $known
 			| (.severity | severity_ok or ($known and . == null))
 			and (.title | type == "string" or ($known and . == null)))
 		and (.file | . == null or type == "string")
@@ -137,6 +138,9 @@ def _entry:
 # True when a record still has its findings list. A marker cut to fit GitHub's size cap can keep the counts but drop
 # the list (findings_dropped): an empty list is a round with no findings, a missing one is unknown.
 def has_findings_list: type == "object" and (.findings | type) == "array" and .findings_dropped != true;
+
+# The finding IDs a record knows, for findings_block_ok: none without its findings list (or without a record).
+def known_ids: if has_findings_list then [.findings[] | objects | .id | strings] else [] end;
 
 # The findings of a code-review round, from the model's array and the previous record's findings.
 # Out: {findings, later, last_ids}. Known IDs keep their ID and first round, with the model's status (open on an

@@ -1153,7 +1153,8 @@ write_round_record() {
 	if [[ "$APPROACH_VERDICT" == rethink ]]; then
 		code_review=false
 		findings='[]'
-	elif jq -e -L "$LIB_DIR" 'include "records"; findings_block_ok' "$FINDINGS_FILE" >/dev/null 2>&1; then
+	elif jq -e -L "$LIB_DIR" --argjson base "$FINDINGS_BASE" 'include "records"; findings_block_ok($base | known_ids)' \
+		"$FINDINGS_FILE" >/dev/null 2>&1; then
 		findings=$(jq -c . "$FINDINGS_FILE") || return 1
 	else
 		source=parsed

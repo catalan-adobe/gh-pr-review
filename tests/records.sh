@@ -319,13 +319,32 @@ check "id_floor: the next ID comes after the floor, not the previous record" \
 	"$(build_record "$(jq -c '.id_floor = {F: 9, L: 4}' <<<"$meta")" "$one" "$r1" |
 		jq -c '[.findings[0].id, .last_ids]')" '["F10",{"F":10,"L":4}]'
 
-ok_block() { jq -c -L "$LIB_DIR" 'include "records"; map(findings_block_ok)' <<<"$1"; }
+ok_block() { # <blocks> [known ids]
+	jq -c -L "$LIB_DIR" --argjson ids "${2:-[]}" 'include "records"; map(findings_block_ok($ids))' <<<"$1"
+}
 check "findings_block_ok: good blocks" "$(ok_block '[[], [{"severity":"Critical","title":"t","file":null,"line":null}],
 	[{"severity":"minor","title":"t","file":"a.js","line":3}, {"severity":"important","title":"u"}]]')" \
 	"[true,true,true]"
 check "findings_block_ok: an earlier ID may give only its status" \
-	"$(ok_block '[[{"id":"F3","status":"fixed"}], [{"id":"F3","status":"open","severity":"critical"}], [{"id":null,"status":"new","title":"t"}], [{"status":"new","severity":"minor"}]]')" \
-	"[true,true,false,false]"
+	"$(ok_block '[[{"id":"F3","status":"fixed"}], [{"id":"F3","status":"open","severity":"critical"}], [{"id":null,"status":"new","title":"t"}], [{"status":"new","severity":"minor"}], [{"id":" F3 ","status":"fixed"}]]' '["F1","F3"]')" \
+	"[true,true,false,false,true]"
+# An ID the last code review does not have is a new finding: without a severity and a title, the Markdown decides.
+check "findings_block_ok: an unknown ID must be a whole new finding" \
+	"$(ok_block '[[{"id":"F999","status":"open","title":"Nil dereference"}], [{"id":"F2","status":"fixed"}],
+	[{"id":"F999","status":"open","severity":"critical","title":"Nil dereference"}]]' '["F1"]')" "[false,false,true]"
+check "findings_block_ok: round 1 knows no ID" "$(ok_block '[[{"id":"F1","status":"fixed"}]]')" "[false]"
+check "known_ids: the last code review's IDs, none without its list" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; map(known_ids)' <<<"[null, $prev2, $(jq -c '.findings_dropped = true' <<<"$prev2")]")" \
+	'[[],["F1","F2","F3","F4","F5"],[]]'
+# Round 1 with an invented ID and no severity: the block is not usable, so the Markdown's Critical is the record's.
+printf '#### 🚨 Critical\n\n- **`n.go:4` — Nil dereference.**\n' >"$tmp/invented.md"
+if jq -e -L "$LIB_DIR" 'include "records"; findings_block_ok(null | known_ids)' \
+	<<<'[{"id":"F999","status":"open","title":"Nil dereference"}]' >/dev/null; then
+	f='[{"id":"F999","status":"open","title":"Nil dereference"}]'
+else f=$(parse_findings "$tmp/invented.md"); fi
+check "invented ID: the record has the Critical from the Markdown" \
+	"$(build_record "$meta" "$f" null | jq -c '[.counts.critical, .findings[0].id, .findings[0].file]')" '[1,"F1","n.go"]'
+
 check "findings_block_ok: one bad entry spoils the block" "$(ok_block '[{}, [{"level":"critical","title":"t"}],
 	[{"severity":"nit","title":"t"}], [{"severity":"minor"}], [{"severity":"minor","title":"t","line":"3"}],
 	[{"severity":"minor","title":"t","file":3}], [{"severity":"minor","title":"t"}, "F2"]]')" \
