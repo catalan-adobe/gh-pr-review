@@ -1005,6 +1005,13 @@ review_landed() {
 		| length == 1' <<<"$json" >/dev/null 2>&1
 }
 
+# True only when the record file shows how many blockers its round has: a numeric counts.open_blocking. An unknown
+# count (a code review read from its Markdown without a severity section), a missing file or a failed read is false:
+# an automatic approve needs this to succeed.
+known_blockers() { # <record-file>
+	jq -e '(.counts.open_blocking | type) == "number"' "$1" >/dev/null 2>&1
+}
+
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	if [[ -z "$DECISION" && "${APPROACH_VERDICT:-}" == rethink ]]; then
 		DECISION=request-changes
@@ -1022,14 +1029,13 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		esac
 		echo "Verdict: ${VERDICT:-not found} → ${DECISION}"
 		# An approval says the findings were checked; without a record nothing can show that, so only comment. Nor
-		# can a record whose blockers are unknown (a code review with no severity section): that round is not ready.
+		# can a record whose blocker count is unknown (known_blockers): that round is not ready.
 		if [[ "$DECISION" == approve && -z "${RECORD_FILE:-}" ]]; then
 			DECISION=comment
 			echo "No round record for this review: posting as comment, not approve."
-		elif [[ "$DECISION" == approve ]] &&
-			jq -e '.code_review != false and (.counts.open_blocking | type) != "number"' "$RECORD_FILE" >/dev/null 2>&1; then
+		elif [[ "$DECISION" == approve ]] && ! known_blockers "$RECORD_FILE"; then
 			DECISION=comment
-			echo "The review shows no severity section, so its blockers are unknown: posting as comment, not approve."
+			echo "The review's blockers are unknown: posting as comment, not approve."
 		fi
 	fi
 
@@ -1113,11 +1119,17 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 			rm -f "$RECORD_FILE.posted"
 		fi
 	fi
-	# Right before posting: without a posted record, an automatic approve (the verdict's, or its default taken at the
-	# prompt) posts as comment. An approve someone chose stays.
-	if [[ "$DECISION" == approve && "$AUTO_DECISION" == true && -z "$POSTED_RECORD" ]]; then
-		DECISION=comment
-		echo "No round record for this review: posting as comment, not approve."
+	# Right before posting: an automatic approve (the verdict's, or its default taken at the prompt) needs a posted
+	# record that shows its blocker count (known_blockers); otherwise it posts as comment. An approve someone chose
+	# stays.
+	if [[ "$DECISION" == approve && "$AUTO_DECISION" == true ]]; then
+		if [[ -z "$POSTED_RECORD" ]]; then
+			DECISION=comment
+			echo "No round record for this review: posting as comment, not approve."
+		elif ! known_blockers "$POSTED_RECORD"; then
+			DECISION=comment
+			echo "The review's blockers are unknown: posting as comment, not approve."
+		fi
 	fi
 
 	MARKER=""

@@ -811,6 +811,21 @@ for shape in 'full marker~.' 'minimal marker~{schema, round, findings_dropped: t
 	expect "approach heading, ${shape%~*}: reads back unknown, not ready" \
 		'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"unknown\",[null]]" ]]'
 done
+# An automatic approve needs the check that the blocker count is known to succeed: when jq fails on it, the round
+# posts as comment, even with a clean review whose count is a known 0.
+setup $'**Approach:** Sound' "$clean"
+cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == *'(.counts.open_blocking | type)'* ]] && exit 5; done
+exec "$(command -v jq)" "\$@"
+S
+chmod +x "$stub/bin/jq"
+run
+expect "the blocker-count check fails: comments, not approve" \
+	'[[ $rc == 0 && $flag == --comment && $(jq -r .counts.open_blocking <<<"$record") == 0 ]]'
+rm "$stub/bin/jq"
+run
+expect "the blocker-count check works again: the same review approves" '[[ $rc == 0 && $flag == --approve ]]'
 
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' "$clean"
