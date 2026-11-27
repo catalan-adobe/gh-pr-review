@@ -58,7 +58,7 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--no-post` | posting on (with confirm) | Print the review only |
 | `--instructions <text>` | none | Extra guidance for both passes, for example `"Focus on db/; skip style nits"`. For a file: `--instructions "$(cat notes.md)"`. The tool does not post them, and the reviewer is told not to quote them, but the review can still reflect them: use `--no-post` to preview a review shaped by sensitive notes |
 | `--skip-approach` | off | Skip the maintainer's approach pass and run the code review only, for example when the approach is already agreed |
-| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve, anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
+| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve (comment when the round's blocker count is unknown, as for a code review read from its Markdown with no severity section; a valid empty findings block is a known zero, and approves), anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
 | `-y`, `--yes` | off | Skip the confirmations. A loop-check stop then exits with code 3, and no new commits with code 5, instead of asking |
 | `--check` | off | Run only the loop check (see below) and exit 0, 3 or 5. No clone, no model call |
 | `--json` | off | With `--check`: print the decision as JSON on stdout |
@@ -152,8 +152,13 @@ a contributor, to a token that cannot see that membership: their rounds are
 then left out. `--force-round` still runs a round the loop check would not.
 
 `gh pr-review rounds <PR-URL | PR-number>` prints that history, one row per
-round. Reviews posted before the records existed are read back from their
-Markdown (`backfill`):
+round. Reviews posted before the records existed, and records without the full
+counts the tool writes (a review too long for them, or a damaged marker), are
+read back from their Markdown (`backfill`). Only the code review is read: the
+text after the invisible `<!-- gh-pr-review:code-review -->` line the tool posts
+before it, without the footer (a review posted before that line existed is read
+whole). Severity headings count only in its Issues section, and a folded
+`<details>` list ("Fixed since the last round") holds no open findings:
 
 ```
 ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LABEL     SOURCE
@@ -161,6 +166,20 @@ ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LA
 4      11-25 09:14  09b6b7c  1         questionable  no     1     9    1      churning  backfill
 next round: stop · churning · approach-stuck too-big · Settle the approach before the next round: …
 ```
+
+The Markdown is the cross-check for the model's findings block: it is parsed
+before the block is accepted, and a block that leaves out a blocker the Markdown
+shows, or has one where it says none, is rejected. It is also the source when
+the block is rejected, and for a review without a usable marker. The reader
+follows the format the tool asks the model for (the `### Issues` section with
+severity headings, findings as list items, the folded Fixed and Later lists,
+each `<details>` tag on its own line), and is best effort for other Markdown:
+fences nested in longer fences, HTML before `</details>` on the same line,
+headings nested in list items.
+
+After an upgrade, a round read from a minimal marker (a review over 60,000
+characters) written by an older version can number later findings differently,
+if that version counted its findings differently.
 
 `+COMMITS` counts the PR's commits whose commit date falls between the
 previous round's review and this one's. It is a date window, not the commits
@@ -170,7 +189,7 @@ counted toward that review instead of the next one.
 The label says whether the loop converges: `early` (fewer than 3 rounds),
 `converging`, `ready`, `nit-loop` (a few Important findings that keep coming
 back) or `churning`; `unknown` when a round's record has no blocking count and
-neither its findings nor its Markdown can rebuild one (never read as 0, so
+its Markdown has no severity section to rebuild one from (never read as 0, so
 never `ready`). `--json` prints the records and the decision; `-u <login>`
 picks the gh account, as for a review.
 

@@ -61,6 +61,12 @@ expect() { # name condition
 	fi
 }
 
+# The ID the next round gives its first new finding, as the writer numbers it: after the history's ID floor and the
+# last record (build_record).
+next_id() { jq -r -L "$root/lib" 'include "records"; .records as $r
+	| build_record({round: ($r | length + 1), id_floor: ($r | id_floor)}; [{severity: "minor", title: "x"}]; $r[-1])
+	| .findings[0].id' <<<"$out"; }
+
 out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
 row() { grep -E "^$1 " <<<"$out" | tr -s ' '; }
 expect "rounds: runs" '[[ $rc == 0 ]]'
@@ -84,10 +90,11 @@ expect "rounds --json: a backfilled round keeps the history's ID floor" \
 # Rounds posted at once, all marked round 1, each with its new finding F1. One has neither commit_id nor submitted_at
 # on GitHub (it sorts first), one has no commit_id, and a pending review is not a round. The last one claims its
 # right round, 4, but reuses F2, which an earlier round already gave out.
-one='{"schema":1,"round":1,"head_sha":"m1","posted_at":"2026-03-01T00:00:00Z","code_review":true,"counts":{"open_blocking":1},'
+one='{"schema":1,"round":1,"head_sha":"m1","posted_at":"2026-03-01T00:00:00Z","code_review":true,'
+one+='"counts":{"open_blocking":1,"critical":0,"important":1,"minor":0},'
 one+='"findings":[{"id":"F1","severity":"important","status":"new","first_round":1,"title":"a"}],"last_ids":{"F":1,"L":0}}'
-four='{"schema":1,"round":4,"code_review":true,"counts":{"open_blocking":0},"last_ids":{"F":2,"L":0},'
-four+='"findings":[{"id":"F2","severity":"minor","status":"new","first_round":4}]}'
+four='{"schema":1,"round":4,"code_review":true,"counts":{"open_blocking":0,"critical":0,"important":0,"minor":1},'
+four+='"last_ids":{"F":2,"L":0},"findings":[{"id":"F2","severity":"minor","status":"new","first_round":4}]}'
 cp "$stub/reviews.json" "$stub/reviews.saved"
 jq -n --arg m "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${one} -->${nl}x" \
 	--arg four "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${four} -->${nl}x" '[
@@ -125,69 +132,83 @@ expect "rounds: after it, round 3 numbers from F3" \
 	'[[ $(jq -c -L "$root/lib" "include \"records\"; .records | id_floor.F + 1" <<<"$out") == 3 ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
-# A code-review marker without counts: never 0. The counts come from its findings when they show the Markdown's
-# blockers, else from the Markdown; when neither can say, the round's blocking is unknown, and it is never ready.
+# A code-review marker without the full counts (complete_marker) is read from its review's Markdown, like a review
+# without a marker: counts from the Markdown, no findings list (findings_dropped), and the IDs the marker held kept as
+# the ID floor. A blocker the Markdown shows never reads as 0. Each line: what the marker holds, "~", the review's
+# Markdown (a variable), "~", then [open_blocking, critical, minor, has findings, findings_dropped, label, ID floor].
 cp "$stub/reviews.json" "$stub/reviews.saved"
-nocounts() { # findings-json review-markdown -> a generated review whose marker has no counts
-	jq -n --argjson f "$1" --arg md "$2" '{schema: 1, round: 1, code_review: true, approach: "sound",
-		ready: "yes-with-fixes", findings: $f} | {commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"},
-		body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\n" + $md)}'
+partial() { # marker-fields-json review-markdown -> reviews.json: one generated review with that marker
+	jq -n --argjson m "$1" --arg md "$2" '{schema: 1, round: 1, code_review: true, approach: "sound",
+		ready: "yes-with-fixes"} + $m | [{commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"},
+		body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\n" + $md)}]' >"$stub/reviews.json"
 }
 crit_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- **\`a.js:1\` — boom.**${nl}${nl}### Assessment${nl}**Ready to merge?** Yes, with fixes"
-f1='[{"id":"F1","severity":"critical","status":"new","file":"a.js","line":1,"title":"boom"}]'
-jq -s . <(nocounts "$f1" "$crit_md") >"$stub/reviews.json"
-out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "no counts in a code-review marker: rebuilt from its findings, not ready" \
-	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.critical]" <<<"$out") == "[[1],\"early\",1]" ]]'
-jq -s . <(nocounts '[]' "$crit_md") >"$stub/reviews.json"
-out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "no counts, findings missing the Markdown's Critical: counted from the Markdown" \
-	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label]" <<<"$out") == "[[1],\"early\"]" ]]'
-expect "no counts, findings missing the Markdown's Critical: the list that failed the check is dropped" \
-	'[[ $(jq -c ".records[0] | [has(\"findings\"), .findings_dropped, .counts.critical]" <<<"$out") == "[false,true,1]" ]]'
 plain_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- \`a.js:1\` — boom.${nl}${nl}### Assessment${nl}**Ready to merge?** Yes"
-jq -s . <(nocounts '[]' "$plain_md") >"$stub/reviews.json"
+none_md="#### 🚨 Critical (Must Fix Before Merge)${nl}*(none found)*${nl}${nl}### Assessment${nl}**Ready to merge?** Yes"
+star_md="#### 🚨 Critical (Must Fix Before Merge)${nl}* **\`a.go:7\` — boom.**${nl}#### ⚠️ Important (Should Fix)${nl}- None.${nl}### Assessment${nl}**Ready to merge?** Yes with fixes"
+minor_md="### Issues${nl}#### 🚨 Critical${nl}*(none found)*${nl}#### ⚠️ Important${nl}*(none found)*${nl}#### 💡 Minor${nl}- **\`a.js:2\` — nit.**${nl}### Assessment${nl}**Ready to merge?** Yes"
+while IFS='~' read -r marker md want; do
+	partial "$marker" "${!md}"
+	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+	expect "partial marker $marker, $md: $want" \
+		'[[ $rc == 0 && $(jq -c -L "$root/lib" "include \"records\"; [.records[0] | .counts.open_blocking, .counts.critical, .counts.minor, has(\"findings\"), .findings_dropped] + [.decision.label, (.records | id_floor.F)]" <<<"$out") == "$want" ]]'
+done <<'T'
+{"findings":[{"id":"F1","severity":"critical","status":"new","file":"a.js","line":1}]}~crit_md~[1,1,0,false,true,"early",1]
+{"findings":[]}~crit_md~[1,1,0,false,true,"early",1]
+{"findings":[],"counts":{"critical":1,"important":0}}~plain_md~[1,1,0,false,true,"early",1]
+{"findings":[{"id":"F1","severity":"critical","status":"new","file":"a.js","line":1}],"counts":{"critical":0,"important":0}}~crit_md~[1,1,0,false,true,"early",1]
+{"findings":[],"counts":{"open_blocking":0,"critical":1,"important":0,"minor":0}}~crit_md~[1,1,0,false,true,"early",1]
+{"findings":[{"id":"F1","severity":"critical","status":"new","file":"a.go","line":7},{"id":"F2","severity":"important","status":"new"}],"counts":{"critical":1,"important":0}}~star_md~[1,1,0,false,true,"early",2]
+{"findings":[],"counts":{"critical":0,"important":0,"minor":1}}~minor_md~[0,0,1,false,true,"ready",1]
+{"findings":[{"id":"F1","severity":"critical","status":"new"}]}~none_md~[0,0,0,false,true,"ready",1]
+{"findings":[{"id":"F7","severity":"minor","status":"fixed"}],"last_ids":{"F":9,"L":2}}~none_md~[0,0,0,false,true,"ready",9]
+T
+expect "partial marker: its source is backfill, its other facts stay" \
+	'[[ $(jq -c ".records[0] | [.source, .approach, .ready, .last_ids.L]" <<<"$out") == "[\"backfill\",\"sound\",\"yes-with-fixes\",2]" ]]'
+# A marker valid but for a count (a string): read from its Markdown, and its last_ids still hold the floor.
+partial '{"counts":{"minor":"1"},"last_ids":{"F":7,"L":0}}' "$none_md"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "no counts: a plain bullet under Critical counts from the Markdown" \
-	'[[ $rc == 0 && $(jq -c "[.records[0].counts.critical, .decision.series, .decision.label]" <<<"$out") == "[1,[1],\"early\"]" ]]'
-jq -s '.[0].body |= sub("\"findings\":\\[\\]"; "\"findings\":[],\"counts\":{\"critical\":1,\"important\":0}")' \
-	<(nocounts '[]' "$plain_md") >"$stub/reviews.json"
+expect "malformed counts: the marker's last_ids still count, the next finding is F8" \
+	'[[ $rc == 0 && $(jq -c -L "$root/lib" "include \"records\"; [.records[0] | .source, .findings_dropped, .counts.open_blocking] + [(.records | id_floor.F)]" <<<"$out") == "[\"backfill\",true,0,7]" && $(next_id) == F8 ]]'
+# Two runs claim round 1 with a new F1 each; the second marker has partial counts and a list too short for them. Its
+# Markdown shows its finding: it takes the floor's next ID, F2, so round 3 numbers from F3.
+partial "$one" x
+jq --arg md "#### ⚠️ Important (Should Fix)${nl}- **\`b.js:2\` — other.**" '. + [{commit_id: "c2",
+	submitted_at: "2026-03-01T00:00:01Z", user: {login: "ann"}, body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round "
+	+ ({schema: 1, round: 1, code_review: true, findings: [], last_ids: {F: 1, L: 0}, counts: {critical: 0, important: 1}}
+	| tojson) + " -->\n" + $md)}]' "$stub/reviews.json" >"$stub/r.json"
+mv "$stub/r.json" "$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "no open_blocking but critical and important: their sum, not the Markdown; the list that can't account for it is dropped" \
-	'[[ $rc == 0 && $(jq -c ".records[0] | [.counts.critical, .counts.open_blocking, has(\"findings\"), .findings_dropped]" <<<"$out") == "[1,1,false,true]" &&
-		$(jq -r .decision.label <<<"$out") == early ]]'
-# Counts that contradict a Critical both the marker's findings and the Markdown show (critical 0, important 0): the
-# sum is not used, the findings are, and the round is not ready.
-a7_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- **\`a.go:7\` — boom.**${nl}${nl}### Assessment${nl}**Ready to merge?** Yes with fixes"
-jq -s '.[0].body |= sub("\"findings\":\\["; "\"counts\":{\"critical\":0,\"important\":0},\"findings\":[")' \
-	<(nocounts '[{"id":"F1","severity":"critical","status":"new","file":"a.go","line":7}]' "$a7_md") >"$stub/reviews.json"
-out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "no open_blocking, critical and important 0 next to a visible Critical: 1 blocker, not ready" \
-	'[[ $rc == 0 && $(jq -c "[.records[0].counts.open_blocking, .records[0].counts.critical, .decision.label]" <<<"$out") == "[1,1,\"early\"]" ]]'
-jq -s '.[0].body |= sub("\"findings\":\\[\\]"; "\"counts\":{\"critical\":0,\"important\":0},\"findings\":[]")' \
-	<(nocounts '[]' "$a7_md") >"$stub/reviews.json"
-out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "the same with no findings: the Markdown's 1 blocker, not ready" \
-	'[[ $rc == 0 && $(jq -c "[.records[0].counts.open_blocking, .records[0].findings_dropped, .decision.label]" <<<"$out") == "[1,true,\"early\"]" ]]'
-# An older marker (no last_ids) whose F1 is a Critical the Markdown says it has none of: its list is dropped, but F1
-# stays reserved: the next new finding is F2.
-jq -s . <(nocounts '[{"id":"F1","severity":"critical","status":"new"}]' \
-	"#### 🚨 Critical (Must Fix Before Merge)${nl}*(none found)*${nl}${nl}### Assessment${nl}**Ready to merge?** Yes") >"$stub/reviews.json"
-out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "a dropped list keeps its highest ID: the next new finding is F2" \
-	'[[ $rc == 0 && $(jq -c -L "$root/lib" "include \"records\"; [.records[0] | has(\"findings\"), .findings_dropped, .last_ids.F, .counts.open_blocking] + [.decision.label, (.records | id_floor.F + 1)]" <<<"$out") == "[false,true,1,0,\"ready\",2]" ]]'
-jq -s . <(nocounts '[]' "Looks fine.${nl}${nl}**Ready to merge?** Yes, with fixes") >"$stub/reviews.json"
-out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "no counts, no findings and no severity heading: blocking unknown, not ready" \
-	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking]" <<<"$out") == "[[null],\"unknown\",null]" ]]'
+expect "partial marker posted at once: its finding takes F2, round 3 numbers from F3" \
+	'[[ $rc == 0 && $(jq -c -L "$root/lib" "include \"records\"; [.records[1].counts.open_blocking, (.records | id_floor.F + 1)]" <<<"$out") == "[1,3]" ]]'
+# A heading-free review with "Yes with fixes" says nothing about its blockers: unknown, never 0, whatever its marker.
+while IFS='~' read -r shape m; do
+	b="<!-- gh-pr-review generated -->${nl}${m:+<!-- gh-pr-review:round $m -->$nl}Looks fine.${nl}${nl}**Ready to merge?** Yes with fixes"
+	jq -n --arg b "$b" '[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' \
+		>"$stub/reviews.json"
+	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+	expect "no severity heading, $shape: unknown, not 0" \
+		'[[ $rc == 0 && $(jq -c "[.decision.label, .records[0].counts.open_blocking]" <<<"$out") == "[\"unknown\",null]" ]]'
+done <<'T'
+a full marker missing its counts~{"schema":1,"round":1,"code_review":true,"ready":"yes-with-fixes","findings":[],"last_ids":{"F":0,"L":0}}
+the minimal marker~{"schema":1,"round":1,"findings_dropped":true,"last_ids":{"F":0,"L":0}}
+no marker~
+T
 out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
-expect "no counts: the table shows dashes and the unknown label" '[[ $rc == 0 && $(row 1) == *" – – – unknown –" ]]'
-minimal='{"schema":1,"round":1,"findings_dropped":true,"last_ids":{"F":0,"L":0}}'
-jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${minimal} -->${nl}Looks fine.${nl}${nl}**Ready to merge?** Yes" \
+expect "no severity heading: the table shows dashes and the unknown label" '[[ $rc == 0 && $(row 1) == *" – – – unknown backfill" ]]'
+# Bullets under an approach heading named "Important context", and a code review with no findings: 0 blockers,
+# with a marker missing open_blocking and with no marker.
+context_md=$(cat "$root/tests/fixtures/reviews/approach-context.md")
+partial '{"findings":[],"counts":{"critical":0,"important":0,"minor":0}}' "$context_md"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "approach bullets under Important context, marker without open_blocking: 0 blockers" \
+	'[[ $rc == 0 && $(jq -c "[.records[0].counts.open_blocking, .decision.label]" <<<"$out") == "[0,\"ready\"]" ]]'
+jq -n --arg b "<!-- gh-pr-review generated -->${nl}${context_md}" \
 	'[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "a minimal marker and no severity heading: blocking unknown, not ready, as without counts" \
-	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking, .records[0].findings_dropped]" <<<"$out") == "[[null],\"unknown\",null,true]" ]]'
+expect "approach bullets under Important context, no marker: 0 blockers" \
+	'[[ $rc == 0 && $(jq -c "[.records[0].source, .records[0].counts.open_blocking, .decision.label]" <<<"$out") == "[\"backfill\",0,\"ready\"]" ]]'
+minimal='{"schema":1,"round":1,"findings_dropped":true,"last_ids":{"F":0,"L":0}}'
 jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${minimal} -->${nl}### Approach${nl}**Approach:** Rethink" \
 	'[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
@@ -195,18 +216,19 @@ expect "a minimal Rethink marker keeps a counts object, all null, as any Rethink
 	'[[ $rc == 0 && $(jq -c "[.records[0] | .code_review, (.counts | type), .counts.open_blocking] + [.decision.labels[0]]" <<<"$out") == "[false,\"object\",null,\"rethink\"]" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
-# This PR's round 5, as posted (tests/fixtures/reviews/pr8-round5.md), after rounds 1–4 with 8, 6, 4 and 4 blockers.
+# This PR's round 5, as posted (tests/fixtures/reviews/pr8-round5.md), after rounds 1–4 with 8, 6, 4 and 4 blockers
+# and IDs up to F8, F14, F20 and F27.
 # pr8 <filter> changes its marker with a jq filter. Read back, its findings keep the statuses it stored: F21 and F22
 # stay fixed, never open, so the round keeps its 3 blockers, 5 fixed and its label, nit-loop.
 cp "$stub/reviews.json" "$stub/reviews.saved"
-pr8() { # jq filter on round 5's marker -> reviews.json: rounds 1–4, then round 5 with that marker
-	local marker
-	marker=$(sed -n 2p "$root/tests/fixtures/reviews/pr8-round5.md" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' |
-		jq -c "$1" | sed 's/--/-\\u002d/g')
-	jq -n --rawfile b "$root/tests/fixtures/reviews/pr8-round5.md" --arg m "<!-- gh-pr-review:round ${marker} -->" '
-		[[8, 0], [6, 1], [4, 0], [4, 0]] as $c
+pr8() { # jq filter on round 5's marker [posted body] -> reviews.json: rounds 1–4, then round 5 with that marker
+	local posted="${2:-$root/tests/fixtures/reviews/pr8-round5.md}" marker
+	marker=$(sed -n 2p "$posted" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' | jq -c "$1" | sed 's/--/-\\u002d/g')
+	jq -n --rawfile b "$posted" --arg m "<!-- gh-pr-review:round ${marker} -->" '
+		[[8, 0, 8], [6, 1, 14], [4, 0, 20], [4, 0, 27]] as $c
 		| [range(4) as $i | {schema: 1, round: ($i + 1), code_review: true, approach: "sound", ready: "no",
-			counts: {open_blocking: $c[$i][0], critical: $c[$i][1], important: ($c[$i][0] - $c[$i][1])}}
+			counts: {open_blocking: $c[$i][0], critical: $c[$i][1], important: ($c[$i][0] - $c[$i][1]), minor: 0},
+			last_ids: {F: $c[$i][2], L: 0}}
 			| {body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\nx"),
 				commit_id: "c\($i + 1)", submitted_at: "2026-11-2\($i + 1)T00:00:00Z", user: {login: "me"}}]
 		+ [{body: ($b | split("\n") | .[1] = $m | join("\n")), commit_id: "c5", submitted_at: "2026-11-27T11:57:47Z",
@@ -217,27 +239,93 @@ pr8 .
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "PR 8 round 5 as posted: 3 blockers, 5 fixed, nit-loop" \
 	'[[ $rc == 0 && $(round5) == "[3,5,\"fixed fixed\",\"nit-loop\"]" ]]'
-pr8 'del(.counts)'
-out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "PR 8 round 5 without counts: its fixed findings stay fixed, not open: 3 blockers, 5 fixed, nit-loop" \
-	'[[ $rc == 0 && $(round5) == "[3,5,\"fixed fixed\",\"nit-loop\"]" ]]'
-# The same round with its counts and lists damaged in other ways. Whatever is missing, the round read back never shows
-# fewer blockers than its Markdown (3 Important), never counts F21 or F22 (fixed) as open, and never lowers the ID
-# floor below round 5's F30, even with last_ids gone and the list dropped. Each line: the marker filter, "~", then
-# [open_blocking, fixed, the statuses of F21 and F22 when the list is kept, the label, the ID floor].
+# The same round with its counts damaged: read from its Markdown, with no findings list, so no fixed or open statuses
+# and fixed 0. It never shows fewer blockers than its Markdown (3 Important), never counts F21 or F22 (fixed) as
+# open (its folded Fixed list is no section), and keeps round 5's last_ids, F30, as its floor. With last_ids gone,
+# every finding the Markdown shows takes a new ID after round 4's F27: F32, more than needed, never fewer. Each line:
+# the marker filter, "~", then [open_blocking, fixed, the statuses of F21 and F22 when the list is kept, the label,
+# the ID floor].
 while IFS='~' read -r filter want; do
 	pr8 "$filter"
 	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 	expect "PR 8 round 5, $filter: $want" \
 		'[[ $rc == 0 && $(jq -c -L "$root/lib" "include \"records\"; [.records[4] | .counts.open_blocking, .counts.fixed, ([.findings[]? | select(.id == \"F21\" or .id == \"F22\") | .status] | join(\" \"))] + [.decision.labels[4], (.records | id_floor.F)]" <<<"$out") == "$want" ]]'
 done <<'T'
-del(.counts.open_blocking)~[3,5,"fixed fixed","nit-loop",30]
-.counts = {critical: 0, important: 0}~[3,5,"fixed fixed","nit-loop",30]
-.counts = {critical: 0, important: 2}~[3,5,"fixed fixed","nit-loop",30]
-del(.last_ids) | .counts = {critical: 0, important: 5}~[5,null,"","churning",30]
-del(.last_ids, .counts) | .findings |= map(if .id == "F28" then .status = "fixed" else . end)~[3,0,"","nit-loop",30]
+del(.counts)~[3,0,"","nit-loop",30]
+del(.counts.open_blocking)~[3,0,"","nit-loop",30]
+del(.counts.minor)~[3,0,"","nit-loop",30]
+.counts = {critical: 0, important: 0}~[3,0,"","nit-loop",30]
+.counts.open_blocking = 2~[3,0,"","nit-loop",30]
+del(.last_ids) | .counts = {critical: 0, important: 5}~[3,0,"","nit-loop",32]
+del(.last_ids, .counts) | .findings |= map(if .id == "F28" then .status = "fixed" else . end)~[3,0,"","nit-loop",32]
 T
-cp "$stub/reviews.saved" "$stub/reviews.json"
+# The same round under every marker shape marker_line emits, each the largest that fits as the review grows: full,
+# without titles, without locations, without the Later list, without findings, minimal. Each reads back with the full
+# marker's counts, ID floor (F30) and next decision, and the next round's first new finding is F31; the minimal
+# marker's counts come from the Markdown, and match. The last step drops last_ids too: the round's own floor is gone,
+# so the floor is the conservative one, higher than the writer's F30 and never lower: each of the 5 findings the
+# Markdown shows takes an ID after round 4's F27, F32, and the next finding is F33.
+sed -n 2p "$root/tests/fixtures/reviews/pr8-round5.md" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' |
+	jq '.findings[].title = "Round 5"' >"$stub/r5.json"
+sed 1,2d "$root/tests/fixtures/reviews/pr8-round5.md" >"$stub/review5.md"
+open_counts() { jq -c '.[0] |= {open_blocking, critical, important, minor}' <<<"$1"; }
+full=""
+while IFS='~' read -r shape filter; do
+	want=$(jq -cS "$filter" "$stub/r5.json")
+	# The review, padded so that header, marker and review are exactly 60,000 characters with this shape's marker.
+	jq -nj --rawfile r "$stub/review5.md" --argjson m "$(jq -c "$filter" "$stub/r5.json")" '
+		("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + ($m | tojson | gsub("--"; "-\\u002d")) + " -->\n") as $head
+		| $r + "\n" + ("x" * (60000 - ($head | length) - ($r | length) - 1))' >"$stub/body5.md"
+	line=$(LIB_DIR="$root/lib" bash -c 'source "$LIB_DIR/records.sh"; marker_line "$1" "$2"' _ "$stub/r5.json" "$stub/body5.md")
+	printf '<!-- gh-pr-review generated -->\n%s\n' "$line" | cat - "$stub/body5.md" >"$stub/posted5.md"
+	# The two minimal shapes, by name, for the overlap test below.
+	case "$shape" in minimal | "without last_ids") cp "$stub/posted5.md" "$stub/posted5.${shape// /-}.md" ;; esac
+	expect "marker shape $shape: marker_line emits it, at 60,000 characters" \
+		'[[ $(sed "s/^<!-- gh-pr-review:round //; s/ -->$//" <<<"$line" | jq -cS .) == "$want" &&
+			$(jq -Rs length "$stub/posted5.md") == 60000 ]]'
+	pr8 . "$stub/posted5.md"
+	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+	got=$(jq -c -L "$root/lib" 'include "records"; [.records[4].counts, (.records | id_floor), .decision]' <<<"$out")
+	if [[ $shape == full ]]; then
+		full="$got"
+		expect "marker shape full: 3 blockers, 5 fixed, ID floor F30, nit-loop" \
+			'[[ $rc == 0 && $(jq -c "[.[0].open_blocking, .[0].fixed, .[1].F, .[2].label]" <<<"$got") == "[3,5,30,\"nit-loop\"]" ]]'
+	elif [[ $shape == minimal ]]; then
+		expect "marker shape minimal: the Markdown's open counts match the full marker's, same ID floor and decision" \
+			'[[ $rc == 0 && $(open_counts "$got") == "$(open_counts "$full")" ]]'
+	elif [[ $shape == "without last_ids" ]]; then
+		expect "marker shape without last_ids: the full marker's open counts and label, the conservative ID floor F32" \
+			'[[ $rc == 0 && $(open_counts "$got" | jq -c ".[0]") == "$(open_counts "$full" | jq -c ".[0]")" &&
+				$(jq -c "[.[1].F, .[2].label]" <<<"$got") == "[32,\"nit-loop\"]" ]]'
+		expect "marker shape without last_ids: the next finding is F33, after the writer's F30" '[[ $(next_id) == F33 ]]'
+		continue
+	else
+		expect "marker shape $shape: the full marker's counts, ID floor and decision" '[[ $rc == 0 && $got == "$full" ]]'
+	fi
+	expect "marker shape $shape: the next finding is F31" '[[ $(next_id) == F31 ]]'
+done <<'T'
+full~.
+without titles~del(.findings[].title)
+without locations~del(.findings[] | .title, .file, .line, .first_round, .in_delta)
+without the Later list~del(.findings[] | .title, .file, .line, .first_round, .in_delta) | del(.later)
+without findings~del(.later, .findings) | .findings_dropped = true
+minimal~{schema: 1, round, findings_dropped: true, last_ids}
+without last_ids~{schema: 1, round, findings_dropped: true}
+T
+# Two runs both post round 5 with F28–F30: the second, posted later with a minimal marker (with last_ids, or without),
+# is round 6. Its marker's floor is not its own: each of its 5 bullets takes an ID after the first run's F30, so the
+# next finding is F36.
+for shape in minimal without-last_ids; do
+	pr8 .
+	jq --rawfile b "$stub/posted5.$shape.md" '. + [{body: $b, commit_id: "c5", submitted_at: "2026-11-27T12:30:00Z",
+		user: {login: "me"}}]' "$stub/reviews.json" >"$stub/r.json"
+	mv "$stub/r.json" "$stub/reviews.json"
+	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+	expect "round 5 posted twice, the second with the $shape marker: round 6 reserves F31–F35, the next finding is F36" \
+		'[[ $rc == 0 && $(jq -c "[.records[4].last_ids.F, .records[5].round, .records[5].last_ids.F]" <<<"$out") == "[30,6,35]" &&
+			$(next_id) == F36 ]]'
+	cp "$stub/reviews.saved" "$stub/reviews.json"
+done
 
 # Only trusted reviews are rounds. eve, a contributor, posts a generated review on the PR's head: not a round, so the
 # decision is not nothing-new, and the table says it was left out. My own review counts even as a contributor.
@@ -296,7 +384,7 @@ expect "fetch_round_records: a failing step fails the read, with no output" '[[ 
 # about 60,000 characters each.
 cp "$stub/reviews.json" "$stub/reviews.saved"
 jq -n '[range(1; 21) as $r | {schema: 1, round: $r, head_sha: "h\($r)", code_review: true,
-		counts: {open_blocking: 0}, findings: [range(500) | {id: "F\(.)", severity: "minor", title: ("t" * 100)}]}
+		counts: {open_blocking: 0, critical: 0, important: 0, minor: 500}, findings: [range(500) | {id: "F\(.)", severity: "minor", title: ("t" * 100)}]}
 	| {body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\nx"), commit_id: .head_sha,
 		submitted_at: "2026-04-\(if .round < 10 then "0" else "" end)\(.round)T00:00:00Z", user: {login: "me"}}]' \
 	>"$stub/reviews.json"

@@ -185,6 +185,9 @@ check "block_covers_markdown: a fixed entry at the location is stored as new: it
 
 # Ranges: a bullet at a.go:10–12 (en dash) or a.go:10-12 (hyphen) is covered by an entry in that file at any line of
 # the range, one entry per bullet.
+check "parse_findings: * and + items are findings too" \
+	"$(printf '#### 🚨 Critical\n* **`a.go:7` — x.**\n+ y\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map([.file, .title])')" \
+	'[["a.go","x."],[null,"y"]]'
 check "parse_findings: an en-dash range keeps its end" \
 	"$(printf '#### 🚨 Critical\n- **`a.go:10–12` — x.**\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | .[0] | [.line, .line_end]')" "[10,12]"
 check "parse_findings: a hyphen range keeps its end" \
@@ -219,26 +222,45 @@ check "empty_severities: - None., - *(none found)*, * None and 1. None. are empt
 	'["critical","important","minor"]'
 check "parse_findings: the same lines are no findings" \
 	"$(printf '#### 🚨 Critical\n- None.\n#### ⚠️ Important\n- *(none found)*\n1. None.\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings')" '[]'
+# Severity headings count only in the Issues section, and a folded <details> list is no section's.
+f=$(parse_findings "$fixtures/approach-context.md")
+check "parse_findings: bullets under an approach heading named Important context are no findings" "$f" '[]'
+check "empty_severities: so every severity of that review is empty" \
+	"$(jq -c -Rs -L "$LIB_DIR" 'include "records"; empty_severities' "$fixtures/approach-context.md")" '["critical","important","minor"]'
+check "parse_findings: the same heading in a body without an Issues heading still counts" \
+	"$(printf '#### Important context\n- a\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.severity)')" '["important"]'
+check "parse_findings: the Issues section ends at the next heading of its level" \
+	"$(printf '### Issues\n#### Minor\n- a\n### Notes\n#### Minor\n- b\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a"]'
+check "parse_findings: a <details> Fixed list under Minor is not counted" \
+	"$(printf '### Issues\n#### Minor\n- a\n\n<details><summary>Fixed (2)</summary>\n\n- b\n- c\n\n</details>\n\n- d\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a","d"]'
+check "parse_findings: a finding that mentions <details> inside its line is still one, and so is the next" \
+	"$(printf '### Issues\n#### Critical\n- `a.html:3` — the `<details>` element has no summary.\n- b\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.severity)')" '["critical","critical"]'
+check "empty_severities: a Minor section holding only a <details> list is empty" \
+	"$(empties $'### Issues\n#### Minor\n*(none found)*\n<details><summary>Later (1)</summary>\n\n- x\n</details>\n### End\n')" '["minor"]'
+# Only a line starting with <details or </details opens or closes a fold, outside fenced code (tracked in folds too).
+check "parse_findings: a fenced <details> example in a fold does not keep the fold open past its </details>" \
+	"$(printf '### Issues\n#### Minor\n<details><summary>Fixed (1)</summary>\n\n- x\n  ```html\n  <details>\n  ```\n</details>\n#### Critical\n- boom\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.severity + " " + .title)')" '["critical boom"]'
+check "parse_findings: a fixed item quoting </details> in code does not close the fold" \
+	"$(printf '### Issues\n#### Critical\n<details><summary>Fixed (2)</summary>\n\n- **F1** — closes with `</details>`.\n- **F2** — other.\n</details>\n- c\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["c"]'
+# A heading may start with up to 3 spaces (CommonMark), for the Issues section and its end alike.
+check "parse_findings: an indented Issues heading and an indented closing heading bound the section" \
+	"$(printf '#### Important context\n- ctx\n  ### Issues\n   #### Important\n- a\n ### Notes\n#### Minor\n- b\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a"]'
+check "parse_findings: 4 spaces are no heading" \
+	"$(printf '### Issues\n#### Minor\n- a\n    ### Notes\n- b\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a","b"]'
 respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
 check "block_respects_empty: fixed, declined and later Criticals are stored as new: open" \
 	"$(respects '[{"severity":"critical","status":"fixed"}]'),$(respects '[{"severity":"critical","status":"declined"}]'),$(respects '[{"severity":"critical","later":true}]')" \
 	false,false,false
 check "block_respects_empty: other severities are fine" "$(respects '[{"severity":"important"},{"severity":"minor"}]')" true
-# Reading a posted record keeps its stored statuses: a fixed or declined finding is not open (record_*). Writing from
-# the model's block stores every entry as new (block_*), so the same list is judged open there.
+# Writing from the model's block stores every entry as new (block_*), so fixed and declined entries are judged open.
 fixed_crit='[{"severity":"critical","status":"fixed","file":"a.go","line":10},{"severity":"critical","status":"declined"}]'
-check "record_findings: keeps each entry's status, new when it has none" \
-	"$(jq -c -n -L "$LIB_DIR" 'include "records"; [{severity: "Minor", status: "fixed"}, {severity: "minor"}] | record_findings | map(.status)')" \
-	'["fixed","new"]'
-check "record_counts: fixed and declined findings are not open" \
-	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_counts | [.open_blocking, .critical, .fixed, .declined, .new]')" \
-	'[0,0,1,1,0]'
-check "record_respects_empty: fixed and declined Criticals where the Markdown has none are fine" \
-	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_respects_empty(["critical"])')" true
-check "record_covers_markdown: a fixed Critical does not cover a visible one" \
-	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_covers_markdown([{severity: "critical", file: "a.go", line: 10}])')" false
-check "block_*: the same entries from the model's block are judged open" \
+check "block_*: fixed and declined entries from the model's block are judged open" \
 	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | [block_respects_empty(["critical"]), block_covers_markdown([{severity: "critical", file: "a.go", line: 10}])]')" \
 	'[false,true]'
 stored=$(build_record '{"round":1,"code_review":true}' '[{"severity":"critical","status":"fixed","later":true,"title":"x"}]' null)
@@ -280,11 +302,16 @@ check "marker_record: a quoted header is not a generated review" \
 check "marker_record: a marker that is not right below the header is not read" \
 	"$(marker_record "$(printf '<!-- gh-pr-review generated -->\nText.\n%s\n' "$line")")" ""
 for bad in '"x"' '{"schema":2,"round":1}' '{"schema":1}' '{"schema":1,"round":"1"}' \
-	'{"schema":1,"round":1,"counts":{"critical":"2"}}' '{"schema":1,"round":1,"findings":[{"line":"3"}]}' \
-	'{"schema":1,"round":1,"findings":"F1"}' '{"schema":1,"round":1,"head_sha":7}'; do
+	'{"schema":1,"round":1,"code_review":false,"counts":{"critical":"2"}}' \
+	'{"schema":1,"round":1,"findings":[{"line":"3"}]}' '{"schema":1,"round":1,"findings":"F1"}' \
+	'{"schema":1,"round":1,"head_sha":7}' '{"schema":1,"round":1,"counts":{"minor":"1"},"last_ids":{"F":"7"}}'; do
 	check "marker_record: invalid record $bad, nothing" \
 		"$(marker_record "$(printf '<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round %s -->\n' "$bad")")" ""
 done
+# A code-review marker valid but for its counts comes without them, so its IDs still count (fetch_round_records).
+check "marker_record: malformed counts are dropped, the rest kept" \
+	"$(marker_record $'<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round {"schema":1,"round":1,"counts":{"minor":"1"},"last_ids":{"F":7}} -->')" \
+	'{"schema":1,"round":1,"last_ids":{"F":7}}'
 check "is_generated_review: first line only" "$(jq -c -L "$LIB_DIR" 'include "records"; map(is_generated_review)' <<<'
 	["<!-- gh-pr-review generated -->\nx", "<!-- gh-pr-review generated -->\t\r", "x\n<!-- gh-pr-review generated -->",
 	 " <!-- gh-pr-review generated -->", "", null]')" "[true,true,false,false,false,false]"
@@ -387,6 +414,14 @@ check "marker cap: no room even for the minimal marker, no marker" "$(marker_lin
 check "marker cap: round.json keeps everything" "$(jq -c '[(.findings | length), (.later | length)]' "$tmp/big.json")" \
 	"[4,1]"
 
+# A marker is read as it is only with the full counts every marker_line step but the minimal one writes.
+check "complete_marker: a Rethink and full counts; not partial, inconsistent or minimal ones" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; map(complete_marker)' <<<'[{"code_review": false},
+		{"counts": {"open_blocking": 1, "critical": 0, "important": 1, "minor": 0}},
+		{"counts": {"critical": 0, "important": 1, "minor": 0}}, {"counts": {"open_blocking": 1, "critical": 0, "important": 1}},
+		{"counts": {"open_blocking": 2, "critical": 0, "important": 1, "minor": 0}}, {"schema": 1, "round": 2, "findings_dropped": true}]')" \
+	'[true,true,false,false,false,false]'
+
 # ── backfill_record ─────────────────────────────────────────────────────────
 pr='{"host":"github.com","owner":"o","repo":"r","number":7}'
 review() { # fixture [state] -> GitHub REST review JSON
@@ -415,6 +450,42 @@ rec=$(backfill_record "$(review numbered.md)" null 2 "$pr")
 check "backfill numbered: approach and ready" "$(jq -r '[.approach, .ready, .code_review] | join(" ")' <<<"$rec")" \
 	"questionable no true"
 check "backfill numbered: open_blocking" "$(jq .counts.open_blocking <<<"$rec")" 4
+
+rec=$(backfill_record "$(review approach-context.md)" null 1 "$pr")
+check "backfill: bullets under an approach heading named Important context are no blockers" \
+	"$(jq -c '[.code_review, .counts.open_blocking, .counts.minor, (.findings | length)]' <<<"$rec")" '[true,0,0,0]'
+
+rec=$(backfill_record "$(jq -n '{body: "Looks fine.\n\n**Ready to merge?** Yes with fixes", user: {login: "rev"}}')" null 1 "$pr")
+check "backfill: a code review with no severity section has unknown counts, not 0" \
+	"$(jq -c '[.code_review, .ready, ([.counts[]] | unique)]' <<<"$rec")" '[true,"yes-with-fixes",[null]]'
+
+# The code review of a posted body: the text after the boundary line the writer puts before it, without the footer.
+boundary='<!-- gh-pr-review:code-review -->'
+tool_footer=$'---\n*Review generated by gh pr-review · model: m*'
+ctx=$'### Approach\n\n#### Important context\n\nThe handler is new.\n\n**Approach:** Sound\n\n'"$boundary"$'\nLooks fine.\n\n**Ready to merge?** Yes\n\n'"$tool_footer"
+rec=$(backfill_record "$(jq -n --arg b "$ctx" '{body: $b, user: {login: "rev"}}')" null 1 "$pr")
+check "backfill: a severity-named heading in the approach is no section: unknown counts, as written" \
+	"$(jq -c '[.code_review, .approach, .ready, .counts.open_blocking]' <<<"$rec")" '[true,"sound","yes",null]'
+rec=$(backfill_record "$(jq -n --arg b "${ctx/"$boundary"$'\n'/}" '{body: $b, user: {login: "rev"}}')" null 1 "$pr")
+check "backfill: a body without the boundary is read whole: the approach heading is a section" \
+	"$(jq -c '[.code_review, .approach, .ready, .counts.open_blocking]' <<<"$rec")" '[true,"sound","yes",0]'
+cr() { jq -r -Rs -L "$LIB_DIR" 'include "records"; code_review_part' <<<"$1"; }
+check "code_review_part: the text after the boundary line, without the footer" "$(cr "$ctx")" \
+	$'Looks fine.\n\n**Ready to merge?** Yes'
+check "code_review_part: a verdict line is no boundary" \
+	"$(cr $'**Approach:** _Sound_\n#### Important context\n- a')" $'**Approach:** _Sound_\n#### Important context\n- a'
+check "code_review_part: no boundary: the whole text, without the footer" \
+	"$(cr $'a\n**Approach:** Sound\nb\n\n'"$tool_footer")" $'a\n**Approach:** Sound\nb'
+check "code_review_part: only the last footer is the tool's" \
+	"$(cr $'x\n---\n*Review generated by gh pr-review* is quoted\ny\n\n'"$tool_footer")" \
+	$'x\n---\n*Review generated by gh pr-review* is quoted\ny'
+quoted="$boundary"$'\n### Issues\n#### 🚨 Critical\n- **`a.js:1` — the verdict is read from a quote.**\n\n  > **Approach:** Sound\n\n#### ⚠️ Important\n*(none found)*\n#### 💡 Minor\n*(none found)*\n\n**Ready to merge?** No\n\n'"$tool_footer"
+rec=$(backfill_record "$(jq -n --arg b "$quoted" '{body: $b, user: {login: "rev"}}')" null 1 "$pr")
+check "backfill: a Critical quoting an approach verdict line is still read" \
+	"$(jq -c '[.approach, .counts.critical, .counts.open_blocking, .findings[0].file]' <<<"$rec")" '["sound",1,1,"a.js"]'
+check "empty_severities: a last section with only none found stays empty: the footer is not part of it" \
+	"$(jq -c -Rs -L "$LIB_DIR" 'include "records"; code_review_part | empty_severities' \
+		<<<"$boundary"$'\n### Issues\n#### 🚨 Critical\n*(none found)*\n\n'"$tool_footer")" '["critical"]'
 
 rec=$(backfill_record "$(review bullets.md)" null 1 "$pr")
 check "backfill bullets: ready" "$(jq -r .ready <<<"$rec")" yes-with-fixes
