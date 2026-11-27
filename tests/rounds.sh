@@ -182,6 +182,19 @@ expect "no counts, no findings and no severity heading: blocking unknown, not re
 	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking]" <<<"$out") == "[[null],\"unknown\",null]" ]]'
 out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
 expect "no counts: the table shows dashes and the unknown label" '[[ $rc == 0 && $(row 1) == *" – – – unknown –" ]]'
+# A heading-free review with "Yes with fixes" says nothing about its blockers: unknown, never 0, whatever its marker.
+while IFS='~' read -r shape m; do
+	b="<!-- gh-pr-review generated -->${nl}${m:+<!-- gh-pr-review:round $m -->$nl}Looks fine.${nl}${nl}**Ready to merge?** Yes with fixes"
+	jq -n --arg b "$b" '[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' \
+		>"$stub/reviews.json"
+	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+	expect "no severity heading, $shape: unknown, not 0" \
+		'[[ $rc == 0 && $(jq -c "[.decision.label, .records[0].counts.open_blocking]" <<<"$out") == "[\"unknown\",null]" ]]'
+done <<'T'
+a full marker missing its counts~{"schema":1,"round":1,"code_review":true,"ready":"yes-with-fixes","findings":[],"last_ids":{"F":0,"L":0}}
+the minimal marker~{"schema":1,"round":1,"findings_dropped":true,"last_ids":{"F":0,"L":0}}
+no marker~
+T
 # Bullets under an approach heading named "Important context", and a code review with no findings: 0 blockers,
 # with a marker missing open_blocking and with no marker.
 context_md=$(cat "$root/tests/fixtures/reviews/approach-context.md")

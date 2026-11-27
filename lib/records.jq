@@ -293,7 +293,9 @@ def build_record($meta; $findings; $prev):
 		end)
 	};
 
-# A record rebuilt from an old review (GitHub REST review object). The caller reads the verdict lines.
+# A record rebuilt from an old review (GitHub REST review object). The caller reads the verdict lines. A code review
+# whose Markdown has no severity section (_sections) does not say how many blockers it has: its counts are null, so
+# its blocking is unknown, never 0.
 def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review):
 	($review.body // "") as $body
 	| build_record({
@@ -310,7 +312,8 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 			| .[$review.state | strings] // null),
 		posted_at: $review.submitted_at,
 		code_review: $code_review
-	}; (if $code_review then $body | parse_findings else [] end); $prev);
+	}; (if $code_review then $body | parse_findings else [] end); $prev)
+	| if $code_review and ($body | _sections | length) == 0 then .counts |= map_values(null) else . end;
 
 # Counts from a review's Markdown, as a backfill counts them; null when it has no severity heading at all: then the
 # Markdown does not say how many blockers there are.

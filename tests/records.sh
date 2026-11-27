@@ -434,6 +434,10 @@ rec=$(backfill_record "$(review approach-context.md)" null 1 "$pr")
 check "backfill: bullets under an approach heading named Important context are no blockers" \
 	"$(jq -c '[.code_review, .counts.open_blocking, .counts.minor, (.findings | length)]' <<<"$rec")" '[true,0,0,0]'
 
+rec=$(backfill_record "$(jq -n '{body: "Looks fine.\n\n**Ready to merge?** Yes with fixes", user: {login: "rev"}}')" null 1 "$pr")
+check "backfill: a code review with no severity section has unknown counts, not 0" \
+	"$(jq -c '[.code_review, .ready, ([.counts[]] | unique)]' <<<"$rec")" '[true,"yes-with-fixes",[null]]'
+
 rec=$(backfill_record "$(review bullets.md)" null 1 "$pr")
 check "backfill bullets: ready" "$(jq -r .ready <<<"$rec")" yes-with-fixes
 
