@@ -28,7 +28,15 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 case "\$*" in
 *"--method POST"*pulls/1/reviews*)
 	[[ -f "$stub/post.fail" ]] && exit 1
-	while [[ \$# -gt 0 ]]; do [[ "\$1" == --input ]] && cp "\$2" "$stub/posted.json"; shift; done ;;
+	while [[ \$# -gt 0 ]]; do [[ "\$1" == --input ]] && cp "\$2" "$stub/posted.json"; shift; done
+	# post.lost: GitHub takes the review, and its answer is lost.
+	if [[ -f "$stub/post.lost" ]]; then
+		jq --slurpfile p "$stub/posted.json" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + [{id: 99,
+			user: {login: "me", type: "User"}, state: "COMMENTED", commit_id: \$p[0].commit_id, submitted_at: \$at,
+			body: \$p[0].body}]' "$stub/rest-reviews.json" >"$stub/rest-reviews.tmp"
+		mv "$stub/rest-reviews.tmp" "$stub/rest-reviews.json"
+		exit 1
+	fi ;;
 *pulls/1/reviews*)
 	# reviews.fail: how many reads of the reviews fail from now on.
 	n=\$(cat "$stub/reviews.fail" 2>/dev/null || echo 0)
@@ -41,6 +49,10 @@ case "\$*" in
 *graphql*) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}' ;;
 *"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; cat "$stub/discussion.json" ;;
 *"pr view"*)
+	# record.vanish: the preview round.json, once written, is emptied (the head check right before the post).
+	if [[ -f "$stub/record.vanish" ]]; then
+		for f in "$stub"/work/pr-review-sessions/pr-review-*/round.json; do [[ -f "\$f" ]] && : >"\$f"; done
+	fi
 	n=\$((\$(cat "$stub/heads.n" 2>/dev/null || echo 0) + 1))
 	echo "\$n" >"$stub/heads.n"
 	head=\$(sed -n "\${n}p" "$stub/heads")
@@ -91,6 +103,8 @@ if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] &
 	[[ -f "$stub/reviews.after" ]] && cp "$stub/reviews.after" "$stub/rest-reviews.json"
 	# GitHub failing the reads of the history from now on.
 	[[ -f "$stub/reviews.fail.after" ]] && cp "$stub/reviews.fail.after" "$stub/reviews.fail"
+	# The stub jq breaking from now on (bash keeps the path of a command it ran: the stub is there from the start).
+	[[ -f "$stub/jq.fail.after" ]] && touch "$stub/jq.fail"
 	printf '%s' "\${*: -1}" >"$stub/code-prompt.txt"; cat "$stub/review.out"; fi
 S
 	chmod +x "$stub/bin/"*
@@ -272,8 +286,9 @@ expect "records: the marker follows the generated marker" '[[ $body == "<!-- gh-
 expect "records: round.json has the model findings" '[[ $(jq -r ".source, .round, .findings[0].id, .findings[0].file, .preview, .decision" <<<"$record" | paste -sd, -) == "model,1,F1,a.js,false,comment" ]]'
 expect "records: posted.md is the posted body" '[[ -f $(ls -d "$stub"/work/pr-review-sessions/pr-review-*)/posted.md ]]'
 
+# The bullet has no location: a located one must match a block entry's location (block_covers_markdown).
 block=$'```json findings\n[{"severity":"important","file":"secret/plan.md","line":3,"title":"SECRET note from the instructions"}]\n```'
-setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** No\n\n'"$block"
+setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **Thing breaks.**\n\n**Ready to merge?** No\n\n'"$block"
 run
 expect "records: text only in the findings block is not posted" \
 	'[[ $rc == 0 && $body == *"gh-pr-review:round"* && $body != *SECRET* && $body != *secret/plan.md* ]]'
@@ -319,6 +334,12 @@ run
 expect "records: an empty block next to a Critical bullet falls back to the Markdown" \
 	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .counts.open_blocking, .findings[0].file" <<<"$record" | paste -sd, -) == "parsed,1,1,b.js" ]] &&
 		grep -q "does not match the review" "$stub/out.log"'
+
+block=$'```json findings\n[{"severity":"critical","file":"a.go","line":10,"title":"one"},{"severity":"critical","file":"a.go","line":10,"title":"two"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`a.go:10` — one.**\n- **`b.go:11` — two.**\n\n**Ready to merge?** No\n\n'"$block"
+run
+expect "records: a block repeating one blocker's location falls back to the Markdown" \
+	'[[ $rc == 0 && $(jq -c "[.source, [.findings[] | .file]]" <<<"$record") == "[\"parsed\",[\"a.go\",\"b.go\"]]" ]]'
 
 setup $'### Approach\n**Approach:** Rethink' 'never used'
 run
@@ -385,6 +406,17 @@ expect "posted record fails, default approve taken at the prompt: posts as comme
 		grep -q "posting as comment, not approve" "$stub/out.log" && grep -q "Enter = approve" "$stub/out.log"'
 run_tty "Post as review" a
 expect "posted record fails, approve typed at the prompt: stays an approval" '[[ $rc == 0 && $flag == --approve ]]'
+
+# A valid preview that is gone by the time the review is posted: no posted record, so no marker and no automatic
+# approval; an approval chosen at the prompt stays.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+touch "$stub/record.vanish"
+run
+expect "preview emptied before posting: a bare yes posts as comment, without a marker" \
+	'[[ $rc == 0 && $flag == --comment && $body == *"Ready to merge?"* && $body != *"gh-pr-review:round"* ]] &&
+		grep -q "could not write the posted round record" "$stub/out.log" && grep -q "posting as comment, not approve" "$stub/out.log"'
+run_tty "Post as review" a
+expect "preview emptied before posting, approve typed at the prompt: stays an approval" '[[ $rc == 0 && $flag == --approve ]]'
 
 # ── loop check
 rounds_with() { # blocking per earlier round... -> REST reviews whose markers carry those counts
@@ -512,6 +544,21 @@ expect "final history read fails twice: exit 1, nothing posted, the session kept
 echo 2 >"$stub/reviews.fail.after"
 run_tty "Post as review" ""
 expect "final history read fails twice, in a terminal: exit 1, nothing posted" '[[ $rc == 1 && -z $flag ]]'
+
+# The history is read again, but rebuilding a round from it fails (the reconciling jq): that is a failed read too.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+rounds_with 2 >"$stub/rest-reviews.json"
+cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+if [[ -f "$stub/jq.fail" ]]; then for a in "\$@"; do [[ "\$a" == *'reconcile_record('* ]] && exit 5; done; fi
+exec "$(command -v jq)" "\$@"
+S
+chmod +x "$stub/bin/jq"
+touch "$stub/jq.fail.after"
+run
+expect "final history read cannot rebuild a round: exit 1, nothing posted" \
+	'[[ $rc == 1 && -z $flag && $(jq -r .preview <<<"$record") == true ]] &&
+		grep -q "history could not be verified; nothing was posted" "$stub/out.log"'
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
@@ -760,6 +807,31 @@ expect "round trip: the history has each round on the commit it read" \
 	'[[ $(jq -c "[.records[] | [.round, .head_sha, .reviewer]]" "$stub/rounds.json") == \
 		"[[1,\"head1\",\"me\"],[2,\"head2\",\"me\"],[3,\"head3\",\"ann\"]]" ]]'
 
+# Two runs post round 1 at once, and the second one's marker was compacted (findings dropped, counts kept): read
+# back, its 40 new IDs come after the first run's F1, so round 3 numbers from F42.
+block=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** No\n\n'"$block"
+run
+expect "at once: the first run posts round 1 with F1" '[[ $rc == 0 && $(jq -c "[.round, .last_ids.F]" <<<"$record") == "[1,1]" ]]'
+first_body="$body" first_commit="$commit"
+many=$(jq -nc '[range(40) | {severity: "minor", file: null, line: null, title: "nit \(.)"}]')
+printf '%s' "$(head -c 58000 /dev/zero | tr '\0' x)"$'\n\n**Ready to merge?** Yes with fixes\n\n```json findings\n'"$many"$'\n```' \
+	>"$stub/review.out"
+run
+expect "at once: the second run also claims round 1, and its marker drops the findings but keeps the counts" \
+	'[[ $rc == 0 && $(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" |
+		jq -c "[.round, .findings_dropped, has(\"findings\"), .counts.new, .last_ids.F]") == "[1,true,false,40,40]" ]]'
+second_body="$body"
+body="$first_body" commit="$first_commit"
+landed 21 CHANGES_REQUESTED 2026-06-01T10:00:00Z
+body="$second_body"
+landed 22 COMMENTED 2026-06-01T10:00:00Z
+echo head2 >"$stub/heads"
+printf '%s' $'**Ready to merge?** No\n\n```json findings\n[{"severity":"minor","title":"one more"}]\n```' >"$stub/review.out"
+run
+expect "at once: round 3 numbers its new finding after both runs' IDs" \
+	'[[ $rc == 0 && $(jq -c "[.round, .findings[0].id, .last_ids.F]" <<<"$record") == "[3,\"F42\",42]" ]]'
+
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
@@ -780,11 +852,32 @@ jq -n --arg body "$body" --arg commit "$commit" '[{id: 1, user: {login: "me", ty
 echo head2 >"$stub/heads"
 run --check
 expect "head moved during the review: --check on the new head runs" '[[ $rc == 0 ]] && grep -q "Loop check for round 2: run" "$stub/out.log"'
+
+# A loop warning and a head that moved: the review's head (here the progress lines, which replace the loop line) stays
+# first, the note comes right after it.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+rounds_with 9 12 8 >"$stub/rest-reviews.json"
+printf 'head1\nhead2\n' >"$stub/heads"
+run
+expect "progress lines and moved head: the progress lines first, then the note" \
+	'[[ $rc == 0 && $flag == --comment && $(sed -n 3p <<<"$body") == "### Round 4 · since round 3" &&
+		$(sed -n 4p <<<"$body") == "open blocking: 0 (was 8)"* && -z $(sed -n 5p <<<"$body") &&
+		$(sed -n 6p <<<"$body") == "**Note:** The PR moved to head2 during the review; this review covers head1." &&
+		-z $(sed -n 7p <<<"$body") && $(sed -n 8p <<<"$body") == "**Approach:** Sound" ]]'
+
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 touch "$stub/post.fail"
 run
-expect "the review API refuses: exit 1, the session kept, the record still a preview" \
-	'[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] && grep -q "nothing was posted" "$stub/out.log"'
+expect "the review API fails and no review landed: exit 1, unconfirmed, the record still a preview" \
+	'[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] &&
+		grep -q "could not confirm whether the review was posted; run .gh pr-review rounds https://github.com/o/r/pull/1. before retrying" "$stub/out.log" &&
+		! grep -q "nothing was posted" "$stub/out.log"'
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+touch "$stub/post.lost"
+run
+expect "the review API fails but the review landed: posted, the record finished as posted" \
+	'[[ $rc == 0 && $flag == --approve && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "false,approve" ]] &&
+		grep -q "the review is on the PR: it was posted" "$stub/out.log" && grep -q "Posted →" "$stub/out.log"'
 
 # ── producer to consumer, three code-review rounds: each round reads the last one back as GitHub returns it
 H3=$(printf 'c3%.0s' {1..20})

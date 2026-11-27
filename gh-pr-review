@@ -370,6 +370,9 @@ echo "    ${PR_TITLE}"
 echo "    @${PR_AUTHOR}  ·  +${ADDITIONS} -${DELETIONS}  ·  ${N_FILES} files changed"
 echo ""
 
+# When this run started, in GitHub's UTC time format: a review this run posted was submitted after it.
+RUN_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
 # ── loop check ─────────────────────────────────────────────────────────────────────
 # Earlier gh-pr-review reviews (by anyone) are earlier rounds. Before any clone or model call, decide whether this
 # round should run: not when nothing changed, and not when the loop has stopped converging (see `gh pr-review rounds`).
@@ -1232,6 +1235,7 @@ assemble_body() {
 			[[ -z "$suggestion" ]] || head_lines+=$'\n'"**Next:** ${suggestion}"
 		fi
 	fi
+	REVIEW_HEAD=$head_lines
 	REVIEW=$(assemble_review "$head_lines" "$APPROACH" "$CODE_REVIEW")
 }
 assemble_body
@@ -1269,6 +1273,20 @@ pr_head_now() {
 		[[ "$try" == 2 ]] || sleep 1
 	done
 	return 1
+}
+
+# After the post request failed: true when the review is on the PR all the same (the request reached GitHub, the
+# answer did not come back). That is a generated review by this user, on the reviewed commit, submitted since the run
+# started. One read; anything in doubt (no login, a failed read) is false.
+review_landed() {
+	local json
+	[[ -n "${ME:-}" ]] || return 1
+	json=$(gh api --hostname "$GH_HOST_NAME" --paginate "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" 2>/dev/null) ||
+		return 1
+	jq -se -L "$LIB_DIR" --arg me "$ME" --arg commit "$HEAD_SHA" --arg since "${RUN_STARTED:-}" '
+		include "records";
+		any(add // [] | .[]; (.body | is_generated_review) and .state != "PENDING" and .user.login == $me
+			and .commit_id == $commit and (.submitted_at // "") >= $since)' <<<"$json" >/dev/null 2>&1
 }
 
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
@@ -1344,32 +1362,44 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	elif [[ "$NOW_HEAD" != "$HEAD_SHA" ]]; then
 		HEAD_NOTE="The PR moved to ${NOW_HEAD:0:7} during the review; this review covers ${HEAD_SHA:0:7}."
 		echo "$HEAD_NOTE"
-		REVIEW=$(printf '**Note:** %s\n\n%s' "$HEAD_NOTE" "$REVIEW")
+		# Right after the review's head (the progress lines, or the loop line) when there is one: it stays first.
+		if [[ -n "${REVIEW_HEAD:-}" && "$REVIEW" == "$REVIEW_HEAD"$'\n\n'* ]]; then
+			REVIEW=$(printf '%s\n\n**Note:** %s\n\n%s' "$REVIEW_HEAD" "$HEAD_NOTE" "${REVIEW:${#REVIEW_HEAD}+2}")
+		else
+			REVIEW=$(printf '**Note:** %s\n\n%s' "$HEAD_NOTE" "$REVIEW")
+		fi
 	fi
 	if [[ -n "$HEAD_NOTE" && "$DECISION" == approve ]]; then
 		DECISION=comment
 		echo "Posting as comment, not approve: an approval must cover the PR's head."
 	fi
 
-	# The final record: round.json as posted.
-	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}" ]] &&
-		! jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-			'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted"; then
-		echo "Warning: could not write the posted round record; the review is posted without it." >&2
-		rm -f "$RECORD_FILE.posted"
-		RECORD_FILE=""
+	# The final record: round.json as posted, built and checked here. Only a record that passes is posted: a preview
+	# that went missing, empty or invalid since it was written is no record.
+	POSTED_RECORD=""
+	if [[ -n "${RECORD_FILE:-}" ]]; then
+		if [[ -s "$RECORD_FILE" ]] &&
+			jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+				'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted" 2>/dev/null &&
+			jq -e 'type == "object" and (.round | type == "number") and (.counts | type == "object")' \
+				"$RECORD_FILE.posted" >/dev/null 2>&1; then
+			POSTED_RECORD="$RECORD_FILE.posted"
+		else
+			echo "Warning: could not write the posted round record; the review is posted without it." >&2
+			rm -f "$RECORD_FILE.posted"
+		fi
 	fi
-	# Right before posting: without a record, an automatic approve (the verdict's, or its default taken at the prompt)
-	# posts as comment. An approve someone chose stays.
-	if [[ "$DECISION" == approve && "$AUTO_DECISION" == true && -z "${RECORD_FILE:-}" ]]; then
+	# Right before posting: without a posted record, an automatic approve (the verdict's, or its default taken at the
+	# prompt) posts as comment. An approve someone chose stays.
+	if [[ "$DECISION" == approve && "$AUTO_DECISION" == true && -z "$POSTED_RECORD" ]]; then
 		DECISION=comment
 		echo "No round record for this review: posting as comment, not approve."
 	fi
 
 	MARKER=""
-	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}.posted" ]]; then
+	if [[ -n "$POSTED_RECORD" ]]; then
 		# The marker is sized for the exact body below: header, newline, marker, newline, review.
-		if ! MARKER=$(marker_line "$RECORD_FILE.posted" "$REVIEW"); then
+		if ! MARKER=$(marker_line "$POSTED_RECORD" "$REVIEW"); then
 			MARKER=""
 			echo "Warning: could not write the round marker; posting the review without it." >&2
 		elif [[ -z "$MARKER" ]]; then
@@ -1390,11 +1420,18 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		'{commit_id: $commit, event: $event, body: .}' >"${SESSION_DIR}/post.json"
 	if ! gh api --hostname "$GH_HOST_NAME" --method POST "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" \
 		--input "${SESSION_DIR}/post.json" >/dev/null; then
-		echo "Error: GitHub did not take the review; nothing was posted. Session: ${SESSION_DIR}" >&2
-		exit 1
+		# An error does not always mean nothing was posted: the answer can be lost after GitHub took the review.
+		if review_landed; then
+			echo "Warning: GitHub answered with an error, but the review is on the PR: it was posted." >&2
+		else
+			echo "Error: could not confirm whether the review was posted; run" \
+				"\`gh pr-review rounds https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}\` before retrying." >&2
+			echo "    Session: ${SESSION_DIR}" >&2
+			exit 1
+		fi
 	fi
-	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}.posted" ]]; then
-		mv "$RECORD_FILE.posted" "$RECORD_FILE"
+	if [[ -n "$POSTED_RECORD" ]]; then
+		mv "$POSTED_RECORD" "$RECORD_FILE"
 	fi
 	printf '%s\n' "$COMMENT" >"${SESSION_DIR}/posted.md"
 	echo "✓  Posted → https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}"

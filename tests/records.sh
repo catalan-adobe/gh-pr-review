@@ -393,6 +393,21 @@ check "block_covers_markdown: open, regressed and status-less entries are" \
 		'[{"severity":"critical"},{"severity":"important"},{"severity":"important"}]')" true
 check "block_covers_markdown: minor findings in the Markdown need no cover" \
 	"$(covers '[]' '[{"severity":"minor","title":"t"}]')" true
+two='[{"severity":"critical","file":"a.go","line":10},{"severity":"critical","file":"b.go","line":11}]'
+check "block_covers_markdown: one location repeated does not cover another blocker's" \
+	"$(covers '[{"severity":"critical","file":"a.go","line":10},{"severity":"critical","file":"a.go","line":10}]' "$two")" false
+check "block_covers_markdown: each location once covers them" \
+	"$(covers '[{"severity":"critical","file":"b.go","line":11},{"severity":"important","file":"a.go","line":10},
+		{"severity":"critical","title":"no location"}]' "$two")" true
+check "block_covers_markdown: two bullets at one location need two entries there" \
+	"$(covers '[{"severity":"critical","file":"a.go","line":10},{"severity":"critical","file":"c.go","line":1}]' \
+		'[{"severity":"critical","file":"a.go","line":10},{"severity":"critical","file":"a.go","line":10}]')" false
+check "block_covers_markdown: entries and bullets without a location take no part" \
+	"$(covers '[{"severity":"critical","title":"x"},{"severity":"critical","file":"z.go"}]' \
+		'[{"severity":"critical","file":"a.go","line":null},{"severity":"critical","file":null,"line":null}]')" true
+check "block_covers_markdown: a fixed entry at the location does not cover it" \
+	"$(covers '[{"severity":"critical","file":"a.go","line":10,"status":"fixed"},{"severity":"critical"}]' \
+		'[{"severity":"critical","file":"a.go","line":10}]')" false
 
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \
@@ -464,6 +479,16 @@ check "marker: key.go inside apikey.go is not a shown path; an underscore title 
 	"$(marker_record "$(generated "$line")" | jq -c '.findings[1] | [has("file"), .title]')" '[false,"Rename snake_case fields"]'
 check "marker: a whole path and a title behind Markdown marks are published as shown" \
 	"$(marker_record "$(generated "$line")" | jq -c '.findings[2] | [.file, .title]')" '["pkg/apikey.go","Uses api_key in logs"]'
+
+# A code span holds one whole path, spaces and all: `src/new file.go:1` shows "src/new file.go", not "file.go".
+jq -n '{schema: 1, round: 1, counts: {}, findings: [{id: "F1", file: "src/new file.go", line: 1},
+	{id: "F2", file: "file.go", line: 1}, {id: "F3", file: "new", line: 2}]}' >"$tmp/spaces.json"
+line=$(marker_line "$tmp/spaces.json" $'- **`src/new file.go:1` — Breaks.**')
+check "marker: a path with a space, as the whole code span, is published" \
+	"$(marker_record "$(generated "$line")" | jq -c '[.findings[] | .file]')" '["src/new file.go",null,null]'
+line=$(marker_line "$tmp/spaces.json" $'- **`file.go:1` — Breaks.**')
+check "marker: and the other way round, a span with file.go does not publish src/new file.go" \
+	"$(marker_record "$(generated "$line")" | jq -c '[.findings[] | .file]')" '[null,"file.go",null]'
 
 # The size cap, step by step, on the exact assembled body: header, newline, marker, newline, review.
 jq '.later = [{id: "L1", severity: "minor", file: "src/render.ts", line: 7, title: "Comment says"}]' "$tmp/round.json" \

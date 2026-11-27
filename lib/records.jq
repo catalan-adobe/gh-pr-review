@@ -112,14 +112,23 @@ def findings_block_ok($ids):
 # the posted body): as many open Critical findings, and as many open Critical and Important ones together. An entry
 # with status fixed or declined, or with later: true, is not open; status and later may be absent. A block that
 # leaves out or downgrades a visible blocker ([] next to a Critical bullet) fails, and the round is parsed instead.
+# The locations must match too, one to one: every Critical or Important bullet with a file:line needs its own open
+# blocking entry at that file:line (two bullets at a.go:10 need two entries there). An entry repeated at one bullet's
+# location does not cover another bullet's. Entries and bullets without a file and line take no part in this.
 def block_covers_markdown($parsed):
-	def open($sev): [.[] | objects | select(.later != true)
-		| select((.status // "new") | . != "fixed" and . != "declined")
-		| select((.severity | strings | ascii_downcase) == $sev)] | length;
+	def blocking: (.severity | strings | ascii_downcase) as $s | $s == "critical" or $s == "important";
+	def location: if (.file | type == "string" and . != "") and (.line | type == "number")
+		then "\(.file):\(.line | floor)" else empty end;
+	def open_entries: [.[] | objects | select(.later != true)
+		| select((.status // "new") | . != "fixed" and . != "declined")];
+	def open($sev): [open_entries[] | select((.severity | strings | ascii_downcase) == $sev)] | length;
 	def shown($sev): [($parsed // [])[]? | objects | select(.severity == $sev)] | length;
 	(if type == "array" then . else [] end)
+	| [open_entries[] | select(blocking) | location] as $have
+	| [($parsed // [])[]? | objects | select(blocking) | location] as $seen
 	| open("critical") >= shown("critical")
-		and open("critical") + open("important") >= shown("critical") + shown("important");
+		and open("critical") + open("important") >= shown("critical") + shown("important")
+		and all($seen | group_by(.)[]; .[0] as $at | ($have | map(select(. == $at)) | length) >= length);
 
 # Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
 def normalize_findings:
@@ -234,11 +243,19 @@ def id_floor: map(objects) | {F: (map(_last_number("F")) | max // 0), L: (map(_l
 # same new IDs. When the claimed round is not the position, or a new finding's ID is not above the ID floor of the
 # earlier rounds, its new findings (status new, or none) are numbered after that floor, with first_round set to the
 # position, and last_ids follows. Other findings, and a record that agrees with its position, are left as they are.
+# A compacted record (no findings list, or findings_dropped) still says how many new findings it gave out
+# (counts.new): those took the IDs up to its last_ids.F. When it claims a round that is not its position, or those
+# IDs reach down to the floor, they are the floor's next ones instead: last_ids.F is at least floor + counts.new.
 def reconcile_record($earlier; $position):
 	($earlier | id_floor) as $floor
 	| def is_new: type == "object" and ((.status // "new") == "new");
 	def number: .id | strings | capture("^F(?<n>\\d+)$").n | tonumber;
-	if .round != $position or any((.findings // [])[]? | select(is_new); (number // 0) <= $floor.F) then
+	(.counts.new? | if type == "number" then floor else 0 end) as $new
+	| if ((.findings | type) != "array" or .findings_dropped == true) and $new > 0 then
+		if .round != $position or _last_number("F") - $new < $floor.F then
+			.last_ids = {F: ([_last_number("F"), $floor.F + $new] | max), L: ([_last_number("L"), $floor.L] | max)}
+		else . end
+	elif .round != $position or any((.findings // [])[]? | select(is_new); (number // 0) <= $floor.F) then
 		(reduce range(0; (.findings // []) | length) as $i ({rec: ., n: $floor.F};
 			if (.rec.findings[$i] | is_new) then .n += 1 | .rec.findings[$i] += {id: "F\(.n)", first_round: $position}
 			else . end)) as $r
@@ -391,18 +408,21 @@ def _re_literal: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}/-])"; "\\\(.c)");
 
 # The marker line for a record, posted right below the generated header and above $body, the exact review text.
 # One HTML comment: every "--" in the JSON is written "-\u002d". The marker never publishes text the review does not
-# show. A file stays only when $body shows that exact path, as a whole path (in backticks, before ":line", or
-# between spaces or brackets). A title stays when $body holds it as it is; else when the review's visible text holds
-# it after only the * and ` marks are removed and whitespace is collapsed, and then the marker gets that visible
-# form. A title cut to 100 characters may match part of a line. Otherwise the field is left out.
+# show. A file stays only when $body shows that exact path, as a whole path: the whole content of a code span, less
+# a ":line" suffix (`src/new file.go:1` shows "src/new file.go", not "file.go"), or, outside code spans, between
+# spaces, brackets or quotes, or before ":line". A title stays when $body holds it as it is; else when the review's
+# visible text holds it after only the * and ` marks are removed and whitespace is collapsed, and then the marker gets
+# that visible form. A title cut to 100 characters may match part of a line. Otherwise the field is left out.
 # The whole body (header, newline, marker, newline, review) must fit in 60,000 characters, under GitHub's 65,536: it
 # drops titles, then file, line, first_round and in_delta, then later, then findings (findings_dropped: true; counts
 # and last_ids stay). When even that does not fit: a minimal marker, {schema, round, findings_dropped: true} and
 # last_ids if it fits, so a later round knows the baseline is missing. Nothing when even that does not fit.
 def marker_line($body):
 	($body | _visible) as $seen
-	| def file_shown: type == "string" and . != "" and (_re_literal as $f
-		| $body | test("(^|[\\s`\\[(*\"'])" + $f + "(?=$|[\\s`\\])*:,;\"']|\\.(\\s|$))"));
+	| ($body | [scan("`([^`\n]+)`") | .[0] | sub(":\\d+.*$"; "") | _trim]) as $spans
+	| ($body | gsub("`[^`\n]+`"; "\u0001")) as $prose
+	| def file_shown: type == "string" and . != "" and (. as $path | any($spans[]; . == $path)
+		or (_re_literal as $f | $prose | test("(^|[\\s`\\[(*\"'])" + $f + "(?=$|[\\s`\\])*:,;\"']|\\.(\\s|$))")));
 	def title_shown: if type != "string" or (_trim == "") then null
 		elif (. as $t | $body | contains($t)) then .
 		else _visible as $t | if $t != "" and ($seen | contains($t)) then $t else null end end;
