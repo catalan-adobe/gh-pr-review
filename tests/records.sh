@@ -239,20 +239,9 @@ check "block_respects_empty: fixed, declined and later Criticals are stored as n
 	"$(respects '[{"severity":"critical","status":"fixed"}]'),$(respects '[{"severity":"critical","status":"declined"}]'),$(respects '[{"severity":"critical","later":true}]')" \
 	false,false,false
 check "block_respects_empty: other severities are fine" "$(respects '[{"severity":"important"},{"severity":"minor"}]')" true
-# Reading a posted record keeps its stored statuses: a fixed or declined finding is not open (record_*). Writing from
-# the model's block stores every entry as new (block_*), so the same list is judged open there.
+# Writing from the model's block stores every entry as new (block_*), so fixed and declined entries are judged open.
 fixed_crit='[{"severity":"critical","status":"fixed","file":"a.go","line":10},{"severity":"critical","status":"declined"}]'
-check "record_findings: keeps each entry's status, new when it has none" \
-	"$(jq -c -n -L "$LIB_DIR" 'include "records"; [{severity: "Minor", status: "fixed"}, {severity: "minor"}] | record_findings | map(.status)')" \
-	'["fixed","new"]'
-check "record_counts: fixed and declined findings are not open" \
-	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_counts | [.open_blocking, .critical, .fixed, .declined, .new]')" \
-	'[0,0,1,1,0]'
-check "record_respects_empty: fixed and declined Criticals where the Markdown has none are fine" \
-	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_respects_empty(["critical"])')" true
-check "record_covers_markdown: a fixed Critical does not cover a visible one" \
-	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_covers_markdown([{severity: "critical", file: "a.go", line: 10}])')" false
-check "block_*: the same entries from the model's block are judged open" \
+check "block_*: fixed and declined entries from the model's block are judged open" \
 	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | [block_respects_empty(["critical"]), block_covers_markdown([{severity: "critical", file: "a.go", line: 10}])]')" \
 	'[false,true]'
 stored=$(build_record '{"round":1,"code_review":true}' '[{"severity":"critical","status":"fixed","later":true,"title":"x"}]' null)
@@ -400,6 +389,14 @@ pad_to $(($(fill "$line") + 1))
 check "marker cap: no room even for the minimal marker, no marker" "$(marker_line "$tmp/big.json" "$tmp/body.md")" ""
 check "marker cap: round.json keeps everything" "$(jq -c '[(.findings | length), (.later | length)]' "$tmp/big.json")" \
 	"[4,1]"
+
+# A marker is read as it is only with the full counts every marker_line step but the minimal one writes.
+check "complete_marker: a Rethink and full counts; not partial, inconsistent or minimal ones" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; map(complete_marker)' <<<'[{"code_review": false},
+		{"counts": {"open_blocking": 1, "critical": 0, "important": 1, "minor": 0}},
+		{"counts": {"critical": 0, "important": 1, "minor": 0}}, {"counts": {"open_blocking": 1, "critical": 0, "important": 1}},
+		{"counts": {"open_blocking": 2, "critical": 0, "important": 1, "minor": 0}}, {"schema": 1, "round": 2, "findings_dropped": true}]')" \
+	'[true,true,false,false,false,false]'
 
 # ── backfill_record ─────────────────────────────────────────────────────────
 pr='{"host":"github.com","owner":"o","repo":"r","number":7}'

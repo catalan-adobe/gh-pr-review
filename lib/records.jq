@@ -111,13 +111,9 @@ def normalize_findings:
 			| select(.severity == "critical" or .severity == "important" or .severity == "minor"))
 	else [] end;
 
-# Findings lists come from two places, and each has its own helpers, so neither can leak into the other:
-# - writing a record from the model's findings block (model input): stored_findings, block_covers_markdown,
-#   block_respects_empty. This version has no statuses across rounds: every entry is stored as new.
-# - reading a posted record back from GitHub (posted-record recovery): record_findings, record_covers_markdown,
-#   record_respects_empty, record_counts. The record's findings keep the statuses it stored: a fixed or declined
-#   finding is never counted as open.
-# Both sides judge a list of entries with a status through the same checks (_respects_empty, _covers_markdown, _counts).
+# The checks below judge the model's findings block (stored_findings) before a record is written from it:
+# block_respects_empty and block_covers_markdown. A record posted on GitHub is never judged by its list: it is read
+# as it is when its marker is complete (complete_marker), and from its review's Markdown otherwise.
 
 # True for an entry that is still open: not fixed or declined.
 def _open: .status | . != "fixed" and . != "declined";
@@ -158,15 +154,6 @@ def _covers_markdown($parsed):
 		and open("critical") + open("important") >= shown("critical") + shown("important")
 		and ($seen | matched($have));
 
-# Counts of the list ({severity, status}): the open entries per severity, and the entries per status.
-def _counts:
-	. as $all
-	| [$all[] | select(_open)] as $open
-	| def sev($s): [$open[] | select(.severity == $s)] | length;
-	def st($s): [$all[] | select(.status == $s)] | length;
-	{open_blocking: (sev("critical") + sev("important")), critical: sev("critical"), important: sev("important"),
-		minor: sev("minor"), new: st("new"), fixed: st("fixed"), declined: st("declined"), regressed: st("regressed")};
-
 # ── Writing: the model's findings block ──
 
 # The status a findings entry from the model is stored with. This version has no statuses across rounds: every entry
@@ -203,17 +190,14 @@ def block_covers_markdown($parsed): stored_findings | _covers_markdown($parsed);
 
 # ── Reading: a record posted on GitHub ──
 
-# A posted record's findings list as it stored it: normalized, each entry with its own status (none: new). Never
-# stored_status: reading a record does not reopen what it marked fixed or declined.
-def record_findings:
-	if type == "array" then [.[] | objects | ((.status | strings) // "new") as $status
-		| ([.] | normalize_findings)[] + {status: $status}]
-	else [] end;
-
-# The checks and counts of a posted record's findings list, with their stored statuses (record_findings).
-def record_respects_empty($empty): record_findings | _respects_empty($empty);
-def record_covers_markdown($parsed): record_findings | _covers_markdown($parsed);
-def record_counts: record_findings | _counts;
+# True for a marker read as it is: a Rethink, or a code-review marker with the counts marker_line writes at every
+# compaction step but the minimal one: numbers for open_blocking, critical, important and minor, and open_blocking
+# the sum of critical and important. Any other marker (minimal, or with partial counts) is read from its review's
+# Markdown, like a review without a marker (fetch_round_records in lib/rounds.sh).
+def complete_marker:
+	.code_review == false
+	or (.counts | type == "object" and all(.open_blocking, .critical, .important, .minor; type == "number")
+		and .open_blocking == .critical + .important);
 
 # The highest "<prefix><n>" ID in a record's findings, its later list and its last_ids, or 0. last_ids keeps the
 # highest numbers even when the lists are empty (a Rethink) or cut from the marker, so an ID is never given twice.
@@ -314,57 +298,6 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 		code_review: $code_review
 	}; (if $code_review then $body | parse_findings else [] end); $prev)
 	| if $code_review and ($body | _sections | length) == 0 then .counts |= map_values(null) else . end;
-
-# Counts from a review's Markdown, as a backfill counts them; null when it has no severity heading at all: then the
-# Markdown does not say how many blockers there are.
-def markdown_counts:
-	if (_sections | length) == 0 then null
-	else parse_findings
-		| def sev($s): map(select(.severity == $s)) | length;
-		{open_blocking: (sev("critical") + sev("important")), critical: sev("critical"), important: sev("important"),
-			minor: sev("minor"), new: length, fixed: 0, declined: 0, regressed: 0}
-	end;
-
-# A record read back without its findings list, which can't be trusted: findings_dropped: true says "no reliable
-# list", not "no findings". The highest IDs the list held stay in last_ids first (with any it had), so the ID floor
-# never goes down: reserving an ID does not need trusting the finding.
-def _drop_findings:
-	.last_ids = {F: _last_number("F"), L: _last_number("L")} | del(.findings) | .findings_dropped = true;
-
-# A marker record of a code-review round (not a Rethink) without a numeric counts.open_blocking, read with its
-# review's Markdown ($body). Its findings keep the statuses it stored (record_counts): a fixed finding is never open.
-# - When its counts still give critical and important, and each is at least the Markdown's count of that severity
-#   (markdown_counts) and at least the record's own open findings of it, open_blocking is their sum. A findings list
-#   whose open Critical and Important findings are not exactly those counts can't account for them: it is dropped.
-# - Otherwise the counts come from its findings, when it has some and they show every blocker the Markdown does
-#   (record_covers_markdown, record_respects_empty).
-# - Else from the Markdown, and the findings list, which did not pass that check, is dropped. When the Markdown has
-#   no severity heading either, every count is null: the round's blocking is unknown, never 0, and the loop never
-#   calls it ready.
-# A dropped list keeps its IDs reserved (_drop_findings). Other records are left as they are.
-def with_counts($body):
-	if .code_review != false and (.counts.open_blocking? | type) != "number" then
-		($body | markdown_counts) as $shown
-		| (if (.findings | type) == "array" and .findings_dropped != true then .findings | record_counts
-			else null end) as $own
-		| def num: if type == "number" then . else null end;
-		def agrees($n; $s): $n != null and $n >= (($shown // {})[$s] // 0) and $n >= (($own // {})[$s] // 0);
-		(.counts.critical? | num) as $critical
-		| (.counts.important? | num) as $important
-		| if agrees($critical; "critical") and agrees($important; "important") then
-			.counts.open_blocking = ($critical + $important)
-			| if $own != null and ($own.critical != $critical or $own.important != $important) then _drop_findings
-			else . end
-		elif $own != null and (.findings | length > 0)
-			and (.findings | record_covers_markdown($body | parse_findings)
-				and record_respects_empty($body | empty_severities)) then
-			.counts = $own
-		else
-			.counts = ($shown // {open_blocking: null, critical: null, important: null, minor: null,
-				new: null, fixed: null, declined: null, regressed: null})
-			| _drop_findings
-		end
-	else . end;
 
 # The first line of every body gh-pr-review posts.
 def generated_header: "<!-- gh-pr-review generated -->";

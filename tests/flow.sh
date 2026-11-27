@@ -328,7 +328,7 @@ expect "records: earlier generated reviews count as rounds" '[[ $(jq -r ".round"
 expect "records: finding IDs continue from the previous record" '[[ $(jq -r ".findings[0].id, .previous_head_sha" <<<"$record" | paste -sd, -) == "F4,old" ]]'
 
 # F7 two rounds back; the last marker was compacted (no findings) by an older version (no last_ids).
-compacted='{"schema":1,"round":2,"head_sha":"old","findings_dropped":true,"counts":{"open_blocking":0}}'
+compacted='{"schema":1,"round":2,"head_sha":"old","findings_dropped":true,"counts":{"open_blocking":0,"critical":0,"important":0,"minor":0}}'
 jq -n --arg r1 '<!-- gh-pr-review:round {"schema":1,"round":1,"findings":[{"id":"F7","severity":"minor"}]} -->' \
 	--arg r2 "<!-- gh-pr-review:round $compacted -->" '[
 	{user: {login: "x"}, commit_id: "c1", submitted_at: "2026-01-01T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n" + $r1)},
@@ -751,7 +751,8 @@ expect "compaction: the minimal marker reads back as unknown, not ready" \
 	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
 expect "compaction: the record read back has no findings and no counts" \
 	'[[ $rc == 0 && $(jq -c ".records[0] | [has(\"findings\"), .findings_dropped, .counts.open_blocking, .counts.critical]" "$stub/rounds.json") == "[false,true,null,null]" ]]'
-# The same review under other markers without counts: its findings give the Critical back, or it is unknown.
+# The same review under other markers without counts: read from the Markdown, which shows no severity section, so
+# unknown too, even when the marker still lists the Critical.
 remark() { # jq filter on round.json -> the review's marker replaced by it
 	jq --arg m "<!-- gh-pr-review:round $(jq -c "$1" <<<"$record") -->" \
 		'.[-1].body |= (split("\n") | .[1] = $m | join("\n"))' "$stub/rest-reviews.json" >"$stub/r.json"
@@ -759,8 +760,8 @@ remark() { # jq filter on round.json -> the review's marker replaced by it
 }
 remark 'del(.counts)'
 check_json
-expect "compaction: a marker with its findings but no counts gives the Critical back" \
-	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"early\",[1]]" ]]'
+expect "compaction: a marker with its findings but no counts: unknown, as the minimal one" \
+	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"unknown\",[null]]" ]]'
 remark 'del(.counts, .findings) | .findings_dropped = true'
 check_json
 expect "compaction: a marker with neither findings nor counts: unknown, as the minimal one" \
