@@ -159,9 +159,9 @@ check "block_covers_markdown: a Critical covers an Important" \
 	"$(covers '[{"severity":"critical","title":"x"}]' '[{"severity":"important","title":"t"}]')" true
 check "block_covers_markdown: a downgrade to minor does not cover an Important" \
 	"$(covers '[{"severity":"minor","title":"x"}]' '[{"severity":"important","title":"t"}]')" false
-check "block_covers_markdown: fixed, declined and later entries are not open" \
-	"$(covers '[{"severity":"critical","status":"fixed"},{"severity":"critical","status":"declined"},
-		{"severity":"critical","later":true}]' "$crit")" false
+# This version stores every entry as new (stored_status): a block's fixed, declined or later entry is open.
+check "block_covers_markdown: fixed, declined and later entries are judged as stored: open" \
+	"$(covers '[{"severity":"critical","status":"fixed"}]' "$crit"),$(covers '[{"severity":"critical","status":"declined"}]' "$crit"),$(covers '[{"severity":"critical","later":true}]' "$crit")" true,true,true
 check "block_covers_markdown: open, regressed and status-less entries are" \
 	"$(covers '[{"severity":"critical","status":"open"},{"severity":"important","status":"regressed"},{"severity":"important"}]' \
 		'[{"severity":"critical"},{"severity":"important"},{"severity":"important"}]')" true
@@ -179,9 +179,9 @@ check "block_covers_markdown: two bullets at one location need two entries there
 check "block_covers_markdown: entries and bullets without a location take no part" \
 	"$(covers '[{"severity":"critical","title":"x"},{"severity":"critical","file":"z.go"}]' \
 		'[{"severity":"critical","file":"a.go","line":null},{"severity":"critical","file":null,"line":null}]')" true
-check "block_covers_markdown: a fixed entry at the location does not cover it" \
-	"$(covers '[{"severity":"critical","file":"a.go","line":10,"status":"fixed"},{"severity":"critical"}]' \
-		'[{"severity":"critical","file":"a.go","line":10}]')" false
+check "block_covers_markdown: a fixed entry at the location is stored as new: it covers it" \
+	"$(covers '[{"severity":"critical","file":"a.go","line":10,"status":"fixed"}]' \
+		'[{"severity":"critical","file":"a.go","line":10}]')" true
 
 # Ranges: a bullet at a.go:10–12 (en dash) or a.go:10-12 (hyphen) is covered by an entry in that file at any line of
 # the range, one entry per bullet.
@@ -215,9 +215,13 @@ check "empty_severities: one empty Critical section and one with a bullet: not e
 	"$(empties $'#### Critical\n_None._\n#### Critical (again)\n- **x** y\n### End\n')" '[]'
 respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
-check "block_respects_empty: fixed, declined and later entries, and other severities, are fine" \
-	"$(respects '[{"severity":"critical","status":"fixed"},{"severity":"critical","status":"declined"},
-		{"severity":"critical","later":true},{"severity":"important"}]')" true
+check "block_respects_empty: fixed, declined and later Criticals are stored as new: open" \
+	"$(respects '[{"severity":"critical","status":"fixed"}]'),$(respects '[{"severity":"critical","status":"declined"}]'),$(respects '[{"severity":"critical","later":true}]')" \
+	false,false,false
+check "block_respects_empty: other severities are fine" "$(respects '[{"severity":"important"},{"severity":"minor"}]')" true
+stored=$(build_record '{"round":1,"code_review":true}' '[{"severity":"critical","status":"fixed","later":true,"title":"x"}]' null)
+check "build_record: stores a fixed, later entry as the checks judge it: new and open" \
+	"$(jq -c '[.findings[0].status, .counts.open_blocking, .later]' <<<"$stored")" '["new",1,[]]'
 
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \

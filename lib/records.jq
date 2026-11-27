@@ -86,12 +86,33 @@ def empty_severities:
 	| map(select(all(.[]; (.lines | length == 1 and (.[0] | _none_line)) or (.closed and (.lines | length == 0)))))
 	| map(.[0].severity);
 
-# False when the block has an open entry of a severity the Markdown says it has none of ($empty: empty_severities):
-# what the reader sees wins, and the round is parsed instead.
+# Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
+def normalize_findings:
+	if type == "array" then
+		map(select(type == "object")
+			| {severity: (.severity | if type == "string" then ascii_downcase else null end),
+				file: (.file | _str), line: (.line | _num), title: (.title | _str | _title100)}
+			| select(.severity == "critical" or .severity == "important" or .severity == "minor"))
+	else [] end;
+
+# The status a findings entry is stored with. This version has no statuses across rounds: every entry is stored as a
+# new, open finding, so an entry marked fixed, declined or later is new too. The one place that decides it.
+def stored_status: "new";
+
+# A findings list as the record stores it: normalized, each entry with its stored_status. The record builder stores
+# these, and the block checks (block_respects_empty, block_covers_markdown) and the counts of a marker's findings
+# (_findings_counts) judge these, so they never disagree about which entries are open.
+def stored_findings:
+	if type == "array" then [.[] | objects | stored_status as $status | ([.] | normalize_findings)[] + {status: $status}]
+	else [] end;
+
+# True for a stored finding that is still open: not fixed or declined.
+def _stored_open: .status | . != "fixed" and . != "declined";
+
+# False when the block has an open entry, as stored (stored_findings), of a severity the Markdown says it has none of
+# ($empty: empty_severities): what the reader sees wins, and the round is parsed instead.
 def block_respects_empty($empty):
-	(if type == "array" then . else [] end)
-	| all(.[] | objects | select(.later != true) | select((.status // "new") | . != "fixed" and . != "declined");
-		(.severity | strings | ascii_downcase) as $s | all($empty[]; . != $s));
+	stored_findings | all(.[] | select(_stored_open); .severity as $s | all($empty[]; . != $s));
 
 # True when the model's findings block can be used as it is: an array whose every entry is an object with a known
 # severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
@@ -105,9 +126,9 @@ def findings_block_ok:
 		and (.line | . == null or type == "number"));
 
 # True when the findings block reports at least the blockers the review's Markdown shows ($parsed: parse_findings of
-# the posted body): as many open Critical findings, and as many open Critical and Important ones together. An entry
-# with status fixed or declined, or with later: true, is not open; status and later may be absent. A block that
-# leaves out or downgrades a visible blocker ([] next to a Critical bullet) fails, and the round is parsed instead.
+# the posted body): as many open Critical findings, and as many open Critical and Important ones together. Entries are
+# judged as the record stores them (stored_findings): in this version all of them are open. A block that leaves out
+# or downgrades a visible blocker ([] next to a Critical bullet) fails, and the round is parsed instead.
 # The locations must match too, one to one: every Critical or Important bullet with a file:line needs its own open
 # blocking entry in that file at that line, or, for a range (a.go:10–12, line_end 12), at a line within it (two
 # bullets at a.go:10 need two entries there). An entry repeated at one bullet's location does not cover another
@@ -127,25 +148,14 @@ def block_covers_markdown($parsed):
 				| if $i == null then .ok = false else .free |= del(.[$i]) end
 			else . end)
 		| .ok);
-	def open_entries: [.[] | objects | select(.later != true)
-		| select((.status // "new") | . != "fixed" and . != "declined")];
-	def open($sev): [open_entries[] | select((.severity | strings | ascii_downcase) == $sev)] | length;
+	def open($sev): [.[] | select(.severity == $sev)] | length;
 	def shown($sev): [($parsed // [])[]? | objects | select(.severity == $sev)] | length;
-	(if type == "array" then . else [] end)
-	| [open_entries[] | select(blocking) | location] as $have
+	[stored_findings[] | select(_stored_open)]
+	| [.[] | select(blocking) | location] as $have
 	| [($parsed // [])[]? | objects | select(blocking) | span] as $seen
 	| open("critical") >= shown("critical")
 		and open("critical") + open("important") >= shown("critical") + shown("important")
 		and ($seen | matched($have));
-
-# Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
-def normalize_findings:
-	if type == "array" then
-		map(select(type == "object")
-			| {severity: (.severity | if type == "string" then ascii_downcase else null end),
-				file: (.file | _str), line: (.line | _num), title: (.title | _str | _title100)}
-			| select(.severity == "critical" or .severity == "important" or .severity == "minor"))
-	else [] end;
 
 # The highest "<prefix><n>" ID in a record's findings, its later list and its last_ids, or 0. last_ids keeps the
 # highest numbers even when the lists are empty (a Rethink) or cut from the marker, so an ID is never given twice.
@@ -191,8 +201,8 @@ def build_record($meta; $findings; $prev):
 	| ([($meta.id_floor // {}).F | numbers] + [($prev // {}) | _last_number("F")] | max) as $last
 	| ([($meta.id_floor // {}).L | numbers] + [($prev // {}) | _last_number("L")] | max) as $last_later
 	| ($meta.round | _num) as $round
-	| (if $code_review then $findings | normalize_findings else [] end) as $found
-	| ($found | to_entries | map({id: "F\(.key + $last + 1)", severity: .value.severity, status: "new",
+	| (if $code_review then $findings | stored_findings else [] end) as $found
+	| ($found | to_entries | map({id: "F\(.key + $last + 1)", severity: .value.severity, status: .value.status,
 		first_round: $round, in_delta: false, file: .value.file, line: .value.line, title: .value.title})) as $items
 	| def count($s): $items | map(select(.severity == $s)) | length;
 	{
@@ -244,13 +254,13 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 		code_review: $code_review
 	}; (if $code_review then $body | parse_findings else [] end); $prev);
 
-# Counts from a record's findings list: the open findings (not fixed or declined, not later) per severity, and the
-# findings per status (no status is new).
+# Counts from a record's findings list, as stored (stored_findings): the open findings per severity, and the findings
+# per status.
 def _findings_counts:
-	map(objects) as $all
-	| [$all[] | select(.later != true) | select((.status // "new") | . != "fixed" and . != "declined")] as $open
-	| def sev($s): [$open[] | select((.severity | strings | ascii_downcase) == $s)] | length;
-	def st($s): [$all[] | select((.status // "new") == $s)] | length;
+	stored_findings as $all
+	| [$all[] | select(_stored_open)] as $open
+	| def sev($s): [$open[] | select(.severity == $s)] | length;
+	def st($s): [$all[] | select(.status == $s)] | length;
 	{open_blocking: (sev("critical") + sev("important")), critical: sev("critical"), important: sev("important"),
 		minor: sev("minor"), new: st("new"), fixed: st("fixed"), declined: st("declined"), regressed: st("regressed")};
 

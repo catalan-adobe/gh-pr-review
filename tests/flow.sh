@@ -681,6 +681,25 @@ check_json
 expect "records: that round reads back with no blockers, as ready" \
 	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"ready\",[0]]" ]]'
 
+# The same, with the four Criticals marked fixed in the block. This version stores every entry as new, so the checks
+# judge them open too: the record is parsed, not the block's four open blockers, and the approval is not theirs. Read
+# back, the excluded entries do not come back as blockers.
+block=$'```json findings\n'"$(jq -nc '[range(4) | {severity: "critical", status: "fixed", file: "a.js", line: (. + 1), title: "c\(.)"}]')"$'\n```'
+setup $'**Approach:** Sound' $'### Issues\n\n#### 🚨 Critical (Must Fix Before Merge)\n\n'"$none"$'#### ⚠️ Important (Should Fix)\n\n'"$none"$'#### 💡 Minor (Nice to Have)\n\n'"$none"$'### Assessment\n\n**Ready to merge?** Yes\n\n'"$block"
+run
+expect "records: fixed blockers in the block under empty Markdown sections: parsed, none blocking, approved" \
+	'[[ $rc == 0 && $flag == --approve && $(jq -c "[.source, .counts.open_blocking, (.findings | length)]" <<<"$record") == "[\"parsed\",0,0]" ]] &&
+		grep -q "does not match the review" "$stub/out.log"'
+landed 32 APPROVED 2026-07-01T10:00:00Z
+echo head2 >"$stub/heads"
+check_json
+expect "round trip: the excluded entries do not come back as blockers" \
+	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"ready\",[0]]" ]]'
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "round trip: the round read back keeps no findings and no blockers" \
+	'[[ $rc == 0 && $(jq -c ".records[0] | [.source, .findings, .counts.open_blocking, .counts.critical]" "$stub/rounds.json") == "[\"parsed\",[],0,0]" ]]'
+
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
