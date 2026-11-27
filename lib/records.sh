@@ -31,10 +31,9 @@ cut_findings_block() { # <review-file> <body-out> <findings-out>
 		{ if ($0 !~ /^[[:space:]]*$/) resumed = 1; out($0) }' "$1" >"$2"
 }
 
-# The findings in a review's Markdown, its code-review part (code_review_part in records.jq), as a JSON array of
-# {severity, file, line, title}.
+# The findings in a review's Markdown, as a JSON array of {severity, file, line, title}.
 parse_findings() { # <markdown-file>
-	jq -c -Rs -L "${LIB_DIR:?}" 'include "records"; code_review_part | parse_findings' "$1"
+	jq -c -Rs -L "${LIB_DIR:?}" 'include "records"; parse_findings' "$1"
 }
 
 # A "Ready to merge?" value as yes, yes-with-fixes (any qualified yes), no, or unknown.

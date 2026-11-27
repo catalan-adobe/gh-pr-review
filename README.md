@@ -154,10 +154,11 @@ then left out. `--force-round` still runs a round the loop check would not.
 `gh pr-review rounds <PR-URL | PR-number>` prints that history, one row per
 round. Reviews posted before the records existed, and records without the full
 counts the tool writes (a review too long for them, or a damaged marker), are
-read back from their Markdown (`backfill`). Only the code review is read (the
-text after the `**Approach:**` verdict line), severity headings count only in
-its Issues section, and a folded `<details>` list ("Fixed since the last round")
-holds no open findings:
+read back from their Markdown (`backfill`). Only the code review is read: the
+text after the invisible `<!-- gh-pr-review:code-review -->` line the tool posts
+before it, without the footer (a review posted before that line existed is read
+whole). Severity headings count only in its Issues section, and a folded
+`<details>` list ("Fixed since the last round") holds no open findings:
 
 ```
 ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LABEL     SOURCE

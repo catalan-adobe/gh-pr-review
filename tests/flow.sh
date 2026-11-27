@@ -791,26 +791,54 @@ setup $'**Approach:** Sound' $'Looks fine.\n\n**Ready to merge?** Yes'
 run
 expect "no severity section, bare yes: comments, not approve" \
 	'[[ $rc == 0 && $flag == --comment ]] && grep -q "blockers are unknown: posting as comment" "$stub/out.log"'
-# The same with a heading in the approach that names a severity ("Important context"): the writer and the reader both
-# read the code review only (code_review_part), so the round is unknown when written and when read back under the
-# full marker, the minimal one and none, never ready.
-setup $'### Approach\n\n#### Important context\n\nThe handler is new.\n\n**Approach:** Sound' \
-	$'Looks fine.\n\n**Ready to merge?** Yes'
-run
-expect "approach heading, no severity section in the code review: written unknown, comments" \
-	'[[ $rc == 0 && $flag == --comment &&
-		$(jq -c "[.source, .counts.open_blocking]" <<<"$record") == "[\"parsed\",null]" && $body == *"Important context"* ]]'
-landed 52 COMMENTED 2026-09-02T10:00:00Z
-echo head2 >"$stub/heads"
-for shape in 'full marker~.' 'minimal marker~{schema, round, findings_dropped: true, last_ids}' 'no marker~'; do
-	if [[ -n ${shape#*~} ]]; then remark "${shape#*~}"; else
-		jq '.[-1].body |= (split("\n") | del(.[1]) | join("\n"))' "$stub/rest-reviews.json" >"$stub/r.json"
-		mv "$stub/r.json" "$stub/rest-reviews.json"
-	fi
-	check_json
-	expect "approach heading, ${shape%~*}: reads back unknown, not ready" \
-		'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"unknown\",[null]]" ]]'
+# The last landed round read back under the full marker, the minimal one and none: the loop check's decision, label
+# and series are $2 each time.
+reads_back() { # name want
+	local shape
+	want=$2
+	for shape in 'full marker~.' 'minimal marker~{schema, round, findings_dropped: true, last_ids}' 'no marker~'; do
+		if [[ -n ${shape#*~} ]]; then remark "${shape#*~}"; else
+			jq '.[-1].body |= (split("\n") | del(.[1]) | join("\n"))' "$stub/rest-reviews.json" >"$stub/r.json"
+			mv "$stub/r.json" "$stub/rest-reviews.json"
+		fi
+		check_json
+		expect "$1, ${shape%~*}" '[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "$want" ]]'
+	done
+}
+# The same with a heading in the approach that names a severity ("Important context"), whatever the verdict line looks
+# like, or with none: the writer reads the code review alone (review-body.md) and the reader the text after the
+# boundary line, so the round is unknown when written and when read back, never ready.
+for verdict in '**Approach:** Sound' '**Approach:** _Sound_' ''; do
+	setup $'### Approach\n\n#### Important context\n\nThe handler is new.'"${verdict:+$'\n\n'$verdict}" \
+		$'Looks fine.\n\n**Ready to merge?** Yes'
+	run
+	expect "approach heading (${verdict:-no verdict}), no severity section in the code review: written unknown, comments" \
+		'[[ $rc == 0 && $flag == --comment &&
+			$(jq -c "[.source, .counts.open_blocking]" <<<"$record") == "[\"parsed\",null]" && $body == *"Important context"* ]]'
+	landed 52 COMMENTED 2026-09-02T10:00:00Z
+	echo head2 >"$stub/heads"
+	reads_back "approach heading (${verdict:-no verdict}): reads back unknown, not ready" '["run","unknown",[null]]'
 done
+# --skip-approach: a Critical quoting a verdict line, empty Important and Minor sections, and an empty findings block.
+# The block does not show the Critical: it is rejected, and the Critical is kept when written and when read back.
+setup 'unused' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`a.js:1` — the verdict is read from a quote.** The doc says:\n\n  > **Approach:** Sound\n\n#### ⚠️ Important (Should Fix)\n*(none found)*\n#### 💡 Minor (Nice to Have)\n*(none found)*\n\n**Ready to merge?** No\n\n```json findings\n[]\n```'
+run --skip-approach
+expect "skip-approach, a Critical quoting a verdict line: the empty block is rejected, the Critical kept" \
+	'[[ $rc == 0 && $flag == --request-changes &&
+		$(jq -c "[.source, .counts.critical, .findings[0].file]" <<<"$record") == "[\"parsed\",1,\"a.js\"]" ]] &&
+		grep -q "does not match the review" "$stub/out.log"'
+landed 53 CHANGES_REQUESTED 2026-09-03T10:00:00Z
+echo head2 >"$stub/heads"
+reads_back "skip-approach, a Critical quoting a verdict line: read back with its Critical" '["run","early",[1]]'
+# A review ending in a Critical section that says none, with a Critical in the block: the footer is not part of the
+# code review, so the section is empty, the block is rejected, and the round has no blockers, written and read back.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n*(none found)*\n\n```json findings\n[{"severity":"critical","file":"a.js","line":1,"title":"boom"}]\n```'
+run
+expect "last section none found, a Critical in the block: parsed, none blocking" \
+	'[[ $rc == 0 && $(jq -c "[.source, .counts.open_blocking, .counts.critical]" <<<"$record") == "[\"parsed\",0,0]" ]]'
+landed 54 APPROVED 2026-09-04T10:00:00Z
+echo head2 >"$stub/heads"
+reads_back "last section none found: read back with no blockers" '["run","ready",[0]]'
 # An automatic approve needs the check that the blocker count is known to succeed: when jq fails on it, the round
 # posts as comment, even with a clean review whose count is a known 0.
 setup $'**Approach:** Sound' "$clean"
