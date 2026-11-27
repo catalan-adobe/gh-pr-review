@@ -239,6 +239,13 @@ check "parse_findings: a finding that mentions <details> inside its line is stil
 		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.severity)')" '["critical","critical"]'
 check "empty_severities: a Minor section holding only a <details> list is empty" \
 	"$(empties $'### Issues\n#### Minor\n*(none found)*\n<details><summary>Later (1)</summary>\n\n- x\n</details>\n### End\n')" '["minor"]'
+# Only a line starting with <details or </details opens or closes a fold, outside fenced code (tracked in folds too).
+check "parse_findings: a fenced <details> example in a fold does not keep the fold open past its </details>" \
+	"$(printf '### Issues\n#### Minor\n<details><summary>Fixed (1)</summary>\n\n- x\n  ```html\n  <details>\n  ```\n</details>\n#### Critical\n- boom\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.severity + " " + .title)')" '["critical boom"]'
+check "parse_findings: a fixed item quoting </details> in code does not close the fold" \
+	"$(printf '### Issues\n#### Critical\n<details><summary>Fixed (2)</summary>\n\n- **F1** — closes with `</details>`.\n- **F2** — other.\n</details>\n- c\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["c"]'
 respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
 check "block_respects_empty: fixed, declined and later Criticals are stored as new: open" \
