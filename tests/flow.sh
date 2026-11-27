@@ -25,11 +25,9 @@ case "\$*" in
 *"--method POST"*pulls/1/reviews*)
 	[[ -f "$stub/post.fail" ]] && exit 1
 	while [[ \$# -gt 0 ]]; do [[ "\$1" == --input ]] && cp "\$2" "$stub/posted.json"; shift; done
-	# post.lost: GitHub takes the review, and its answer is lost.
+	# post.lost: the request fails, and the reviews change as this jq program says (\$p[0]: the request; lost_as).
 	if [[ -f "$stub/post.lost" ]]; then
-		jq --slurpfile p "$stub/posted.json" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + [{id: 99,
-			user: {login: "me", type: "User"}, state: "COMMENTED", commit_id: \$p[0].commit_id, submitted_at: \$at,
-			body: \$p[0].body}]' "$stub/rest-reviews.json" >"$stub/rest-reviews.tmp"
+		jq --slurpfile p "$stub/posted.json" -f "$stub/post.lost" "$stub/rest-reviews.json" >"$stub/rest-reviews.tmp"
 		mv "$stub/rest-reviews.tmp" "$stub/rest-reviews.json"
 		exit 1
 	fi ;;
@@ -696,10 +694,40 @@ expect "the review API fails and no review landed: exit 1, unconfirmed, the reco
 	'[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] &&
 		grep -q "could not confirm whether the review was posted; run .gh pr-review rounds https://github.com/o/r/pull/1. before retrying" "$stub/out.log" &&
 		! grep -q "nothing was posted" "$stub/out.log"'
+# The post request fails; then the reviews change as <program> says, with $p[0] the request and $state its review state.
+lost_as() { # jq-program (the history starts empty again)
+	echo '[]' >"$stub/rest-reviews.json"
+	printf '({APPROVE: "APPROVED", REQUEST_CHANGES: "CHANGES_REQUESTED", COMMENT: "COMMENTED"}[$p[0].event]) as $state\n| %s' \
+		"$1" >"$stub/post.lost"
+}
+# Submitted now: inside the time window the old check trusted, so only the ID, state and body tell them apart.
+review_by_me='{id: 99, user: {login: "me", type: "User"}, state: $state, commit_id: $p[0].commit_id,
+	submitted_at: (now | todate), body: $p[0].body}'
+unconfirmed() { # rc, output and record of a failed post that could not be confirmed
+	[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] && grep -q "could not confirm whether the review was posted" "$stub/out.log" &&
+		! grep -q "Posted →" "$stub/out.log"
+}
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
-touch "$stub/post.lost"
+lost_as ". + [$review_by_me]"
 run
 expect "the review API fails but the review landed: posted, the record finished as posted" \
 	'[[ $rc == 0 && $flag == --approve && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "false,approve" ]] &&
 		grep -q "the review is on the PR: it was posted" "$stub/out.log" && grep -q "Posted →" "$stub/out.log"'
+lost_as ". + [$review_by_me | .body |= (gsub(\"\\n\"; \"  \\r\\n\") + \"\\n\")]"
+run
+expect "the review landed, read back with CRLF and trailing spaces: posted" '[[ $rc == 0 ]] && grep -q "it was posted" "$stub/out.log"'
+lost_as ". + [$review_by_me | .body = \"<!-- gh-pr-review generated -->\\nanother run's review\"]"
+run
+expect "another review by this account on this commit, another body: unconfirmed, exit 1, still a preview" 'unconfirmed'
+lost_as ". + [$review_by_me | .state = \"COMMENTED\"]"
+run
+expect "the posted body in another state than the event's: unconfirmed" 'unconfirmed'
+lost_as ". + [$review_by_me, ($review_by_me | .id = 100)]"
+run
+expect "two reviews match: unconfirmed" 'unconfirmed'
+lost_as "map(if .id == 1 then . + {state: \$state, commit_id: \$p[0].commit_id, body: \$p[0].body,
+	submitted_at: (now | todate)} else . end)"
+rounds_with 2 >"$stub/rest-reviews.json"
+run
+expect "the matching review was already a round before the post: unconfirmed" 'unconfirmed'
 exit "$fail"

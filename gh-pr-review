@@ -364,9 +364,6 @@ echo "    ${PR_TITLE}"
 echo "    @${PR_AUTHOR}  ·  +${ADDITIONS} -${DELETIONS}  ·  ${N_FILES} files changed"
 echo ""
 
-# When this run started, in GitHub's UTC time format: a review this run posted was submitted after it.
-RUN_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
 # ── loop check ─────────────────────────────────────────────────────────────────────
 # Earlier gh-pr-review reviews (by anyone) are earlier rounds. Before any clone or model call, decide whether this
 # round should run: not when nothing changed, and not when the loop has stopped converging (see `gh pr-review rounds`).
@@ -969,17 +966,24 @@ pr_head_now() {
 }
 
 # After the post request failed: true when the review is on the PR all the same (the request reached GitHub, the
-# answer did not come back). That is a generated review by this user, on the reviewed commit, submitted since the run
-# started. One read; anything in doubt (no login, a failed read) is false.
+# answer did not come back). That is exactly one review that was not a round at the final re-read (its ID is not in
+# NOW_IDS), by this user, on the reviewed commit, in the state the event gives, with the body post.json sent (CRLF
+# and trailing whitespace aside). Another review by the same account on the same commit is not this one. One read;
+# anything in doubt (no login, a failed read, no match or several) is false.
 review_landed() {
 	local json
 	[[ -n "${ME:-}" ]] || return 1
 	json=$(gh api --hostname "$GH_HOST_NAME" --paginate "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" 2>/dev/null) ||
 		return 1
-	jq -se -L "$LIB_DIR" --arg me "$ME" --arg commit "$HEAD_SHA" --arg since "${RUN_STARTED:-}" '
-		include "records";
-		any(add // [] | .[]; (.body | is_generated_review) and .state != "PENDING" and .user.login == $me
-			and .commit_id == $commit and (.submitted_at // "") >= $since)' <<<"$json" >/dev/null 2>&1
+	jq -se --arg me "$ME" --arg commit "$HEAD_SHA" --argjson before "${NOW_IDS:-null}" \
+		--slurpfile post "${SESSION_DIR}/post.json" '
+		def norm: gsub("\r\n"; "\n") | gsub("[ \t]+\n"; "\n") | sub("\\s+$"; "");
+		($post[0].body | norm) as $body
+		| ({APPROVE: "APPROVED", REQUEST_CHANGES: "CHANGES_REQUESTED", COMMENT: "COMMENTED"}[$post[0].event]) as $state
+		| [add // [] | .[] | select(.id as $id | ($id | type == "number") and all($before[]; . != $id))
+			| select(.user.login == $me and .commit_id == $commit and .state == $state
+				and (.body | type == "string") and (.body | norm) == $body)]
+		| length == 1' <<<"$json" >/dev/null 2>&1
 }
 
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then

@@ -202,9 +202,14 @@ every push should turn on "Dismiss stale pull request approvals when new
 commits are pushed" in the branch protection rules (or rulesets).
 
 If the post request fails, the review may still have landed (the answer can
-be lost after GitHub took it). The tool then reads the reviews once: if this
-run's review is there, it reports it posted; otherwise it says it could not
-confirm whether the review was posted and exits with code 1. Run
+be lost after GitHub took it). The tool then reads the reviews once and looks
+for this run's review: one that was not there at the last read before the
+post, by this account, on the reviewed commit, in the state the decision
+gives (approved, changes requested, commented), with exactly the body it sent.
+Exactly one such review: it reports it posted. None, several, or a failed
+read: it says it could not confirm whether the review was posted, keeps the
+record a preview, and exits with code 1. Another run's review on the same
+commit, by the same account, does not count. Run
 `gh pr-review rounds <PR>` before retrying, so the round is not posted twice.
 
 `gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
