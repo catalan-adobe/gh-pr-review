@@ -249,6 +249,16 @@ check "marker: key.go inside apikey.go is not a shown path; an underscore title 
 check "marker: a whole path and a title behind Markdown marks are published as shown" \
 	"$(marker_record "$(generated "$line")" | jq -c '.findings[2] | [.file, .title]')" '["pkg/apikey.go","Uses api_key in logs"]'
 
+# A code span holds one whole path, spaces and all: `src/new file.go:1` shows "src/new file.go", not "file.go".
+jq -n '{schema: 1, round: 1, counts: {}, findings: [{id: "F1", file: "src/new file.go", line: 1},
+	{id: "F2", file: "file.go", line: 1}, {id: "F3", file: "new", line: 2}]}' >"$tmp/spaces.json"
+line=$(marker_line "$tmp/spaces.json" $'- **`src/new file.go:1` — Breaks.**')
+check "marker: a path with a space, as the whole code span, is published" \
+	"$(marker_record "$(generated "$line")" | jq -c '[.findings[] | .file]')" '["src/new file.go",null,null]'
+line=$(marker_line "$tmp/spaces.json" $'- **`file.go:1` — Breaks.**')
+check "marker: and the other way round, a span with file.go does not publish src/new file.go" \
+	"$(marker_record "$(generated "$line")" | jq -c '[.findings[] | .file]')" '[null,"file.go",null]'
+
 # The size cap, step by step, on the exact assembled body: header, newline, marker, newline, review.
 jq '.later = [{id: "L1", severity: "minor", file: "src/render.ts", line: 7, title: "Comment says"}]' "$tmp/round.json" \
 	>"$tmp/big.json"

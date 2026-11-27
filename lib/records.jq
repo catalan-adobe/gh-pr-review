@@ -207,18 +207,21 @@ def _re_literal: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}/-])"; "\\\(.c)");
 
 # The marker line for a record, posted right below the generated header and above $body, the exact review text.
 # One HTML comment: every "--" in the JSON is written "-\u002d". The marker never publishes text the review does not
-# show. A file stays only when $body shows that exact path, as a whole path (in backticks, before ":line", or
-# between spaces or brackets). A title stays when $body holds it as it is; else when the review's visible text holds
-# it after only the * and ` marks are removed and whitespace is collapsed, and then the marker gets that visible
-# form. A title cut to 100 characters may match part of a line. Otherwise the field is left out.
+# show. A file stays only when $body shows that exact path, as a whole path: the whole content of a code span, less
+# a ":line" suffix (`src/new file.go:1` shows "src/new file.go", not "file.go"), or, outside code spans, between
+# spaces, brackets or quotes, or before ":line". A title stays when $body holds it as it is; else when the review's
+# visible text holds it after only the * and ` marks are removed and whitespace is collapsed, and then the marker gets
+# that visible form. A title cut to 100 characters may match part of a line. Otherwise the field is left out.
 # The whole body (header, newline, marker, newline, review) must fit in 60,000 characters, under GitHub's 65,536: it
 # drops titles, then file, line, first_round and in_delta, then later, then findings (findings_dropped: true; counts
 # and last_ids stay). When even that does not fit: a minimal marker, {schema, round, findings_dropped: true} and
 # last_ids if it fits, so a later round knows the baseline is missing. Nothing when even that does not fit.
 def marker_line($body):
 	($body | _visible) as $seen
-	| def file_shown: type == "string" and . != "" and (_re_literal as $f
-		| $body | test("(^|[\\s`\\[(*\"'])" + $f + "(?=$|[\\s`\\])*:,;\"']|\\.(\\s|$))"));
+	| ($body | [scan("`([^`\n]+)`") | .[0] | sub(":\\d+.*$"; "") | _trim]) as $spans
+	| ($body | gsub("`[^`\n]+`"; "\u0001")) as $prose
+	| def file_shown: type == "string" and . != "" and (. as $path | any($spans[]; . == $path)
+		or (_re_literal as $f | $prose | test("(^|[\\s`\\[(*\"'])" + $f + "(?=$|[\\s`\\])*:,;\"']|\\.(\\s|$))")));
 	def title_shown: if type != "string" or (_trim == "") then null
 		elif (. as $t | $body | contains($t)) then .
 		else _visible as $t | if $t != "" and ($seen | contains($t)) then $t else null end end;
