@@ -34,7 +34,11 @@ cat >"$stub/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
 *pulls/1/reviews*) jq 'map(.author_association //= "MEMBER")' "$stub/reviews.json" ;; # members unless set
-*" user --jq"*) echo me ;;
+*" user --jq"*)
+	# user.fail: how many reads of this account's login fail from now on.
+	n=\$(cat "$stub/user.fail" 2>/dev/null || echo 0)
+	[[ "\$n" -gt 0 ]] && { echo "\$((n - 1))" >"$stub/user.fail"; exit 1; }
+	echo me ;;
 *pulls/1/commits*) cat "$stub/commits.json" ;;
 *issues/1/comments*) cat "$stub/comments.json" ;;
 *pulls/1/comments*) echo '[]' ;;
@@ -142,12 +146,40 @@ jq -s . <(nocounts '[]' "$crit_md") >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "no counts, findings missing the Markdown's Critical: counted from the Markdown" \
 	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label]" <<<"$out") == "[[1],\"early\"]" ]]'
+expect "no counts, findings missing the Markdown's Critical: the list that failed the check is dropped" \
+	'[[ $(jq -c ".records[0] | [has(\"findings\"), .findings_dropped, .counts.critical]" <<<"$out") == "[false,true,1]" ]]'
+plain_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- \`a.js:1\` — boom.${nl}${nl}### Assessment${nl}**Ready to merge?** Yes"
+jq -s . <(nocounts '[]' "$plain_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no counts: a plain bullet under Critical counts from the Markdown" \
+	'[[ $rc == 0 && $(jq -c "[.records[0].counts.critical, .decision.series, .decision.label]" <<<"$out") == "[1,[1],\"early\"]" ]]'
+jq -s '.[0].body |= sub("\"findings\":\\[\\]"; "\"findings\":[],\"counts\":{\"critical\":1,\"important\":0}")' \
+	<(nocounts '[]' "$plain_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no open_blocking but critical and important: their sum, not the Markdown" \
+	'[[ $rc == 0 && $(jq -c ".records[0] | [.counts.critical, .counts.open_blocking, .findings_dropped]" <<<"$out") == "[1,1,null]" &&
+		$(jq -r .decision.label <<<"$out") == early ]]'
 jq -s . <(nocounts '[]' "Looks fine.${nl}${nl}**Ready to merge?** Yes, with fixes") >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "no counts, no findings and no severity heading: blocking unknown, not ready" \
 	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking]" <<<"$out") == "[[null],\"unknown\",null]" ]]'
 out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
 expect "no counts: the table shows dashes and the unknown label" '[[ $rc == 0 && $(row 1) == *" – – – unknown –" ]]'
+minimal='{"schema":1,"round":1,"findings_dropped":true,"last_ids":{"F":0,"L":0}}'
+jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${minimal} -->${nl}Looks fine.${nl}${nl}**Ready to merge?** Yes" \
+	'[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "a minimal marker and no severity heading: blocking unknown, not ready, as without counts" \
+	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking, .records[0].findings_dropped]" <<<"$out") == "[[null],\"unknown\",null,true]" ]]'
+# A later round's Markdown leaves out the findings it carried: with a minimal marker, its blocking count is the
+# progress line's (backfill_record), not the Markdown's.
+later_md="### Round 2 · since round 1${nl}1 still open · 1 not re-checked · open blocking: 2 (was 2)${nl}${nl}#### 🚨 Critical${nl}*(none found)*${nl}"
+later_md+="#### ⚠️ Important${nl}- **F1 · \`a.js:1\`** — boom.${nl}${nl}**Ready to merge?** No"
+jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${minimal/\"round\":1/\"round\":2} -->${nl}${later_md}" \
+	'[{body: $b, commit_id: "c2", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "a minimal marker on a later round: blocking from its progress line, not the Markdown" \
+	'[[ $rc == 0 && $(jq -c ".records[0] | [.counts.open_blocking, .findings_dropped]" <<<"$out") == "[2,true]" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
 # Only trusted reviews are rounds. eve, a contributor, posts a generated review on the PR's head: not a round, so the
@@ -171,6 +203,16 @@ mv "$stub/r.json" "$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "trust: my own review counts where I am only a contributor" \
 	'[[ $(jq -c "[(.records | length), .decision.decision, (.ignored | length)]" <<<"$out") == "[4,\"nothing-new\",1]" ]]'
+echo 1 >"$stub/user.fail"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "trust: the login read fails once: the retry reads it, and my review still counts" \
+	'[[ $rc == 0 && $(jq -c "[(.records | length), .decision.decision]" <<<"$out") == "[4,\"nothing-new\"]" ]]'
+echo 2 >"$stub/user.fail"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "trust: the login read fails twice: rounds fails and says why" \
+	'[[ $rc == 1 && $out == *"could not read the account running the tool, so the round history can'"'"'t be checked"* &&
+		$out != *records* ]]'
+rm -f "$stub/user.fail"
 out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
 expect "trust: one left out, one author" 'grep -qx "ignored: 1 generated review by @eve (not a member or collaborator of the repo)" <<<"$out"'
 cp "$stub/reviews.saved" "$stub/reviews.json"

@@ -59,6 +59,11 @@ long=$(printf 'x%.0s' {1..150})
 printf '#### 🚨 Critical\n\n- **`a.ts:1` — %s**\n' "$long" >"$tmp/long.md"
 check "title cut to 100 characters" "$(parse_findings "$tmp/long.md" | jq '.[0].title | length')" 100
 
+printf '#### 🚨 Critical\n\n- `a.ts:1` — plain bullet.\n  - a sub-point\n- None.\n\n#### 💡 Minor\n\n1. plain numbered\n' >"$tmp/plain.md"
+f=$(parse_findings "$tmp/plain.md")
+check "plain bullets: counted, sub-points and a None line not" "$(counts "$f")" "1 0 1"
+check "plain bullets: item" "$(item "$f" 0)" "critical | a.ts | 1 | plain bullet."
+
 # ── cut_findings_block ──────────────────────────────────────────────────────
 block() { printf '```json findings\n[{"severity":"%s","file":"a.ts","line":1,"title":"t"}]\n```\n' "$1"; }
 cut() { # review-text -> sets body and found
@@ -373,8 +378,10 @@ check "findings_block_ok: one bad entry spoils the block" "$(ok_block '[{}, [{"l
 	[{"severity":"minor","title":"t","file":3}], [{"severity":"minor","title":"t"}, "F2"]]')" \
 	"[false,false,false,false,false,false,false]"
 
+# A round 1 block, judged as round 1 stores it (stored_findings without a last code review: every entry is new).
 covers() { # block parsed -> block_covers_markdown
-	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson p "$2" 'include "records"; $b | block_covers_markdown($p)'
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson p "$2" \
+		'include "records"; $b | stored_findings(null; null) | block_covers_markdown($p)'
 }
 crit='[{"severity":"critical","title":"t"}]'
 check "block_covers_markdown: [] next to a Critical bullet does not cover it" "$(covers '[]' "$crit")" false
@@ -385,9 +392,9 @@ check "block_covers_markdown: a Critical covers an Important" \
 	"$(covers '[{"severity":"critical","title":"x"}]' '[{"severity":"important","title":"t"}]')" true
 check "block_covers_markdown: a downgrade to minor does not cover an Important" \
 	"$(covers '[{"severity":"minor","title":"x"}]' '[{"severity":"important","title":"t"}]')" false
-check "block_covers_markdown: fixed, declined and later entries are not open" \
-	"$(covers '[{"severity":"critical","status":"fixed"},{"severity":"critical","status":"declined"},
-		{"severity":"critical","later":true}]' "$crit")" false
+# Round 1 stores every entry as new (entry_outcome): a block's fixed, declined or later entry is open.
+check "block_covers_markdown: round 1 fixed, declined and later entries are judged as stored: open" \
+	"$(covers '[{"severity":"critical","status":"fixed"}]' "$crit"),$(covers '[{"severity":"critical","status":"declined"}]' "$crit"),$(covers '[{"severity":"critical","later":true}]' "$crit")" true,true,true
 check "block_covers_markdown: open, regressed and status-less entries are" \
 	"$(covers '[{"severity":"critical","status":"open"},{"severity":"important","status":"regressed"},{"severity":"important"}]' \
 		'[{"severity":"critical"},{"severity":"important"},{"severity":"important"}]')" true
@@ -405,9 +412,9 @@ check "block_covers_markdown: two bullets at one location need two entries there
 check "block_covers_markdown: entries and bullets without a location take no part" \
 	"$(covers '[{"severity":"critical","title":"x"},{"severity":"critical","file":"z.go"}]' \
 		'[{"severity":"critical","file":"a.go","line":null},{"severity":"critical","file":null,"line":null}]')" true
-check "block_covers_markdown: a fixed entry at the location does not cover it" \
-	"$(covers '[{"severity":"critical","file":"a.go","line":10,"status":"fixed"},{"severity":"critical"}]' \
-		'[{"severity":"critical","file":"a.go","line":10}]')" false
+check "block_covers_markdown: a round 1 fixed entry at the location is stored as new: it covers it" \
+	"$(covers '[{"severity":"critical","file":"a.go","line":10,"status":"fixed"}]' \
+		'[{"severity":"critical","file":"a.go","line":10}]')" true
 
 # Ranges: a bullet at a.go:10–12 (en dash) or a.go:10-12 (hyphen) is covered by an entry in that file at any line of
 # the range, one entry per bullet.
@@ -439,11 +446,54 @@ check "empty_severities: a bare last heading, with no heading after it, is not e
 check "empty_severities: none found in the last section is" "$(empties $'#### 🚨 Critical\n*(none found)*\n')" '["critical"]'
 check "empty_severities: one empty Critical section and one with a bullet: not empty" \
 	"$(empties $'#### Critical\n_None._\n#### Critical (again)\n- **x** y\n### End\n')" '[]'
-respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }
+respects() { # round 1 block -> block_respects_empty, judged as stored
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" \
+		'include "records"; $b | stored_findings(null; null) | block_respects_empty(["critical"])'
+}
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
-check "block_respects_empty: fixed, declined and later entries, and other severities, are fine" \
-	"$(respects '[{"severity":"critical","status":"fixed"},{"severity":"critical","status":"declined"},
-		{"severity":"critical","later":true},{"severity":"important"}]')" true
+check "block_respects_empty: round 1 fixed, declined and later Criticals are stored as new: open" \
+	"$(respects '[{"severity":"critical","status":"fixed"}]'),$(respects '[{"severity":"critical","status":"declined"}]'),$(respects '[{"severity":"critical","later":true}]')" \
+	false,false,false
+check "block_respects_empty: other severities are fine" "$(respects '[{"severity":"important"},{"severity":"minor"}]')" true
+stored=$(build_record '{"round":1,"code_review":true}' '[{"severity":"critical","status":"fixed","later":true,"title":"x"}]' null)
+check "build_record: stores a fixed, later entry as the checks judge it: new and open" \
+	"$(jq -c '[.findings[0].status, .counts.open_blocking, .later]' <<<"$stored")" '["new",1,[]]'
+# A stored list (a marker's findings) is read as it is: a finding stored as fixed or declined is not open.
+check "block checks: a stored list keeps its statuses" \
+	"$(jq -c -n -L "$LIB_DIR" 'include "records"; [{severity: "critical", status: "fixed"}, {severity: "critical",
+		status: "declined"}] | [block_covers_markdown([{severity: "critical"}]), block_respects_empty(["critical"])]')" \
+	'[false,true]'
+
+# ── entry_outcome: one decision for the record builder and the block checks ────────────────────────────────
+# Round 3 on prev2 (F1 Critical open, a.ts:1), incremental, delta t.ts: stored_findings says what build_record stores.
+judged() { # <block> -> [status, severity] per stored entry, then the record's [status, severity] per block entry
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson base "$prev2" --argjson meta "$meta2" 'include "records";
+		[$b | stored_findings($base; later_files($meta.mode; $meta.delta_files))[] | [.status, .severity]],
+		# The record: the findings from the block (new, or an ID the block gives), not the carried ones.
+		(build_record($meta; $b; $base) | [(.findings[] | select(.status == "new" or (.id as $id | [$b[].id] | index([$id])))
+			| [.status, .severity]), (.later[] | ["later", .severity])])' |
+		paste -sd' ' -
+}
+check "entry_outcome: declined with a reason is declined, for both" \
+	"$(judged '[{"id":"F1","status":"declined","reason":"by design"}]')" '[["declined","critical"]] [["declined","critical"]]'
+check "entry_outcome: declined without a reason is open and keeps its severity, for both" \
+	"$(judged '[{"id":"F1","status":"declined","severity":"minor"}]')" '[["open","critical"]] [["open","critical"]]'
+check "entry_outcome: a Later Critical is new, for both" \
+	"$(judged '[{"severity":"critical","title":"x","file":"z.ts","later":true}]')" '[["new","critical"]] [["new","critical"]]'
+check "entry_outcome: a Later Minor outside the delta is Later, left out of the stored findings" \
+	"$(judged '[{"severity":"minor","title":"x","file":"z.ts","later":true}]')" '[] [["later","minor"]]'
+check "entry_outcome: no Later in a full round" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" 'include "records";
+		[{severity: "minor", title: "x", file: "z.ts", later: true}] | stored_findings($base; later_files("full"; ["t.ts"]))
+		| map(.status)')" '["new"]'
+check "entry_outcome: a status-only entry takes the base's severity and location" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" 'include "records";
+		[{id: "F1", status: "open"}] | stored_findings($base; null) | map([.status, .severity, .file, .line])')" \
+	'[["open","critical","a.ts",1]]'
+check "entry_outcome: the first entry for an ID is the one stored" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" 'include "records";
+		[{id: "F1", status: "fixed"}, {id: "F1", status: "open"}] | stored_findings($base; null) | map(.status)')" \
+	'["fixed"]'
 
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \

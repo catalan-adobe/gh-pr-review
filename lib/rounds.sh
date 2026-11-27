@@ -38,7 +38,7 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 		record=$(marker_record "$body") || return 1
 		minimal=""
 		# A minimal marker (no room for the counts) says only that the findings are missing: the counts come from the
-		# Markdown, as for a review without a marker, and the record keeps findings_dropped and the marker's last_ids.
+		# Markdown, as for a marker without counts, and the record keeps findings_dropped and the marker's last_ids.
 		if [[ -n "$record" ]]; then
 			dropped=$(jq '.findings_dropped == true and (has("counts") | not)' <<<"$record") || return 1
 			if [[ "$dropped" == true ]]; then
@@ -58,9 +58,15 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 			fi
 			record=$(backfill_record "$review" "$previous" "$round" "$pr") || return 1
 			if [[ -n "$minimal" ]]; then
-				record=$(jq -c --argjson m "$minimal" '. as $b | $b + ($m | del(.last_ids)) | del(.findings)
+				# Its counts come from the Markdown as with_counts reads them: null, so unknown, when it has no severity
+				# heading, exactly as for a marker without counts. A later round's Markdown leaves out the findings it
+				# carried: its counts stay the backfill's, with the open blocking count of its progress line.
+				record=$(printf '%s\n%s\n' "$record" "$review" | jq -cs -L "${LIB_DIR:?}" --argjson m "$minimal" '
+					include "records";
+					.[1].body as $body | .[0] as $b | $b + ($m | del(.last_ids)) | del(.findings)
 					| .last_ids = {F: ([$b.last_ids.F, $m.last_ids.F?] | map(numbers) | max // 0),
-						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}' <<<"$record") || return 1
+						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}
+					| if $body | later_round_body then . else del(.counts) | with_counts($body) end') || return 1
 			fi
 		fi
 		facts=$(jq -c '({posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
@@ -125,6 +131,22 @@ lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 	fi
 }
 
+# The login of the account running the tool, read with one retry. Its own rounds count even where it is only a
+# contributor (fetch_round_records), so the history can't be checked without it: when both reads fail, it says so and
+# fails.
+operator_login() { # <host>
+	local login try
+	for try in 1 2; do
+		if login=$(gh api --hostname "$1" user --jq .login 2>/dev/null) && [[ -n "$login" ]]; then
+			printf '%s\n' "$login"
+			return 0
+		fi
+		[[ "$try" == 2 ]] || sleep 1
+	done
+	echo "Error: could not read the account running the tool, so the round history can't be checked; check gh auth and network." >&2
+	return 1
+}
+
 cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 	local target="" as_json=false user="${GH_PR_REVIEW_USER:-}" records shape commits decision lifted me ignored_file ignored
 	while [[ $# -gt 0 ]]; do
@@ -169,7 +191,7 @@ cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 	resolve_target "$target"
 
 	# Your own rounds count even where you are only a contributor (fetch_round_records).
-	me=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
+	me=$(operator_login "$GH_HOST_NAME") || return 1
 	ignored_file=$(mktemp)
 	if ! records=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$me" "$ignored_file"); then
 		rm -f "$ignored_file"

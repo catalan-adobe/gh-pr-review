@@ -141,8 +141,12 @@ whose author GitHub reports as an owner, member or collaborator of the repo
 (the review's `author_association`), and your own, so your rounds count where
 you are only a contributor. Everything that reads the history uses the same
 rule (the loop check, `--check`, `rounds`, the re-read before posting, finding
-IDs), so the history is the same for everyone with the same access. The
-reviews left out are named once, for example
+IDs). Rounds by owners, members and collaborators are shared by everyone; a
+contributor's own rounds count only for that contributor, so two contributors
+(neither a member nor a collaborator) each count their own rounds and not the
+other's, and their round numbers can differ. If the account running the tool
+can't be read, the history can't be checked, and nothing runs. The reviews
+left out are named once, for example
 `ignored: 1 generated review by @x (not a member or collaborator of the repo)`.
 GitHub can report a member of an organization whose membership is private as
 a contributor, to a token that cannot see that membership: their rounds are

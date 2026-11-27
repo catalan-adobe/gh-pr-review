@@ -375,8 +375,9 @@ echo ""
 # round should run: not when nothing changed, and not when the loop has stopped converging (see `gh pr-review rounds`).
 HEAD_OID=$(echo "$PR_JSON" | jq -r '.headRefOid // empty')
 # Only trusted reviews are rounds: by an owner, member or collaborator of the repo, or by this account (ROUNDS_ME, the
-# same login for the final re-read). The others are named once, here.
-ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
+# same login for the final re-read). The others are named once, here. Without this account's login its own rounds
+# would be missed: the run stops here, before any clone or model call.
+ME=$(operator_login "$GH_HOST_NAME") || exit 1
 ROUNDS_ME="$ME"
 IGNORED_FILE=$(mktemp)
 RECORDS=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$ROUNDS_ME" "$IGNORED_FILE") || {
@@ -1166,7 +1167,10 @@ fi
 # It runs under `if !`, where errexit is off: every step checks its own status, and the record is checked before use.
 THIS_LOOP=""
 write_round_record() {
-	local findings parsed source=model code_review=true approach ready meta history tmp="${RECORD_FILE}.tmp"
+	local findings parsed source=model code_review=true approach ready meta history delta_files tmp="${RECORD_FILE}.tmp"
+	# The files the delta touched (null in a full round): the record builder and the block checks decide Later with them.
+	delta_files=$(jq -cn --argjson delta "$DELTA" --arg files "$DELTA_FILES" \
+		'if $delta.mode == "full" then null else $files | split("\n") | map(select(. != "")) end') || return 1
 	if [[ "$APPROACH_VERDICT" == rethink ]]; then
 		code_review=false
 		findings='[]'
@@ -1175,12 +1179,15 @@ write_round_record() {
 		# A parse failure leaves a parsed record without findings, as the spec says: it never blocks the post.
 		parsed="${RECORD_FILE}.parsed"
 		parse_findings "$REVIEW_BODY_FILE" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
-		# Status-only entries are allowed for the last code review's IDs only, and take their severity from it here.
-		# The block must hold exactly one JSON value, an array: anything else ("[] [ … ]") is read from the Markdown.
-		# So is a block with an open finding of a severity the Markdown says it has none of ("*(none found)*").
+		# Status-only entries are allowed for the last code review's IDs only. The block must hold exactly one JSON
+		# value, an array: anything else ("[] [ … ]") is read from the Markdown. So is a block with an open finding of a
+		# severity the Markdown says it has none of ("*(none found)*"). Its entries are checked as the record will store
+		# them (stored_findings, the builder's own decision): a declined one without a reason, or a Later one that is not
+		# honoured, is open; one stored as fixed, declined or Later is not.
 		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" --rawfile md "$REVIEW_BODY_FILE" \
-			--argjson base "$FINDINGS_BASE" 'include "records"; length == 1 and (.[0] | findings_block_ok($base | known_ids)
-				and (with_base_severity($base) | block_covers_markdown($parsed[0])
+			--argjson base "$FINDINGS_BASE" --argjson delta "$DELTA" --argjson files "$delta_files" \
+			'include "records"; length == 1 and (.[0] | findings_block_ok($base | known_ids)
+				and (stored_findings($base; later_files($delta.mode; $files)) | block_covers_markdown($parsed[0])
 					and block_respects_empty($md | empty_severities)))' "$FINDINGS_FILE" >/dev/null 2>&1; then
 			findings=$(jq -cs '.[0]' "$FINDINGS_FILE") || return 1
 		else
@@ -1202,10 +1209,9 @@ write_round_record() {
 		--arg base "$BASE_SHA" --arg head "$HEAD_SHA" --argjson previous "$PREVIOUS_RECORD" \
 		--argjson findings_base "$FINDINGS_BASE" --argjson delta "$DELTA" \
 		--arg approach "$approach" --arg ready "$ready" --argjson code_review "$code_review" \
-		--argjson id_floor "$ID_FLOOR" --arg delta_files "$DELTA_FILES" \
+		--argjson id_floor "$ID_FLOOR" --argjson delta_files "$delta_files" \
 		'{source: $source, pr: {host: $host, owner: $owner, repo: $repo, number: $number}, round: $round,
-		  mode: $delta.mode, mode_reason: ($delta.reason // null),
-		  delta_files: (if $delta.mode == "full" then null else $delta_files | split("\n") | map(select(. != "")) end),
+		  mode: $delta.mode, mode_reason: ($delta.reason // null), delta_files: $delta_files,
 		  reviewer: (if $reviewer == "" then null else $reviewer end), model: $model,
 		  base_sha: $base, head_sha: $head,
 		  previous_head_sha: ($findings_base.head_sha? // $previous.head_sha? // null),
