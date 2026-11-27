@@ -154,9 +154,10 @@ then left out. `--force-round` still runs a round the loop check would not.
 `gh pr-review rounds <PR-URL | PR-number>` prints that history, one row per
 round. Reviews posted before the records existed, and records without the full
 counts the tool writes (a review too long for them, or a damaged marker), are
-read back from their Markdown (`backfill`). Severity headings count only in the
-code review's Issues section, and a folded `<details>` list ("Fixed since the
-last round") holds no open findings:
+read back from their Markdown (`backfill`). Only the code review is read (the
+text after the `**Approach:**` verdict line), severity headings count only in
+its Issues section, and a folded `<details>` list ("Fixed since the last round")
+holds no open findings:
 
 ```
 ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LABEL     SOURCE
@@ -164,6 +165,13 @@ ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LA
 4      11-25 09:14  09b6b7c  1         questionable  no     1     9    1      churning  backfill
 next round: stop · churning · approach-stuck too-big · Settle the approach before the next round: …
 ```
+
+The Markdown is read only as a fallback: for a findings block that can't be
+used, and for a review without a usable marker. The reader follows the format
+the tool asks the model for (the `### Issues` section with severity headings,
+findings as list items, the folded Fixed and Later lists, each `<details>` tag
+on its own line), and is best effort for other Markdown: fences nested in longer
+fences, HTML before `</details>` on the same line, headings nested in list items.
 
 `+COMMITS` counts the PR's commits whose commit date falls between the
 previous round's review and this one's. It is a date window, not the commits
