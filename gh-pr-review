@@ -1189,8 +1189,8 @@ write_round_record() {
 		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" --rawfile md "$REVIEW_BODY_FILE" \
 			--argjson base "$FINDINGS_BASE" --argjson delta "$DELTA" --argjson files "$delta_files" \
 			'include "records"; length == 1 and (.[0] | findings_block_ok($base | known_ids)
-				and (stored_findings($base; later_files($delta.mode; $files)) | block_covers_markdown($parsed[0])
-					and block_respects_empty($md | empty_severities)))' "$FINDINGS_FILE" >/dev/null 2>&1; then
+				and (later_files($delta.mode; $files) as $later | block_covers_markdown($parsed[0]; $base; $later)
+					and block_respects_empty($md | empty_severities; $base; $later)))' "$FINDINGS_FILE" >/dev/null 2>&1; then
 			findings=$(jq -cs '.[0]' "$FINDINGS_FILE") || return 1
 		else
 			if [[ -s "$FINDINGS_FILE" ]]; then

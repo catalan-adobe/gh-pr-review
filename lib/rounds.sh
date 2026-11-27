@@ -59,14 +59,16 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 			record=$(backfill_record "$review" "$previous" "$round" "$pr") || return 1
 			if [[ -n "$minimal" ]]; then
 				# Its counts come from the Markdown as with_counts reads them: null, so unknown, when it has no severity
-				# heading, exactly as for a marker without counts. A later round's Markdown leaves out the findings it
-				# carried: its counts stay the backfill's, with the open blocking count of its progress line.
+				# heading, exactly as for a marker without counts. A Rethink keeps the backfill's counts, all null, so
+				# the record has the same shape whatever the marker's size. A later round's Markdown leaves out the
+				# findings it carried: its counts stay the backfill's, with the open blocking count of its progress line.
 				record=$(printf '%s\n%s\n' "$record" "$review" | jq -cs -L "${LIB_DIR:?}" --argjson m "$minimal" '
 					include "records";
 					.[1].body as $body | .[0] as $b | $b + ($m | del(.last_ids)) | del(.findings)
 					| .last_ids = {F: ([$b.last_ids.F, $m.last_ids.F?] | map(numbers) | max // 0),
 						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}
-					| if $body | later_round_body then . else del(.counts) | with_counts($body) end') || return 1
+					| if .code_review == false or ($body | later_round_body) then .
+					else del(.counts) | with_counts($body) end') || return 1
 			fi
 		fi
 		facts=$(jq -c '({posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}

@@ -380,8 +380,7 @@ check "findings_block_ok: one bad entry spoils the block" "$(ok_block '[{}, [{"l
 
 # A round 1 block, judged as round 1 stores it (stored_findings without a last code review: every entry is new).
 covers() { # block parsed -> block_covers_markdown
-	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson p "$2" \
-		'include "records"; $b | stored_findings(null; null) | block_covers_markdown($p)'
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson p "$2" 'include "records"; $b | block_covers_markdown($p; null; null)'
 }
 crit='[{"severity":"critical","title":"t"}]'
 check "block_covers_markdown: [] next to a Critical bullet does not cover it" "$(covers '[]' "$crit")" false
@@ -446,23 +445,48 @@ check "empty_severities: a bare last heading, with no heading after it, is not e
 check "empty_severities: none found in the last section is" "$(empties $'#### 🚨 Critical\n*(none found)*\n')" '["critical"]'
 check "empty_severities: one empty Critical section and one with a bullet: not empty" \
 	"$(empties $'#### Critical\n_None._\n#### Critical (again)\n- **x** y\n### End\n')" '[]'
+# A "none" line as a list item is still a "none" line, to both empty_severities and parse_findings.
+check "empty_severities: - None., - *(none found)*, * None and 1. None. are empty" \
+	"$(empties $'#### 🚨 Critical\n- None.\n#### ⚠️ Important\n- *(none found)*\n#### 💡 Minor\n* None\n#### Critical (more)\n1. None.\n### End\n')" \
+	'["critical","important","minor"]'
+check "parse_findings: the same lines are no findings" \
+	"$(printf '#### 🚨 Critical\n- None.\n#### ⚠️ Important\n- *(none found)*\n1. None.\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings')" '[]'
 respects() { # round 1 block -> block_respects_empty, judged as stored
-	jq -c -n -L "$LIB_DIR" --argjson b "$1" \
-		'include "records"; $b | stored_findings(null; null) | block_respects_empty(["critical"])'
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"]; null; null)'
 }
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
 check "block_respects_empty: round 1 fixed, declined and later Criticals are stored as new: open" \
 	"$(respects '[{"severity":"critical","status":"fixed"}]'),$(respects '[{"severity":"critical","status":"declined"}]'),$(respects '[{"severity":"critical","later":true}]')" \
 	false,false,false
 check "block_respects_empty: other severities are fine" "$(respects '[{"severity":"important"},{"severity":"minor"}]')" true
+# Reading a posted record keeps its stored statuses: a fixed or declined finding is not open (record_*). Writing from
+# the model's block in round 1 stores every entry as new (block_*: entry_outcome), so the same list is judged open
+# there.
+fixed_crit='[{"severity":"critical","status":"fixed","file":"a.go","line":10},{"severity":"critical","status":"declined"}]'
+check "record_findings: keeps each entry's status, new when it has none" \
+	"$(jq -c -n -L "$LIB_DIR" 'include "records"; [{severity: "Minor", status: "fixed"}, {severity: "minor"}] | record_findings | map(.status)')" \
+	'["fixed","new"]'
+check "record_counts: fixed and declined findings are not open" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_counts | [.open_blocking, .critical, .fixed, .declined, .new]')" \
+	'[0,0,1,1,0]'
+check "record_respects_empty: fixed and declined Criticals where the Markdown has none are fine" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_respects_empty(["critical"])')" true
+check "record_covers_markdown: a fixed Critical does not cover a visible one" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_covers_markdown([{severity: "critical", file: "a.go", line: 10}])')" false
+check "block_*: the same entries from the model's block are judged open" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | [block_respects_empty(["critical"]; null; null), block_covers_markdown([{severity: "critical", file: "a.go", line: 10}]; null; null)]')" \
+	'[false,true]'
 stored=$(build_record '{"round":1,"code_review":true}' '[{"severity":"critical","status":"fixed","later":true,"title":"x"}]' null)
 check "build_record: stores a fixed, later entry as the checks judge it: new and open" \
 	"$(jq -c '[.findings[0].status, .counts.open_blocking, .later]' <<<"$stored")" '["new",1,[]]'
-# A stored list (a marker's findings) is read as it is: a finding stored as fixed or declined is not open.
-check "block checks: a stored list keeps its statuses" \
-	"$(jq -c -n -L "$LIB_DIR" 'include "records"; [{severity: "critical", status: "fixed"}, {severity: "critical",
-		status: "declined"}] | [block_covers_markdown([{severity: "critical"}]), block_respects_empty(["critical"])]')" \
-	'[false,true]'
+# From round 2 the block is judged as entry_outcome stores it: an earlier Critical marked fixed, or declined with a
+# reason, is not open.
+for st in '"status":"fixed"' '"status":"declined","reason":"by design"'; do
+	check "block checks: round 3, F1 {$st} is not open" \
+		"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" --argjson b "[{\"id\":\"F1\",$st}]" 'include "records";
+			$b | [block_covers_markdown([{severity: "critical"}]; $base; null), block_respects_empty(["critical"]; $base; null)]')" \
+		'[false,true]'
+done
 
 # ── entry_outcome: one decision for the record builder and the block checks ────────────────────────────────
 # Round 3 on prev2 (F1 Critical open, a.ts:1), incremental, delta t.ts: stored_findings says what build_record stores.
