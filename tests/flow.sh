@@ -854,6 +854,20 @@ expect "the blocker-count check fails: comments, not approve" \
 rm "$stub/bin/jq"
 run
 expect "the blocker-count check works again: the same review approves" '[[ $rc == 0 && $flag == --approve ]]'
+# Only the second check, on the posted record, fails: the event, the marker and round.json all say comment.
+cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+if [[ "\$*" == *'(.counts.open_blocking | type)'* && "\${*: -1}" == *round.json.posted ]]; then exit 5; fi
+exec "$(command -v jq)" "\$@"
+S
+chmod +x "$stub/bin/jq"
+run
+expect "only the pre-post blocker-count check fails: event, marker and round.json all say comment" \
+	'[[ $rc == 0 && $flag == --comment &&
+		$(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" | jq -r .decision) == comment &&
+		$(jq -c "[.decision, .preview]" <<<"$record") == "[\"comment\",false]" ]] &&
+		grep -q "blockers are unknown: posting as comment" "$stub/out.log"'
+rm "$stub/bin/jq"
 
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' "$clean"
