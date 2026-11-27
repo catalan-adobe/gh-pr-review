@@ -37,6 +37,10 @@ case "\$*" in
 *graphql*) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}' ;;
 *"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; cat "$stub/discussion.json" ;;
 *"pr view"*)
+	# record.vanish: the preview round.json, once written, is emptied (the head check right before the post).
+	if [[ -f "$stub/record.vanish" ]]; then
+		for f in "$stub"/work/pr-review-sessions/pr-review-*/round.json; do [[ -f "\$f" ]] && : >"\$f"; done
+	fi
 	n=\$((\$(cat "$stub/heads.n" 2>/dev/null || echo 0) + 1))
 	echo "\$n" >"$stub/heads.n"
 	head=\$(sed -n "\${n}p" "$stub/heads")
@@ -338,6 +342,17 @@ expect "posted record fails, default approve taken at the prompt: posts as comme
 		grep -q "posting as comment, not approve" "$stub/out.log" && grep -q "Enter = approve" "$stub/out.log"'
 run_tty "Post as review" a
 expect "posted record fails, approve typed at the prompt: stays an approval" '[[ $rc == 0 && $flag == --approve ]]'
+
+# A valid preview that is gone by the time the review is posted: no posted record, so no marker and no automatic
+# approval; an approval chosen at the prompt stays.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+touch "$stub/record.vanish"
+run
+expect "preview emptied before posting: a bare yes posts as comment, without a marker" \
+	'[[ $rc == 0 && $flag == --comment && $body == *"Ready to merge?"* && $body != *"gh-pr-review:round"* ]] &&
+		grep -q "could not write the posted round record" "$stub/out.log" && grep -q "posting as comment, not approve" "$stub/out.log"'
+run_tty "Post as review" a
+expect "preview emptied before posting, approve typed at the prompt: stays an approval" '[[ $rc == 0 && $flag == --approve ]]'
 
 # ── loop check
 rounds_with() { # blocking per earlier round... -> REST reviews whose markers carry those counts

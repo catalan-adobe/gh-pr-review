@@ -1035,25 +1035,32 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		echo "Posting as comment, not approve: an approval must cover the PR's head."
 	fi
 
-	# The final record: round.json as posted.
-	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}" ]] &&
-		! jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-			'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted"; then
-		echo "Warning: could not write the posted round record; the review is posted without it." >&2
-		rm -f "$RECORD_FILE.posted"
-		RECORD_FILE=""
+	# The final record: round.json as posted, built and checked here. Only a record that passes is posted: a preview
+	# that went missing, empty or invalid since it was written is no record.
+	POSTED_RECORD=""
+	if [[ -n "${RECORD_FILE:-}" ]]; then
+		if [[ -s "$RECORD_FILE" ]] &&
+			jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+				'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted" 2>/dev/null &&
+			jq -e 'type == "object" and (.round | type == "number") and (.counts | type == "object")' \
+				"$RECORD_FILE.posted" >/dev/null 2>&1; then
+			POSTED_RECORD="$RECORD_FILE.posted"
+		else
+			echo "Warning: could not write the posted round record; the review is posted without it." >&2
+			rm -f "$RECORD_FILE.posted"
+		fi
 	fi
-	# Right before posting: without a record, an automatic approve (the verdict's, or its default taken at the prompt)
-	# posts as comment. An approve someone chose stays.
-	if [[ "$DECISION" == approve && "$AUTO_DECISION" == true && -z "${RECORD_FILE:-}" ]]; then
+	# Right before posting: without a posted record, an automatic approve (the verdict's, or its default taken at the
+	# prompt) posts as comment. An approve someone chose stays.
+	if [[ "$DECISION" == approve && "$AUTO_DECISION" == true && -z "$POSTED_RECORD" ]]; then
 		DECISION=comment
 		echo "No round record for this review: posting as comment, not approve."
 	fi
 
 	MARKER=""
-	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}.posted" ]]; then
+	if [[ -n "$POSTED_RECORD" ]]; then
 		# The marker is sized for the exact body below: header, newline, marker, newline, review.
-		if ! MARKER=$(marker_line "$RECORD_FILE.posted" "$REVIEW"); then
+		if ! MARKER=$(marker_line "$POSTED_RECORD" "$REVIEW"); then
 			MARKER=""
 			echo "Warning: could not write the round marker; posting the review without it." >&2
 		elif [[ -z "$MARKER" ]]; then
@@ -1077,8 +1084,8 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		echo "Error: GitHub did not take the review; nothing was posted. Session: ${SESSION_DIR}" >&2
 		exit 1
 	fi
-	if [[ -n "${RECORD_FILE:-}" && -s "${RECORD_FILE:-}.posted" ]]; then
-		mv "$RECORD_FILE.posted" "$RECORD_FILE"
+	if [[ -n "$POSTED_RECORD" ]]; then
+		mv "$POSTED_RECORD" "$RECORD_FILE"
 	fi
 	printf '%s\n' "$COMMENT" >"${SESSION_DIR}/posted.md"
 	echo "✓  Posted → https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}"
