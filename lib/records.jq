@@ -240,7 +240,9 @@ def reconcile_record($earlier; $position):
 	else . end;
 
 # round.json from the run's facts, the findings (block or parser) and the previous record (or null). New findings
-# are numbered after $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record.
+# are numbered after $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record. A code
+# review read from a Markdown with no severity section ($meta.no_sections: true) does not say how many blockers it
+# has: its counts are null, so its blocking is unknown, never 0.
 def build_record($meta; $findings; $prev):
 	($meta.code_review != false) as $code_review
 	| ([($meta.id_floor // {}).F | numbers] + [($prev // {}) | _last_number("F")] | max) as $last
@@ -270,7 +272,7 @@ def build_record($meta; $findings; $prev):
 		findings: $items,
 		later: [],
 		last_ids: {F: ($last + ($items | length)), L: $last_later},
-		counts: (if $code_review then
+		counts: (if $code_review and $meta.no_sections != true then
 			{open_blocking: (count("critical") + count("important")), critical: count("critical"),
 				important: count("important"), minor: count("minor"), new: ($items | length),
 				fixed: 0, declined: 0, regressed: 0}
@@ -281,8 +283,7 @@ def build_record($meta; $findings; $prev):
 	};
 
 # A record rebuilt from an old review (GitHub REST review object). The caller reads the verdict lines. A code review
-# whose Markdown has no severity section (_sections) does not say how many blockers it has: its counts are null, so
-# its blocking is unknown, never 0.
+# whose Markdown has no severity section (_sections) gets null counts (build_record).
 def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review):
 	($review.body // "") as $body
 	| build_record({
@@ -298,9 +299,9 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 		decision: ({APPROVED: "approve", CHANGES_REQUESTED: "request-changes", COMMENTED: "comment"}
 			| .[$review.state | strings] // null),
 		posted_at: $review.submitted_at,
-		code_review: $code_review
-	}; (if $code_review then $body | parse_findings else [] end); $prev)
-	| if $code_review and ($body | _sections | length) == 0 then .counts |= map_values(null) else . end;
+		code_review: $code_review,
+		no_sections: ($body | _sections | length == 0)
+	}; (if $code_review then $body | parse_findings else [] end); $prev);
 
 # The first line of every body gh-pr-review posts.
 def generated_header: "<!-- gh-pr-review generated -->";

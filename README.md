@@ -58,7 +58,7 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--no-post` | posting on (with confirm) | Print the review only |
 | `--instructions <text>` | none | Extra guidance for both passes, for example `"Focus on db/; skip style nits"`. For a file: `--instructions "$(cat notes.md)"`. The tool does not post them, and the reviewer is told not to quote them, but the review can still reflect them: use `--no-post` to preview a review shaped by sensitive notes |
 | `--skip-approach` | off | Skip the maintainer's approach pass and run the code review only, for example when the approach is already agreed |
-| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve, anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
+| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve (comment when the code review has no severity section: its blockers are unknown), anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
 | `-y`, `--yes` | off | Skip the confirmations. A loop-check stop then exits with code 3, and no new commits with code 5, instead of asking |
 | `--check` | off | Run only the loop check (see below) and exit 0, 3 or 5. No clone, no model call |
 | `--json` | off | With `--check`: print the decision as JSON on stdout |

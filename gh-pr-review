@@ -883,7 +883,7 @@ REVIEW=$(assemble_review "$LOOP_LINE" "$APPROACH" "$CODE_REVIEW")
 # round.json starts as a preview; the post block turns it into the posted round. A failure here never blocks the post.
 # It runs under `if !`, where errexit is off: every step checks its own status, and the record is checked before use.
 write_round_record() {
-	local findings parsed source=model code_review=true approach ready meta tmp="${RECORD_FILE}.tmp"
+	local findings parsed source=model code_review=true no_sections=false approach ready meta tmp="${RECORD_FILE}.tmp"
 	if [[ "$APPROACH_VERDICT" == rethink ]]; then
 		code_review=false
 		findings='[]'
@@ -904,6 +904,9 @@ write_round_record() {
 			fi
 			source=parsed
 			findings=$(jq -c . "$parsed") || findings='[]'
+			# No severity section in the Markdown: the blockers are unknown (null counts), as when read back.
+			no_sections=$(jq -Rs -L "$LIB_DIR" 'include "records"; _sections | length == 0' "$REVIEW_BODY_FILE") ||
+				no_sections=true
 		fi
 		rm -f "$parsed"
 	fi
@@ -916,12 +919,12 @@ write_round_record() {
 		--argjson number "$PR_NUM" --argjson round "$ROUND" --arg reviewer "$ME" --arg model "$MODEL" \
 		--arg base "$BASE_SHA" --arg head "$HEAD_SHA" --argjson previous "$PREVIOUS_RECORD" \
 		--arg approach "$approach" --arg ready "$ready" --argjson code_review "$code_review" \
-		--argjson id_floor "$ID_FLOOR" \
+		--argjson id_floor "$ID_FLOOR" --argjson no_sections "$no_sections" \
 		'{source: $source, pr: {host: $host, owner: $owner, repo: $repo, number: $number}, round: $round,
 		  mode: "full", reviewer: (if $reviewer == "" then null else $reviewer end), model: $model,
 		  base_sha: $base, head_sha: $head, previous_head_sha: ($previous.head_sha? // null),
 		  approach: $approach, ready: $ready, decision: null, posted_at: null,
-		  code_review: $code_review, preview: true, id_floor: $id_floor}') || return 1
+		  code_review: $code_review, preview: true, id_floor: $id_floor, no_sections: $no_sections}') || return 1
 	if ! build_record "$meta" "$findings" "$PREVIOUS_RECORD" |
 		jq --argjson loop "$LOOP" --argjson forced "$FORCED" \
 			'.loop = ($loop | {label, flags, decision}) | .forced = $forced' >"$tmp"; then
@@ -1013,10 +1016,15 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		*) DECISION=comment ;;
 		esac
 		echo "Verdict: ${VERDICT:-not found} → ${DECISION}"
-		# An approval says the findings were checked; without a record nothing can show that, so only comment.
+		# An approval says the findings were checked; without a record nothing can show that, so only comment. Nor
+		# can a record whose blockers are unknown (a code review with no severity section): that round is not ready.
 		if [[ "$DECISION" == approve && -z "${RECORD_FILE:-}" ]]; then
 			DECISION=comment
 			echo "No round record for this review: posting as comment, not approve."
+		elif [[ "$DECISION" == approve ]] &&
+			jq -e '.code_review != false and (.counts.open_blocking | type) != "number"' "$RECORD_FILE" >/dev/null 2>&1; then
+			DECISION=comment
+			echo "The review shows no severity section, so its blockers are unknown: posting as comment, not approve."
 		fi
 	fi
 
