@@ -188,6 +188,11 @@ jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${min
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "a minimal marker and no severity heading: blocking unknown, not ready, as without counts" \
 	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking, .records[0].findings_dropped]" <<<"$out") == "[[null],\"unknown\",null,true]" ]]'
+jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${minimal} -->${nl}### Approach${nl}**Approach:** Rethink" \
+	'[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "a minimal Rethink marker keeps a counts object, all null, as any Rethink record" \
+	'[[ $rc == 0 && $(jq -c "[.records[0] | .code_review, (.counts | type), .counts.open_blocking] + [.decision.labels[0]]" <<<"$out") == "[false,\"object\",null,\"rethink\"]" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
 # This PR's round 5, as posted (tests/fixtures/reviews/pr8-round5.md), after rounds 1–4 with 8, 6, 4 and 4 blockers.

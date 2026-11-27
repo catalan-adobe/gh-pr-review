@@ -59,10 +59,12 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 			record=$(backfill_record "$review" "$previous" "$round" "$pr") || return 1
 			if [[ -n "$minimal" ]]; then
 				# Its counts come from the Markdown as with_counts reads them: null, so unknown, when it has no severity
-				# heading, exactly as for a marker without counts.
+				# heading, exactly as for a marker without counts. A Rethink keeps the backfill's counts, all null, so
+				# the record has the same shape whatever the marker's size.
 				record=$(printf '%s\n%s\n' "$record" "$review" | jq -cs -L "${LIB_DIR:?}" --argjson m "$minimal" '
 					include "records";
-					.[1].body as $body | .[0] as $b | $b + ($m | del(.last_ids)) | del(.findings, .counts)
+					.[1].body as $body | .[0] as $b | $b + ($m | del(.last_ids)) | del(.findings)
+					| if .code_review == false then . else del(.counts) end
 					| .last_ids = {F: ([$b.last_ids.F, $m.last_ids.F?] | map(numbers) | max // 0),
 						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}
 					| with_counts($body)') || return 1
