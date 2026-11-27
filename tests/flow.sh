@@ -724,6 +724,39 @@ expect "round trip: the excluded entries do not come back as blockers" \
 expect "round trip: the round read back keeps no findings and no blockers" \
 	'[[ $rc == 0 && $(jq -c ".records[0] | [.source, .findings, .counts.open_blocking, .counts.critical]" "$stub/rounds.json") == "[\"parsed\",[],0,0]" ]]'
 
+# A review whose Markdown has no severity heading, with one Critical in its block, so long that its marker is the
+# minimal one (no counts). round.json keeps the Critical; read back, GitHub's copy says nothing about the blockers:
+# unknown, never ready. Compacting the marker differently never makes it ready either.
+block=$'```json findings\n[{"severity":"critical","file":"a.js","line":1,"title":"boom"}]\n```'
+setup $'**Approach:** Sound' "$(head -c 59500 /dev/zero | tr '\0' x)"$'\n\n**Ready to merge?** No\n\n'"$block"
+run
+expect "compaction: posted with the minimal marker, round.json keeps the Critical" \
+	'[[ $rc == 0 && $(jq -c "[.source, .counts.critical, (.findings | length)]" <<<"$record") == "[\"model\",1,1]" &&
+		$(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" | jq -c "[has(\"counts\"), .findings_dropped]") == "[false,true]" ]]'
+landed 41 CHANGES_REQUESTED 2026-08-01T10:00:00Z
+echo head2 >"$stub/heads"
+check_json
+expect "compaction: the minimal marker reads back as unknown, not ready" \
+	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"unknown\",[null]]" ]]'
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
+expect "compaction: the record read back has no findings and no counts" \
+	'[[ $rc == 0 && $(jq -c ".records[0] | [has(\"findings\"), .findings_dropped, .counts.open_blocking, .counts.critical]" "$stub/rounds.json") == "[false,true,null,null]" ]]'
+# The same review under other markers without counts: its findings give the Critical back, or it is unknown.
+remark() { # jq filter on round.json -> the review's marker replaced by it
+	jq --arg m "<!-- gh-pr-review:round $(jq -c "$1" <<<"$record") -->" \
+		'.[-1].body |= (split("\n") | .[1] = $m | join("\n"))' "$stub/rest-reviews.json" >"$stub/r.json"
+	mv "$stub/r.json" "$stub/rest-reviews.json"
+}
+remark 'del(.counts)'
+check_json
+expect "compaction: a marker with its findings but no counts gives the Critical back" \
+	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"early\",[1]]" ]]'
+remark 'del(.counts, .findings) | .findings_dropped = true'
+check_json
+expect "compaction: a marker with neither findings nor counts: unknown, as the minimal one" \
+	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"unknown\",[null]]" ]]'
+
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
