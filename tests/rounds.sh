@@ -207,11 +207,10 @@ cp "$stub/reviews.saved" "$stub/reviews.json"
 # pr8 <filter> changes its marker with a jq filter. Read back, its findings keep the statuses it stored: F21 and F22
 # stay fixed, never open, so the round keeps its 3 blockers, 5 fixed and its label, nit-loop.
 cp "$stub/reviews.json" "$stub/reviews.saved"
-pr8() { # jq filter on round 5's marker -> reviews.json: rounds 1–4, then round 5 with that marker
-	local marker
-	marker=$(sed -n 2p "$root/tests/fixtures/reviews/pr8-round5.md" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' |
-		jq -c "$1" | sed 's/--/-\\u002d/g')
-	jq -n --rawfile b "$root/tests/fixtures/reviews/pr8-round5.md" --arg m "<!-- gh-pr-review:round ${marker} -->" '
+pr8() { # jq filter on round 5's marker [posted body] -> reviews.json: rounds 1–4, then round 5 with that marker
+	local posted="${2:-$root/tests/fixtures/reviews/pr8-round5.md}" marker
+	marker=$(sed -n 2p "$posted" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' | jq -c "$1" | sed 's/--/-\\u002d/g')
+	jq -n --rawfile b "$posted" --arg m "<!-- gh-pr-review:round ${marker} -->" '
 		[[8, 0], [6, 1], [4, 0], [4, 0]] as $c
 		| [range(4) as $i | {schema: 1, round: ($i + 1), code_review: true, approach: "sound", ready: "no",
 			counts: {open_blocking: $c[$i][0], critical: $c[$i][1], important: ($c[$i][0] - $c[$i][1]), minor: 0}}
@@ -243,6 +242,46 @@ del(.counts.minor)~[3,0,"","nit-loop",30]
 .counts.open_blocking = 2~[3,0,"","nit-loop",30]
 del(.last_ids) | .counts = {critical: 0, important: 5}~[3,0,"","nit-loop",30]
 del(.last_ids, .counts) | .findings |= map(if .id == "F28" then .status = "fixed" else . end)~[3,0,"","nit-loop",30]
+T
+# The same round under every marker shape marker_line emits, each the largest that fits as the review grows: full,
+# without titles, without locations, without the Later list, without findings, minimal. Each reads back with the full
+# marker's counts, ID floor and next decision; the minimal marker's counts come from the Markdown, and match.
+sed -n 2p "$root/tests/fixtures/reviews/pr8-round5.md" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' |
+	jq '.findings[].title = "Round 5"' >"$stub/r5.json"
+sed 1,2d "$root/tests/fixtures/reviews/pr8-round5.md" >"$stub/review5.md"
+open_counts() { jq -c '.[0] |= {open_blocking, critical, important, minor}' <<<"$1"; }
+full=""
+while IFS='~' read -r shape filter; do
+	want=$(jq -cS "$filter" "$stub/r5.json")
+	# The review, padded so that header, marker and review are exactly 60,000 characters with this shape's marker.
+	jq -nj --rawfile r "$stub/review5.md" --argjson m "$(jq -c "$filter" "$stub/r5.json")" '
+		("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + ($m | tojson | gsub("--"; "-\\u002d")) + " -->\n") as $head
+		| $r + "\n" + ("x" * (60000 - ($head | length) - ($r | length) - 1))' >"$stub/body5.md"
+	line=$(LIB_DIR="$root/lib" bash -c 'source "$LIB_DIR/records.sh"; marker_line "$1" "$2"' _ "$stub/r5.json" "$stub/body5.md")
+	printf '<!-- gh-pr-review generated -->\n%s\n' "$line" | cat - "$stub/body5.md" >"$stub/posted5.md"
+	expect "marker shape $shape: marker_line emits it, at 60,000 characters" \
+		'[[ $(sed "s/^<!-- gh-pr-review:round //; s/ -->$//" <<<"$line" | jq -cS .) == "$want" &&
+			$(jq -Rs length "$stub/posted5.md") == 60000 ]]'
+	pr8 . "$stub/posted5.md"
+	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+	got=$(jq -c -L "$root/lib" 'include "records"; [.records[4].counts, (.records | id_floor), .decision]' <<<"$out")
+	if [[ $shape == full ]]; then
+		full="$got"
+		expect "marker shape full: 3 blockers, 5 fixed, ID floor F30, nit-loop" \
+			'[[ $rc == 0 && $(jq -c "[.[0].open_blocking, .[0].fixed, .[1].F, .[2].label]" <<<"$got") == "[3,5,30,\"nit-loop\"]" ]]'
+	elif [[ $shape == minimal ]]; then
+		expect "marker shape minimal: the Markdown's open counts match the full marker's, same ID floor and decision" \
+			'[[ $rc == 0 && $(open_counts "$got") == "$(open_counts "$full")" ]]'
+	else
+		expect "marker shape $shape: the full marker's counts, ID floor and decision" '[[ $rc == 0 && $got == "$full" ]]'
+	fi
+done <<'T'
+full~.
+without titles~del(.findings[].title)
+without locations~del(.findings[] | .title, .file, .line, .first_round, .in_delta)
+without the Later list~del(.findings[] | .title, .file, .line, .first_round, .in_delta) | del(.later)
+without findings~del(.later, .findings) | .findings_dropped = true
+minimal~{schema: 1, round, findings_dropped: true, last_ids}
 T
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
