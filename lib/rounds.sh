@@ -122,6 +122,8 @@ cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 			;;
 		-h | --help)
 			echo "Usage: gh pr-review rounds <PR-URL | PR-number> [--json] [-u <login>]"
+			echo "+COMMITS: the commits dated between the previous round's review and this one's (a date window:"
+			echo "a commit pushed while a review ran can count toward that review)."
 			return 0
 			;;
 		-*)

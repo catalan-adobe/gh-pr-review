@@ -142,6 +142,11 @@ ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LA
 next round: stop · churning · approach-stuck too-big · Settle the approach before the next round: …
 ```
 
+`+COMMITS` counts the PR's commits whose commit date falls between the
+previous round's review and this one's. It is a date window, not the commits
+between the two reviewed heads: a commit pushed while a review runs can be
+counted toward that review instead of the next one.
+
 The label says whether the loop converges: `early` (fewer than 3 rounds),
 `converging`, `ready`, `nit-loop` (a few Important findings that keep coming
 back) or `churning`; `unknown` when a round's record has no blocking count and
