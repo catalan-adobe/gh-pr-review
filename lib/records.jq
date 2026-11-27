@@ -60,6 +60,36 @@ def parse_findings:
 		else . end)
 	| .out;
 
+# The severity sections of a review's Markdown, in order: {severity, lines (the non-blank lines up to the next
+# heading), closed (another heading follows)}. Fenced code belongs to the section it is in.
+def _sections:
+	reduce (split("\n")[] | sub("\r$"; "")) as $l ({fence: false, open: false, out: []};
+		if .fence or ($l | test("^\\s*(```|~~~)")) then
+			(if ($l | test("^\\s*(```|~~~)")) then .fence |= not else . end)
+			| if .open then .out[-1].lines += [$l] else . end
+		elif ($l | test("^#{1,6}\\s")) then
+			(if .open then .out[-1].closed = true else . end)
+			| ($l | _severity) as $s
+			| if $s != null then .out += [{severity: $s, lines: [], closed: false}] | .open = true else .open = false end
+		elif .open and ($l | _blank | not) then .out[-1].lines += [$l]
+		else . end)
+	| .out;
+
+# The severities the Markdown says it has none of: each section of that severity holds only a "none" line
+# ("*(none found)*", "None.", "_None found_"), or nothing at all before the next heading.
+def empty_severities:
+	def none_line: ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
+	_sections | group_by(.severity)
+	| map(select(all(.[]; (.lines | length == 1 and (.[0] | none_line)) or (.closed and (.lines | length == 0)))))
+	| map(.[0].severity);
+
+# False when the block has an open entry of a severity the Markdown says it has none of ($empty: empty_severities):
+# what the reader sees wins, and the round is parsed instead.
+def block_respects_empty($empty):
+	(if type == "array" then . else [] end)
+	| all(.[] | objects | select(.later != true) | select((.status // "new") | . != "fixed" and . != "declined");
+		(.severity | strings | ascii_downcase) as $s | all($empty[]; . != $s));
+
 # True when the model's findings block can be used as it is: an array whose every entry is an object with a known
 # severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
 # back to the Markdown, so normalize_findings never drops a finding the reader can see.

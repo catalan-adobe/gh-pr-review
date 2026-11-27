@@ -882,9 +882,10 @@ write_round_record() {
 		parsed="${RECORD_FILE}.parsed"
 		parse_findings "$REVIEW_BODY_FILE" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
 		# The block must hold exactly one JSON value, an array: anything else ("[] [ … ]") is read from the Markdown.
-		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" \
-			'include "records"; length == 1 and (.[0] | findings_block_ok and block_covers_markdown($parsed[0]))' \
-			"$FINDINGS_FILE" >/dev/null 2>&1; then
+		# So is a block with an open finding of a severity the Markdown says it has none of ("*(none found)*").
+		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" --rawfile md "$REVIEW_BODY_FILE" \
+			'include "records"; length == 1 and (.[0] | findings_block_ok and block_covers_markdown($parsed[0])
+				and block_respects_empty($md | empty_severities))' "$FINDINGS_FILE" >/dev/null 2>&1; then
 			findings=$(jq -cs '.[0]' "$FINDINGS_FILE") || return 1
 		else
 			if [[ -s "$FINDINGS_FILE" ]]; then

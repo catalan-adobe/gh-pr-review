@@ -198,6 +198,22 @@ check "block_covers_markdown: ranges and lines matched one to one" \
 	"$(covers '[{"severity":"critical","file":"a.go","line":12},{"severity":"critical","file":"a.go","line":10}]' \
 		"$(range_md $'- **`a.go:10–14` — x.**\n- **`a.go:12` — y.**')")" true
 
+# Empty severity sections: "*(none found)*", or the heading right before the next one, is what the reader sees.
+empties() { printf '%s' "$1" | jq -c -Rs -L "$LIB_DIR" 'include "records"; empty_severities'; }
+check "empty_severities: none found, a bare heading, and a section with a bullet" \
+	"$(empties $'#### 🚨 Critical\n\n*(none found)*\n\n#### ⚠️ Important\n\n#### 💡 Minor\n- **`a.js:1` — x.**\n### Assessment\n')" \
+	'["critical","important"]'
+check "empty_severities: a section with prose is not empty" "$(empties $'#### 🚨 Critical\nNothing blocks, but see below.\n### End\n')" '[]'
+check "empty_severities: a bare last heading, with no heading after it, is not explicit" "$(empties $'#### 🚨 Critical\n')" '[]'
+check "empty_severities: none found in the last section is" "$(empties $'#### 🚨 Critical\n*(none found)*\n')" '["critical"]'
+check "empty_severities: one empty Critical section and one with a bullet: not empty" \
+	"$(empties $'#### Critical\n_None._\n#### Critical (again)\n- **x** y\n### End\n')" '[]'
+respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }
+check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
+check "block_respects_empty: fixed, declined and later entries, and other severities, are fine" \
+	"$(respects '[{"severity":"critical","status":"fixed"},{"severity":"critical","status":"declined"},
+		{"severity":"critical","later":true},{"severity":"important"}]')" true
+
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \
 	"Yes (with fixes)=yes-with-fixes" "yes — with fixes=yes-with-fixes" "No — see Critical=no" "no.=no" \

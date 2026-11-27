@@ -627,6 +627,21 @@ run
 expect "at once: round 3 numbers its new finding after both runs' IDs" \
 	'[[ $rc == 0 && $(jq -c "[.round, .findings[0].id, .last_ids.F]" <<<"$record") == "[3,\"F42\",42]" ]]'
 
+# The Markdown says there is nothing to fix; the block claims four Criticals. The reader's version wins: the record
+# is parsed, with no blockers, the bare yes approves, and the round reads back as ready.
+none=$'*(none found)*\n\n'
+block=$'```json findings\n'"$(jq -nc '[range(4) | {severity: "critical", file: "a.js", line: (. + 1), title: "c\(.)"}]')"$'\n```'
+setup $'**Approach:** Sound' $'### Issues\n\n#### 🚨 Critical (Must Fix Before Merge)\n\n'"$none"$'#### ⚠️ Important (Should Fix)\n\n'"$none"$'#### 💡 Minor (Nice to Have)\n\n'"$none"$'### Assessment\n\n**Ready to merge?** Yes\n\n'"$block"
+run
+expect "records: blockers in the block under empty Markdown sections: parsed, none blocking, approved" \
+	'[[ $rc == 0 && $flag == --approve && $(jq -c "[.source, .counts.open_blocking, .counts.critical, (.findings | length)]" <<<"$record") == "[\"parsed\",0,0,0]" ]] &&
+		grep -q "does not match the review" "$stub/out.log"'
+landed 31 APPROVED 2026-07-01T10:00:00Z
+echo head2 >"$stub/heads"
+check_json
+expect "records: that round reads back with no blockers, as ready" \
+	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"ready\",[0]]" ]]'
+
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
