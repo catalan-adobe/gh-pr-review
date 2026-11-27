@@ -152,8 +152,11 @@ a contributor, to a token that cannot see that membership: their rounds are
 then left out. `--force-round` still runs a round the loop check would not.
 
 `gh pr-review rounds <PR-URL | PR-number>` prints that history, one row per
-round. Reviews posted before the records existed are read back from their
-Markdown (`backfill`):
+round. Reviews posted before the records existed, and records without the full
+counts the tool writes (a review too long for them, or a damaged marker), are
+read back from their Markdown (`backfill`). Severity headings count only in the
+code review's Issues section, and a folded `<details>` list ("Fixed since the
+last round") holds no open findings:
 
 ```
 ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LABEL     SOURCE
@@ -170,7 +173,7 @@ counted toward that review instead of the next one.
 The label says whether the loop converges: `early` (fewer than 3 rounds),
 `converging`, `ready`, `nit-loop` (a few Important findings that keep coming
 back) or `churning`; `unknown` when a round's record has no blocking count and
-neither its findings nor its Markdown can rebuild one (never read as 0, so
+its Markdown has no severity section to rebuild one from (never read as 0, so
 never `ready`). `--json` prints the records and the decision; `-u <login>`
 picks the gh account, as for a review.
 
