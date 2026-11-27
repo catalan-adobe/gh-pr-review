@@ -189,6 +189,14 @@ review says so ("the PR moved to … during the review; this review covers …")
 and is never an approval, even with `--decision approve`: it posts as a
 comment. The new commits stay unreviewed, and `--check` runs on them.
 
+Pinning the commit is guaranteed; detecting a push is not. The head is read
+once more right before posting, but that read and the post are two separate
+requests: a push that lands between them still leaves the review (an approval,
+if that was the decision) on the old commit, without the note. GitHub shows
+it as a review of an outdated commit. Teams that need a fresh approval after
+every push should turn on "Dismiss stale pull request approvals when new
+commits are pushed" in the branch protection rules (or rulesets).
+
 `gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
 or 5 (no new commits); `--check --json` prints the decision as JSON for
 scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
