@@ -221,6 +221,22 @@ pr8 'del(.counts)'
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "PR 8 round 5 without counts: its fixed findings stay fixed, not open: 3 blockers, 5 fixed, nit-loop" \
 	'[[ $rc == 0 && $(round5) == "[3,5,\"fixed fixed\",\"nit-loop\"]" ]]'
+# The same round with its counts and lists damaged in other ways. Whatever is missing, the round read back never shows
+# fewer blockers than its Markdown (3 Important), never counts F21 or F22 (fixed) as open, and never lowers the ID
+# floor below round 5's F30, even with last_ids gone and the list dropped. Each line: the marker filter, "~", then
+# [open_blocking, fixed, the statuses of F21 and F22 when the list is kept, the label, the ID floor].
+while IFS='~' read -r filter want; do
+	pr8 "$filter"
+	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+	expect "PR 8 round 5, $filter: $want" \
+		'[[ $rc == 0 && $(jq -c -L "$root/lib" "include \"records\"; [.records[4] | .counts.open_blocking, .counts.fixed, ([.findings[]? | select(.id == \"F21\" or .id == \"F22\") | .status] | join(\" \"))] + [.decision.labels[4], (.records | id_floor.F)]" <<<"$out") == "$want" ]]'
+done <<'T'
+del(.counts.open_blocking)~[3,5,"fixed fixed","nit-loop",30]
+.counts = {critical: 0, important: 0}~[3,5,"fixed fixed","nit-loop",30]
+.counts = {critical: 0, important: 2}~[3,5,"fixed fixed","nit-loop",30]
+del(.last_ids) | .counts = {critical: 0, important: 5}~[5,null,"","churning",30]
+del(.last_ids, .counts) | .findings |= map(if .id == "F28" then .status = "fixed" else . end)~[3,0,"","nit-loop",30]
+T
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
 # Only trusted reviews are rounds. eve, a contributor, posts a generated review on the PR's head: not a round, so the
