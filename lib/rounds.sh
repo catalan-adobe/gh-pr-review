@@ -50,11 +50,11 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 			fi
 			record=$(backfill_record "$review" "$previous" "$round" "$pr") || return 1
 			if [[ -n "$marker" ]]; then
-				# Counts from the Markdown, the marker's other facts, no findings list (findings_dropped), and the IDs
-				# the marker held kept as the ID floor.
+				# Counts from the Markdown (source backfill), the marker's other facts, no findings list
+				# (findings_dropped), and the IDs the marker held kept as the ID floor.
 				record=$(printf '%s\n%s\n' "$record" "$marker" | jq -cs -L "${LIB_DIR:?}" 'include "records";
 					{F: (map(_last_number("F")) | max), L: (map(_last_number("L")) | max)} as $ids
-					| .[0] + (.[1] | del(.findings, .later, .counts)) + {findings_dropped: true, last_ids: $ids}
+					| .[0] + (.[1] | del(.source, .findings, .later, .counts)) + {findings_dropped: true, last_ids: $ids}
 					| del(.findings)') || return 1
 			fi
 		fi

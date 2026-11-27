@@ -157,6 +157,8 @@ done <<'T'
 {"findings":[{"id":"F1","severity":"critical","status":"new"}]}~none_md~[0,0,0,false,true,"ready",1]
 {"findings":[{"id":"F7","severity":"minor","status":"fixed"}],"last_ids":{"F":9,"L":2}}~none_md~[0,0,0,false,true,"ready",9]
 T
+expect "partial marker: its source is backfill, its other facts stay" \
+	'[[ $(jq -c ".records[0] | [.source, .approach, .ready, .last_ids.L]" <<<"$out") == "[\"backfill\",\"sound\",\"yes-with-fixes\",2]" ]]'
 # Two runs claim round 1 with a new F1 each; the second marker has partial counts and a list too short for them. Its
 # Markdown shows its finding: it takes the floor's next ID, F2, so round 3 numbers from F3.
 partial "$one" x
