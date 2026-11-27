@@ -162,6 +162,21 @@ check "block_covers_markdown: open, regressed and status-less entries are" \
 		'[{"severity":"critical"},{"severity":"important"},{"severity":"important"}]')" true
 check "block_covers_markdown: minor findings in the Markdown need no cover" \
 	"$(covers '[]' '[{"severity":"minor","title":"t"}]')" true
+two='[{"severity":"critical","file":"a.go","line":10},{"severity":"critical","file":"b.go","line":11}]'
+check "block_covers_markdown: one location repeated does not cover another blocker's" \
+	"$(covers '[{"severity":"critical","file":"a.go","line":10},{"severity":"critical","file":"a.go","line":10}]' "$two")" false
+check "block_covers_markdown: each location once covers them" \
+	"$(covers '[{"severity":"critical","file":"b.go","line":11},{"severity":"important","file":"a.go","line":10},
+		{"severity":"critical","title":"no location"}]' "$two")" true
+check "block_covers_markdown: two bullets at one location need two entries there" \
+	"$(covers '[{"severity":"critical","file":"a.go","line":10},{"severity":"critical","file":"c.go","line":1}]' \
+		'[{"severity":"critical","file":"a.go","line":10},{"severity":"critical","file":"a.go","line":10}]')" false
+check "block_covers_markdown: entries and bullets without a location take no part" \
+	"$(covers '[{"severity":"critical","title":"x"},{"severity":"critical","file":"z.go"}]' \
+		'[{"severity":"critical","file":"a.go","line":null},{"severity":"critical","file":null,"line":null}]')" true
+check "block_covers_markdown: a fixed entry at the location does not cover it" \
+	"$(covers '[{"severity":"critical","file":"a.go","line":10,"status":"fixed"},{"severity":"critical"}]' \
+		'[{"severity":"critical","file":"a.go","line":10}]')" false
 
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \

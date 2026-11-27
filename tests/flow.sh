@@ -236,8 +236,9 @@ expect "records: the marker follows the generated marker" '[[ $body == "<!-- gh-
 expect "records: round.json has the model findings" '[[ $(jq -r ".source, .round, .findings[0].id, .findings[0].file, .preview, .decision" <<<"$record" | paste -sd, -) == "model,1,F1,a.js,false,comment" ]]'
 expect "records: posted.md is the posted body" '[[ -f $(ls -d "$stub"/work/pr-review-sessions/pr-review-*)/posted.md ]]'
 
+# The bullet has no location: a located one must match a block entry's location (block_covers_markdown).
 block=$'```json findings\n[{"severity":"important","file":"secret/plan.md","line":3,"title":"SECRET note from the instructions"}]\n```'
-setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** No\n\n'"$block"
+setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **Thing breaks.**\n\n**Ready to merge?** No\n\n'"$block"
 run
 expect "records: text only in the findings block is not posted" \
 	'[[ $rc == 0 && $body == *"gh-pr-review:round"* && $body != *SECRET* && $body != *secret/plan.md* ]]'
@@ -278,6 +279,12 @@ run
 expect "records: an empty block next to a Critical bullet falls back to the Markdown" \
 	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .counts.open_blocking, .findings[0].file" <<<"$record" | paste -sd, -) == "parsed,1,1,b.js" ]] &&
 		grep -q "does not match the review" "$stub/out.log"'
+
+block=$'```json findings\n[{"severity":"critical","file":"a.go","line":10,"title":"one"},{"severity":"critical","file":"a.go","line":10,"title":"two"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`a.go:10` — one.**\n- **`b.go:11` — two.**\n\n**Ready to merge?** No\n\n'"$block"
+run
+expect "records: a block repeating one blocker's location falls back to the Markdown" \
+	'[[ $rc == 0 && $(jq -c "[.source, [.findings[] | .file]]" <<<"$record") == "[\"parsed\",[\"a.go\",\"b.go\"]]" ]]'
 
 setup $'### Approach\n**Approach:** Rethink' 'never used'
 run

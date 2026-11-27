@@ -71,14 +71,23 @@ def findings_block_ok:
 # the posted body): as many open Critical findings, and as many open Critical and Important ones together. An entry
 # with status fixed or declined, or with later: true, is not open; status and later may be absent. A block that
 # leaves out or downgrades a visible blocker ([] next to a Critical bullet) fails, and the round is parsed instead.
+# The locations must match too, one to one: every Critical or Important bullet with a file:line needs its own open
+# blocking entry at that file:line (two bullets at a.go:10 need two entries there). An entry repeated at one bullet's
+# location does not cover another bullet's. Entries and bullets without a file and line take no part in this.
 def block_covers_markdown($parsed):
-	def open($sev): [.[] | objects | select(.later != true)
-		| select((.status // "new") | . != "fixed" and . != "declined")
-		| select((.severity | strings | ascii_downcase) == $sev)] | length;
+	def blocking: (.severity | strings | ascii_downcase) as $s | $s == "critical" or $s == "important";
+	def location: if (.file | type == "string" and . != "") and (.line | type == "number")
+		then "\(.file):\(.line | floor)" else empty end;
+	def open_entries: [.[] | objects | select(.later != true)
+		| select((.status // "new") | . != "fixed" and . != "declined")];
+	def open($sev): [open_entries[] | select((.severity | strings | ascii_downcase) == $sev)] | length;
 	def shown($sev): [($parsed // [])[]? | objects | select(.severity == $sev)] | length;
 	(if type == "array" then . else [] end)
+	| [open_entries[] | select(blocking) | location] as $have
+	| [($parsed // [])[]? | objects | select(blocking) | location] as $seen
 	| open("critical") >= shown("critical")
-		and open("critical") + open("important") >= shown("critical") + shown("important");
+		and open("critical") + open("important") >= shown("critical") + shown("important")
+		and all($seen | group_by(.)[]; .[0] as $at | ($have | map(select(. == $at)) | length) >= length);
 
 # Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
 def normalize_findings:
