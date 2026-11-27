@@ -131,8 +131,21 @@ record is saved as `round.json`. The record on GitHub holds only what the
 review already says: a title or path the posted review does not show is left
 out of the marker, and the `--instructions` text and the prompts are never in
 it. `round.json` in the session folder is not filtered: it keeps everything the
-model returned, so inspect it before sharing it. Rounds posted by anyone with
-this tool count, so the history is the same on every machine.
+model returned, so inspect it before sharing it.
+
+Not every review that looks generated is a round. Anyone who can comment on
+a PR can post a review that starts with the `<!-- gh-pr-review generated -->`
+line, and a round can stop the next one, so only trusted reviews count: those
+whose author GitHub reports as an owner, member or collaborator of the repo
+(the review's `author_association`), and your own, so your rounds count where
+you are only a contributor. Everything that reads the history uses the same
+rule (the loop check, `--check`, `rounds`, the re-read before posting, finding
+IDs), so the history is the same for everyone with the same access. The
+reviews left out are named once, for example
+`ignored: 1 generated review by @x (not a member or collaborator of the repo)`.
+GitHub can report a member of an organization whose membership is private as
+a contributor, to a token that cannot see that membership: their rounds are
+then left out. `--force-round` still runs a round the loop check would not.
 
 `gh pr-review rounds <PR-URL | PR-number>` prints that history, one row per
 round. Reviews posted before the records existed are read back from their
