@@ -24,7 +24,15 @@ setup() { # approach-output code-review-output [discussion-exit-code] [failing-p
 case "\$*" in
 *"--method POST"*pulls/1/reviews*)
 	[[ -f "$stub/post.fail" ]] && exit 1
-	while [[ \$# -gt 0 ]]; do [[ "\$1" == --input ]] && cp "\$2" "$stub/posted.json"; shift; done ;;
+	while [[ \$# -gt 0 ]]; do [[ "\$1" == --input ]] && cp "\$2" "$stub/posted.json"; shift; done
+	# post.lost: GitHub takes the review, and its answer is lost.
+	if [[ -f "$stub/post.lost" ]]; then
+		jq --slurpfile p "$stub/posted.json" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + [{id: 99,
+			user: {login: "me", type: "User"}, state: "COMMENTED", commit_id: \$p[0].commit_id, submitted_at: \$at,
+			body: \$p[0].body}]' "$stub/rest-reviews.json" >"$stub/rest-reviews.tmp"
+		mv "$stub/rest-reviews.tmp" "$stub/rest-reviews.json"
+		exit 1
+	fi ;;
 *pulls/1/reviews*)
 	# reviews.fail: how many reads of the reviews fail from now on.
 	n=\$(cat "$stub/reviews.fail" 2>/dev/null || echo 0)
@@ -638,6 +646,14 @@ expect "loop line and moved head: the loop line first, then the note" \
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 touch "$stub/post.fail"
 run
-expect "the review API refuses: exit 1, the session kept, the record still a preview" \
-	'[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] && grep -q "nothing was posted" "$stub/out.log"'
+expect "the review API fails and no review landed: exit 1, unconfirmed, the record still a preview" \
+	'[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] &&
+		grep -q "could not confirm whether the review was posted; run .gh pr-review rounds https://github.com/o/r/pull/1. before retrying" "$stub/out.log" &&
+		! grep -q "nothing was posted" "$stub/out.log"'
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+touch "$stub/post.lost"
+run
+expect "the review API fails but the review landed: posted, the record finished as posted" \
+	'[[ $rc == 0 && $flag == --approve && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "false,approve" ]] &&
+		grep -q "the review is on the PR: it was posted" "$stub/out.log" && grep -q "Posted →" "$stub/out.log"'
 exit "$fail"

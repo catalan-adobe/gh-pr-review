@@ -364,6 +364,9 @@ echo "    ${PR_TITLE}"
 echo "    @${PR_AUTHOR}  ·  +${ADDITIONS} -${DELETIONS}  ·  ${N_FILES} files changed"
 echo ""
 
+# When this run started, in GitHub's UTC time format: a review this run posted was submitted after it.
+RUN_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
 # ── loop check ─────────────────────────────────────────────────────────────────────
 # Earlier gh-pr-review reviews (by anyone) are earlier rounds. Before any clone or model call, decide whether this
 # round should run: not when nothing changed, and not when the loop has stopped converging (see `gh pr-review rounds`).
@@ -960,6 +963,20 @@ pr_head_now() {
 	return 1
 }
 
+# After the post request failed: true when the review is on the PR all the same (the request reached GitHub, the
+# answer did not come back). That is a generated review by this user, on the reviewed commit, submitted since the run
+# started. One read; anything in doubt (no login, a failed read) is false.
+review_landed() {
+	local json
+	[[ -n "${ME:-}" ]] || return 1
+	json=$(gh api --hostname "$GH_HOST_NAME" --paginate "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" 2>/dev/null) ||
+		return 1
+	jq -se -L "$LIB_DIR" --arg me "$ME" --arg commit "$HEAD_SHA" --arg since "${RUN_STARTED:-}" '
+		include "records";
+		any(add // [] | .[]; (.body | is_generated_review) and .state != "PENDING" and .user.login == $me
+			and .commit_id == $commit and (.submitted_at // "") >= $since)' <<<"$json" >/dev/null 2>&1
+}
+
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	if [[ -z "$DECISION" && "${APPROACH_VERDICT:-}" == rethink ]]; then
 		DECISION=request-changes
@@ -1087,8 +1104,15 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		'{commit_id: $commit, event: $event, body: .}' >"${SESSION_DIR}/post.json"
 	if ! gh api --hostname "$GH_HOST_NAME" --method POST "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" \
 		--input "${SESSION_DIR}/post.json" >/dev/null; then
-		echo "Error: GitHub did not take the review; nothing was posted. Session: ${SESSION_DIR}" >&2
-		exit 1
+		# An error does not always mean nothing was posted: the answer can be lost after GitHub took the review.
+		if review_landed; then
+			echo "Warning: GitHub answered with an error, but the review is on the PR: it was posted." >&2
+		else
+			echo "Error: could not confirm whether the review was posted; run" \
+				"\`gh pr-review rounds https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}\` before retrying." >&2
+			echo "    Session: ${SESSION_DIR}" >&2
+			exit 1
+		fi
 	fi
 	if [[ -n "$POSTED_RECORD" ]]; then
 		mv "$POSTED_RECORD" "$RECORD_FILE"

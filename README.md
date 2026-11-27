@@ -197,6 +197,12 @@ it as a review of an outdated commit. Teams that need a fresh approval after
 every push should turn on "Dismiss stale pull request approvals when new
 commits are pushed" in the branch protection rules (or rulesets).
 
+If the post request fails, the review may still have landed (the answer can
+be lost after GitHub took it). The tool then reads the reviews once: if this
+run's review is there, it reports it posted; otherwise it says it could not
+confirm whether the review was posted and exits with code 1. Run
+`gh pr-review rounds <PR>` before retrying, so the round is not posted twice.
+
 `gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
 or 5 (no new commits); `--check --json` prints the decision as JSON for
 scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
