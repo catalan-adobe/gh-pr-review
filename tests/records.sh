@@ -213,6 +213,12 @@ check "empty_severities: a bare last heading, with no heading after it, is not e
 check "empty_severities: none found in the last section is" "$(empties $'#### 🚨 Critical\n*(none found)*\n')" '["critical"]'
 check "empty_severities: one empty Critical section and one with a bullet: not empty" \
 	"$(empties $'#### Critical\n_None._\n#### Critical (again)\n- **x** y\n### End\n')" '[]'
+# A "none" line as a list item is still a "none" line, to both empty_severities and parse_findings.
+check "empty_severities: - None., - *(none found)*, * None and 1. None. are empty" \
+	"$(empties $'#### 🚨 Critical\n- None.\n#### ⚠️ Important\n- *(none found)*\n#### 💡 Minor\n* None\n#### Critical (more)\n1. None.\n### End\n')" \
+	'["critical","important","minor"]'
+check "parse_findings: the same lines are no findings" \
+	"$(printf '#### 🚨 Critical\n- None.\n#### ⚠️ Important\n- *(none found)*\n1. None.\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings')" '[]'
 respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
 check "block_respects_empty: fixed, declined and later Criticals are stored as new: open" \

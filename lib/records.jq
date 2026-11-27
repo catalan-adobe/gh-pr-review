@@ -47,8 +47,10 @@ def _finding($severity):
 	| {severity: $severity, file: $where.file, line: $where.line, title: ($rest | _title)}
 		+ (if $where.line_end then {line_end: $where.line_end} else {} end);
 
-# A line that only says there is nothing: "*(none found)*", "None.", "_None found_".
-def _none_line: ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
+# A line that only says there is nothing: "*(none found)*", "None.", "_None found_", also as a list item ("- None.",
+# "* None", "+ _None found_", "1. None."). The one check: parse_findings and empty_severities both use it.
+def _none_line:
+	sub("^\\s*([-*+]|\\d+\\.)\\s+"; "") | ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
 
 # Markdown in, findings out: the top-level "- " and "<n>. " items, bold or plain, under each heading that names a
 # severity, up to the next heading ("- None." is not one). Fenced code is skipped. A location given as a range keeps
@@ -58,8 +60,7 @@ def parse_findings:
 		if ($l | test("^\\s*(```|~~~)")) then .fence |= not
 		elif .fence then .
 		elif ($l | test("^#{1,6}\\s")) then .severity = ($l | _severity)
-		elif .severity != null and ($l | test("^(-|\\d+\\.)\\s+\\S"))
-			and ($l | sub("^(-|\\d+\\.)\\s+"; "") | _none_line | not) then
+		elif .severity != null and ($l | test("^(-|\\d+\\.)\\s+\\S")) and ($l | _none_line | not) then
 			.severity as $s | .out += [$l | _finding($s)]
 		else . end)
 	| .out;
@@ -80,7 +81,7 @@ def _sections:
 	| .out;
 
 # The severities the Markdown says it has none of: each section of that severity holds only a "none" line
-# ("*(none found)*", "None.", "_None found_"), or nothing at all before the next heading.
+# ("*(none found)*", "None.", "- None.": _none_line), or nothing at all before the next heading.
 def empty_severities:
 	_sections | group_by(.severity)
 	| map(select(all(.[]; (.lines | length == 1 and (.[0] | _none_line)) or (.closed and (.lines | length == 0)))))

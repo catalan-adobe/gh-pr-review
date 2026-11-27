@@ -724,6 +724,15 @@ expect "round trip: the excluded entries do not come back as blockers" \
 expect "round trip: the round read back keeps no findings and no blockers" \
 	'[[ $rc == 0 && $(jq -c ".records[0] | [.source, .findings, .counts.open_blocking, .counts.critical]" "$stub/rounds.json") == "[\"parsed\",[],0,0]" ]]'
 
+# The same four fixed Criticals, with "- None." as the sole Critical bullet: a "none" line as a list item is still
+# empty, so the record is parsed, with no blockers, as the reader sees it.
+none=$'- None.\n\n'
+setup $'**Approach:** Sound' $'### Issues\n\n#### 🚨 Critical (Must Fix Before Merge)\n\n'"$none"$'#### ⚠️ Important (Should Fix)\n\n'"$none"$'#### 💡 Minor (Nice to Have)\n\n'"$none"$'### Assessment\n\n**Ready to merge?** Yes\n\n'"$block"
+run
+expect "records: fixed blockers in the block under - None. sections: parsed, none blocking" \
+	'[[ $rc == 0 && $flag == --approve && $(jq -c "[.source, .counts.open_blocking, (.findings | length)]" <<<"$record") == "[\"parsed\",0,0]" ]] &&
+		grep -q "does not match the review" "$stub/out.log"'
+
 # A review whose Markdown has no severity heading, with one Critical in its block, so long that its marker is the
 # minimal one (no counts). round.json keeps the Critical; read back, GitHub's copy says nothing about the blockers:
 # unknown, never ready. Compacting the marker differently never makes it ready either.
