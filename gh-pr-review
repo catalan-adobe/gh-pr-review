@@ -881,9 +881,11 @@ write_round_record() {
 		# A parse failure leaves a parsed record without findings, as the spec says: it never blocks the post.
 		parsed="${RECORD_FILE}.parsed"
 		parse_findings "$REVIEW_BODY_FILE" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
-		if jq -e -L "$LIB_DIR" --slurpfile parsed "$parsed" \
-			'include "records"; findings_block_ok and block_covers_markdown($parsed[0])' "$FINDINGS_FILE" >/dev/null 2>&1; then
-			findings=$(jq -c . "$FINDINGS_FILE") || return 1
+		# The block must hold exactly one JSON value, an array: anything else ("[] [ … ]") is read from the Markdown.
+		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" \
+			'include "records"; length == 1 and (.[0] | findings_block_ok and block_covers_markdown($parsed[0]))' \
+			"$FINDINGS_FILE" >/dev/null 2>&1; then
+			findings=$(jq -cs '.[0]' "$FINDINGS_FILE") || return 1
 		else
 			if [[ -s "$FINDINGS_FILE" ]]; then
 				echo "Note: the findings block does not match the review's findings; the record is read from the Markdown." >&2

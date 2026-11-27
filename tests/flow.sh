@@ -288,6 +288,14 @@ expect "records: an empty block next to a Critical bullet falls back to the Mark
 	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .counts.open_blocking, .findings[0].file" <<<"$record" | paste -sd, -) == "parsed,1,1,b.js" ]] &&
 		grep -q "does not match the review" "$stub/out.log"'
 
+# Two JSON values in one fence: not one array, so the Markdown is the record, and the marker is posted.
+block=$'```json findings\n[]\n[{"severity":"critical","file":"b.js","line":9,"title":"data loss"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`b.js:9` — data loss.**\n\n**Ready to merge?** No\n\n'"$block"
+run
+expect "records: two JSON values in the findings block fall back to the Markdown, with a record and a marker" \
+	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .preview" <<<"$record" | paste -sd, -) == "parsed,1,false" &&
+		$body == *"gh-pr-review:round"* ]] && grep -q "does not match the review" "$stub/out.log"'
+
 block=$'```json findings\n[{"severity":"critical","file":"a.go","line":10,"title":"one"},{"severity":"critical","file":"a.go","line":10,"title":"two"}]\n```'
 setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`a.go:10` — one.**\n- **`b.go:11` — two.**\n\n**Ready to merge?** No\n\n'"$block"
 run
