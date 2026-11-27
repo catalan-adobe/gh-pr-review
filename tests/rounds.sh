@@ -278,6 +278,8 @@ while IFS='~' read -r shape filter; do
 		| $r + "\n" + ("x" * (60000 - ($head | length) - ($r | length) - 1))' >"$stub/body5.md"
 	line=$(LIB_DIR="$root/lib" bash -c 'source "$LIB_DIR/records.sh"; marker_line "$1" "$2"' _ "$stub/r5.json" "$stub/body5.md")
 	printf '<!-- gh-pr-review generated -->\n%s\n' "$line" | cat - "$stub/body5.md" >"$stub/posted5.md"
+	# The two minimal shapes, by name, for the overlap test below.
+	case "$shape" in minimal | "without last_ids") cp "$stub/posted5.md" "$stub/posted5.${shape// /-}.md" ;; esac
 	expect "marker shape $shape: marker_line emits it, at 60,000 characters" \
 		'[[ $(sed "s/^<!-- gh-pr-review:round //; s/ -->$//" <<<"$line" | jq -cS .) == "$want" &&
 			$(jq -Rs length "$stub/posted5.md") == 60000 ]]'
@@ -310,17 +312,20 @@ without findings~del(.later, .findings) | .findings_dropped = true
 minimal~{schema: 1, round, findings_dropped: true, last_ids}
 without last_ids~{schema: 1, round, findings_dropped: true}
 T
-# Two runs both post round 5 with F28–F30: the second, posted later with the minimal marker, is round 6. Its marker's
-# floor is not its own: each of its 5 bullets takes an ID after the first run's F30, so the next finding is F36.
-pr8 .
-jq --rawfile b "$stub/posted5.md" '. + [{body: $b, commit_id: "c5", submitted_at: "2026-11-27T12:30:00Z",
-	user: {login: "me"}}]' "$stub/reviews.json" >"$stub/r.json"
-mv "$stub/r.json" "$stub/reviews.json"
-out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "round 5 posted twice, the second with the minimal marker: round 6 reserves F31–F35, the next finding is F36" \
-	'[[ $rc == 0 && $(jq -c "[.records[4].last_ids.F, .records[5].round, .records[5].last_ids.F]" <<<"$out") == "[30,6,35]" &&
-		$(next_id) == F36 ]]'
-cp "$stub/reviews.saved" "$stub/reviews.json"
+# Two runs both post round 5 with F28–F30: the second, posted later with a minimal marker (with last_ids, or without),
+# is round 6. Its marker's floor is not its own: each of its 5 bullets takes an ID after the first run's F30, so the
+# next finding is F36.
+for shape in minimal without-last_ids; do
+	pr8 .
+	jq --rawfile b "$stub/posted5.$shape.md" '. + [{body: $b, commit_id: "c5", submitted_at: "2026-11-27T12:30:00Z",
+		user: {login: "me"}}]' "$stub/reviews.json" >"$stub/r.json"
+	mv "$stub/r.json" "$stub/reviews.json"
+	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+	expect "round 5 posted twice, the second with the $shape marker: round 6 reserves F31–F35, the next finding is F36" \
+		'[[ $rc == 0 && $(jq -c "[.records[4].last_ids.F, .records[5].round, .records[5].last_ids.F]" <<<"$out") == "[30,6,35]" &&
+			$(next_id) == F36 ]]'
+	cp "$stub/reviews.saved" "$stub/reviews.json"
+done
 
 # Only trusted reviews are rounds. eve, a contributor, posts a generated review on the PR's head: not a round, so the
 # decision is not nothing-new, and the table says it was left out. My own review counts even as a contributor.
