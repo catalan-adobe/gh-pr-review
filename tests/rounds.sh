@@ -182,6 +182,19 @@ expect "no counts, no findings and no severity heading: blocking unknown, not re
 	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking]" <<<"$out") == "[[null],\"unknown\",null]" ]]'
 out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
 expect "no counts: the table shows dashes and the unknown label" '[[ $rc == 0 && $(row 1) == *" – – – unknown –" ]]'
+# Bullets under an approach heading named "Important context", and a code review with no findings: 0 blockers,
+# with a marker missing open_blocking and with no marker.
+context_md=$(cat "$root/tests/fixtures/reviews/approach-context.md")
+jq -s '.[0].body |= sub("\"findings\":\\[\\]"; "\"findings\":[],\"counts\":{\"critical\":0,\"important\":0,\"minor\":0}")' \
+	<(nocounts '[]' "$context_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "approach bullets under Important context, marker without open_blocking: 0 blockers" \
+	'[[ $rc == 0 && $(jq -c "[.records[0].counts.open_blocking, .decision.label]" <<<"$out") == "[0,\"ready\"]" ]]'
+jq -n --arg b "<!-- gh-pr-review generated -->${nl}${context_md}" \
+	'[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "approach bullets under Important context, no marker: 0 blockers" \
+	'[[ $rc == 0 && $(jq -c "[.records[0].source, .records[0].counts.open_blocking, .decision.label]" <<<"$out") == "[\"backfill\",0,\"ready\"]" ]]'
 minimal='{"schema":1,"round":1,"findings_dropped":true,"last_ids":{"F":0,"L":0}}'
 jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${minimal} -->${nl}Looks fine.${nl}${nl}**Ready to merge?** Yes" \
 	'[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"

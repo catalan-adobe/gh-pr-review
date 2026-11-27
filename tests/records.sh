@@ -219,6 +219,20 @@ check "empty_severities: - None., - *(none found)*, * None and 1. None. are empt
 	'["critical","important","minor"]'
 check "parse_findings: the same lines are no findings" \
 	"$(printf '#### 🚨 Critical\n- None.\n#### ⚠️ Important\n- *(none found)*\n1. None.\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings')" '[]'
+# Severity headings count only in the Issues section, and a folded <details> list is no section's.
+f=$(parse_findings "$fixtures/approach-context.md")
+check "parse_findings: bullets under an approach heading named Important context are no findings" "$f" '[]'
+check "empty_severities: so every severity of that review is empty" \
+	"$(jq -c -Rs -L "$LIB_DIR" 'include "records"; empty_severities' "$fixtures/approach-context.md")" '["critical","important","minor"]'
+check "parse_findings: the same heading in a body without an Issues heading still counts" \
+	"$(printf '#### Important context\n- a\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.severity)')" '["important"]'
+check "parse_findings: the Issues section ends at the next heading of its level" \
+	"$(printf '### Issues\n#### Minor\n- a\n### Notes\n#### Minor\n- b\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a"]'
+check "parse_findings: a <details> Fixed list under Minor is not counted" \
+	"$(printf '### Issues\n#### Minor\n- a\n\n<details><summary>Fixed (2)</summary>\n\n- b\n- c\n\n</details>\n\n- d\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a","d"]'
+check "empty_severities: a Minor section holding only a <details> list is empty" \
+	"$(empties $'### Issues\n#### Minor\n*(none found)*\n<details><summary>Later (1)</summary>\n\n- x\n</details>\n### End\n')" '["minor"]'
 respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
 check "block_respects_empty: fixed, declined and later Criticals are stored as new: open" \
@@ -415,6 +429,10 @@ rec=$(backfill_record "$(review numbered.md)" null 2 "$pr")
 check "backfill numbered: approach and ready" "$(jq -r '[.approach, .ready, .code_review] | join(" ")' <<<"$rec")" \
 	"questionable no true"
 check "backfill numbered: open_blocking" "$(jq .counts.open_blocking <<<"$rec")" 4
+
+rec=$(backfill_record "$(review approach-context.md)" null 1 "$pr")
+check "backfill: bullets under an approach heading named Important context are no blockers" \
+	"$(jq -c '[.code_review, .counts.open_blocking, .counts.minor, (.findings | length)]' <<<"$rec")" '[true,0,0,0]'
 
 rec=$(backfill_record "$(review bullets.md)" null 1 "$pr")
 check "backfill bullets: ready" "$(jq -r .ready <<<"$rec")" yes-with-fixes

@@ -52,31 +52,46 @@ def _finding($severity):
 def _none_line:
 	sub("^\\s*([-*+]|\\d+\\.)\\s+"; "") | ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
 
-# Markdown in, findings out: the top-level "- " and "<n>. " items, bold or plain, under each heading that names a
-# severity, up to the next heading ("- None." is not one). Fenced code is skipped. A location given as a range keeps
-# its last line in line_end (the record itself keeps line only: normalize_findings drops it).
-def parse_findings:
-	reduce (split("\n")[] | sub("\r$"; "")) as $l ({severity: null, fence: false, out: []};
-		if ($l | test("^\\s*(```|~~~)")) then .fence |= not
-		elif .fence then .
-		elif ($l | test("^#{1,6}\\s")) then .severity = ($l | _severity)
-		elif .severity != null and ($l | test("^(-|\\d+\\.)\\s+\\S")) and ($l | _none_line | not) then
-			.severity as $s | .out += [$l | _finding($s)]
-		else . end)
-	| .out;
-
-# The severity sections of a review's Markdown, in order: {severity, lines (the non-blank lines up to the next
-# heading), closed (another heading follows)}. Fenced code belongs to the section it is in.
-def _sections:
-	reduce (split("\n")[] | sub("\r$"; "")) as $l ({fence: false, open: false, out: []};
-		if .fence or ($l | test("^\\s*(```|~~~)")) then
-			(if ($l | test("^\\s*(```|~~~)")) then .fence |= not else . end)
-			| if .open then .out[-1].lines += [$l] else . end
+# A review's Markdown as lines, each with the severity section it is in (s, null outside any), and whether it is a
+# heading (h) or in fenced code (code). A heading that names a severity starts that section, up to the next heading.
+# Severity headings count only in the code review's Issues section, from a heading titled "Issues" to the next heading
+# of the same or a higher level; a body without one is read whole. Lines inside <details>…</details> (a folded Fixed
+# or Later list) are in no section. Fenced code belongs to the section it is in.
+def _lines:
+	def fence: test("^\\s*(```|~~~)");
+	reduce (split("\n")[] | sub("\r$"; "")) as $l ({fence: false, details: 0, s: null, i: null, issues: null, has: false, out: []};
+		if .details > 0 or (.fence == false and ($l | test("<details\\b"; "i"))) then
+			.details = ([.details + ([$l | match("<details\\b"; "gi")] | length)
+				- ([$l | match("</details\\s*>"; "gi")] | length), 0] | max)
+			| .out += [{l: $l, s: null, i: null}]
+		elif .fence or ($l | fence) then
+			(if ($l | fence) then .fence |= not else . end) | .out += [{l: $l, s, i, code: true}]
 		elif ($l | test("^#{1,6}\\s")) then
+			($l | capture("^(?<level>#+)\\s+(?<title>.*)$")) as $h
+			| ($l | _severity) as $sev
+			| (if .issues != null and ($h.level | length) <= .issues then .issues = null else . end)
+			| (if ($h.title | sub("[\\s#]*$"; "") | ascii_downcase) == "issues" then .issues = ($h.level | length) | .has = true
+				else . end)
+			| .s = $sev | .i = (if .issues != null then $sev else null end)
+			| .out += [{l: $l, s, i, h: true}]
+		else .out += [{l: $l, s, i}] end)
+	| .has as $has | .out | map({l, s: (if $has then .i else .s end), h: (.h == true), code: (.code == true)});
+
+# Markdown in, findings out: the top-level "- " and "<n>. " items, bold or plain, in each severity section (_lines;
+# "- None." is not one). Fenced code is skipped. A location given as a range keeps its last line in line_end (the
+# record itself keeps line only: normalize_findings drops it).
+def parse_findings:
+	[_lines[] | select(.s != null and (.h or .code | not)) | .s as $s | .l
+		| select(test("^(-|\\d+\\.)\\s+\\S") and (_none_line | not)) | _finding($s)];
+
+# The severity sections of a review's Markdown (_lines), in order: {severity, lines (the non-blank lines up to the
+# next heading), closed (another heading follows)}. Fenced code belongs to the section it is in.
+def _sections:
+	reduce _lines[] as $x ({open: false, out: []};
+		if $x.h then
 			(if .open then .out[-1].closed = true else . end)
-			| ($l | _severity) as $s
-			| if $s != null then .out += [{severity: $s, lines: [], closed: false}] | .open = true else .open = false end
-		elif .open and ($l | _blank | not) then .out[-1].lines += [$l]
+			| if $x.s != null then .out += [{severity: $x.s, lines: [], closed: false}] | .open = true else .open = false end
+		elif .open and $x.s != null and ($x.l | _blank | not) then .out[-1].lines += [$x.l]
 		else . end)
 	| .out;
 
