@@ -153,8 +153,8 @@ expect "no counts: a plain bullet under Critical counts from the Markdown" \
 jq -s '.[0].body |= sub("\"findings\":\\[\\]"; "\"findings\":[],\"counts\":{\"critical\":1,\"important\":0}")' \
 	<(nocounts '[]' "$plain_md") >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
-expect "no open_blocking but critical and important: their sum, not the Markdown" \
-	'[[ $rc == 0 && $(jq -c ".records[0] | [.counts.critical, .counts.open_blocking, .findings_dropped]" <<<"$out") == "[1,1,null]" &&
+expect "no open_blocking but critical and important: their sum, not the Markdown; the list that can't account for it is dropped" \
+	'[[ $rc == 0 && $(jq -c ".records[0] | [.counts.critical, .counts.open_blocking, has(\"findings\"), .findings_dropped]" <<<"$out") == "[1,1,false,true]" &&
 		$(jq -r .decision.label <<<"$out") == early ]]'
 # Counts that contradict a Critical both the marker's findings and the Markdown show (critical 0, important 0): the
 # sum is not used, the findings are, and the round is not ready.
