@@ -246,6 +246,12 @@ check "parse_findings: a fenced <details> example in a fold does not keep the fo
 check "parse_findings: a fixed item quoting </details> in code does not close the fold" \
 	"$(printf '### Issues\n#### Critical\n<details><summary>Fixed (2)</summary>\n\n- **F1** — closes with `</details>`.\n- **F2** — other.\n</details>\n- c\n' |
 		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["c"]'
+# A heading may start with up to 3 spaces (CommonMark), for the Issues section and its end alike.
+check "parse_findings: an indented Issues heading and an indented closing heading bound the section" \
+	"$(printf '#### Important context\n- ctx\n  ### Issues\n   #### Important\n- a\n ### Notes\n#### Minor\n- b\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a"]'
+check "parse_findings: 4 spaces are no heading" \
+	"$(printf '### Issues\n#### Minor\n- a\n    ### Notes\n- b\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a","b"]'
 respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
 check "block_respects_empty: fixed, declined and later Criticals are stored as new: open" \

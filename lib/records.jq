@@ -53,11 +53,11 @@ def _none_line:
 	sub("^\\s*([-*+]|\\d+\\.)\\s+"; "") | ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
 
 # A review's Markdown as lines, each with the severity section it is in (s, null outside any), and whether it is a
-# heading (h) or in fenced code (code). A heading that names a severity starts that section, up to the next heading.
-# Severity headings count only in the code review's Issues section, from a heading titled "Issues" to the next heading
-# of the same or a higher level; a body without one is read whole. Lines from a line starting with <details to the
-# line starting with </details (a folded Fixed or Later list; 0–3 spaces first, outside fenced code) are in no
-# section. Fenced code is tracked inside folds too, and belongs to the section it is in.
+# heading (h) or in fenced code (code). A heading (0–3 spaces, then 1–6 "#") that names a severity starts that
+# section, up to the next heading. Severity headings count only in the code review's Issues section, from a heading
+# titled "Issues" to the next heading of the same or a higher level; a body without one is read whole. Lines from a
+# line starting with <details to the line starting with </details (a folded Fixed or Later list; 0–3 spaces first,
+# outside fenced code) are in no section. Fenced code is tracked inside folds too, and belongs to the section it is in.
 def _lines:
 	def fence: test("^\\s*(```|~~~)");
 	def opens: test("^ {0,3}<details\\b"; "i");
@@ -69,8 +69,8 @@ def _lines:
 		elif .details > 0 or ($l | opens) then
 			.details = ([.details + (if $l | opens then 1 else 0 end) - (if $l | closes then 1 else 0 end), 0] | max)
 			| .out += [{l: $l, s: null, i: null}]
-		elif ($l | test("^#{1,6}\\s")) then
-			($l | capture("^(?<level>#+)\\s+(?<title>.*)$")) as $h
+		elif ($l | test("^ {0,3}#{1,6}\\s")) then
+			($l | capture("^ {0,3}(?<level>#+)\\s+(?<title>.*)$")) as $h
 			| ($l | _severity) as $sev
 			| (if .issues != null and ($h.level | length) <= .issues then .issues = null else . end)
 			| (if ($h.title | sub("[\\s#]*$"; "") | ascii_downcase) == "issues" then .issues = ($h.level | length) | .has = true
