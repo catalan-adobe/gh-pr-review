@@ -791,6 +791,26 @@ setup $'**Approach:** Sound' $'Looks fine.\n\n**Ready to merge?** Yes'
 run
 expect "no severity section, bare yes: comments, not approve" \
 	'[[ $rc == 0 && $flag == --comment ]] && grep -q "blockers are unknown: posting as comment" "$stub/out.log"'
+# The same with a heading in the approach that names a severity ("Important context"): the writer and the reader both
+# read the code review only (code_review_part), so the round is unknown when written and when read back under the
+# full marker, the minimal one and none, never ready.
+setup $'### Approach\n\n#### Important context\n\nThe handler is new.\n\n**Approach:** Sound' \
+	$'Looks fine.\n\n**Ready to merge?** Yes'
+run
+expect "approach heading, no severity section in the code review: written unknown, comments" \
+	'[[ $rc == 0 && $flag == --comment &&
+		$(jq -c "[.source, .counts.open_blocking]" <<<"$record") == "[\"parsed\",null]" && $body == *"Important context"* ]]'
+landed 52 COMMENTED 2026-09-02T10:00:00Z
+echo head2 >"$stub/heads"
+for shape in 'full marker~.' 'minimal marker~{schema, round, findings_dropped: true, last_ids}' 'no marker~'; do
+	if [[ -n ${shape#*~} ]]; then remark "${shape#*~}"; else
+		jq '.[-1].body |= (split("\n") | del(.[1]) | join("\n"))' "$stub/rest-reviews.json" >"$stub/r.json"
+		mv "$stub/r.json" "$stub/rest-reviews.json"
+	fi
+	check_json
+	expect "approach heading, ${shape%~*}: reads back unknown, not ready" \
+		'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"unknown\",[null]]" ]]'
+done
 
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' "$clean"

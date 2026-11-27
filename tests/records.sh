@@ -459,6 +459,17 @@ rec=$(backfill_record "$(jq -n '{body: "Looks fine.\n\n**Ready to merge?** Yes w
 check "backfill: a code review with no severity section has unknown counts, not 0" \
 	"$(jq -c '[.code_review, .ready, ([.counts[]] | unique)]' <<<"$rec")" '[true,"yes-with-fixes",[null]]'
 
+ctx=$'### Approach\n\n#### Important context\n\nThe handler is new.\n\n**Approach:** Sound\n\nLooks fine.\n\n**Ready to merge?** Yes'
+rec=$(backfill_record "$(jq -n --arg b "$ctx" '{body: $b, user: {login: "rev"}}')" null 1 "$pr")
+check "backfill: a severity-named heading in the approach is no section: unknown counts, as written" \
+	"$(jq -c '[.code_review, .approach, .ready, .counts.open_blocking]' <<<"$rec")" '[true,"sound","yes",null]'
+cr() { jq -r -Rs -L "$LIB_DIR" 'include "records"; code_review_part' <<<"$1"; }
+check "code_review_part: the text after the approach verdict line" "$(cr "$ctx")" $'\nLooks fine.\n\n**Ready to merge?** Yes'
+check "code_review_part: the first verdict line, with marks around the value" \
+	"$(cr $'a\n- **Approach:** `Rethink` — x\nb\n**Approach:** Sound\nc')" $'b\n**Approach:** Sound\nc'
+check "code_review_part: no verdict line (prose, or no verdict value): the whole text" \
+	"$(cr $'Approach notes: x\n**Approach:** TBD\nc')" $'Approach notes: x\n**Approach:** TBD\nc'
+
 rec=$(backfill_record "$(review bullets.md)" null 1 "$pr")
 check "backfill bullets: ready" "$(jq -r .ready <<<"$rec")" yes-with-fixes
 

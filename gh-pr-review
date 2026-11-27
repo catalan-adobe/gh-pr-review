@@ -883,20 +883,25 @@ REVIEW=$(assemble_review "$LOOP_LINE" "$APPROACH" "$CODE_REVIEW")
 # round.json starts as a preview; the post block turns it into the posted round. A failure here never blocks the post.
 # It runs under `if !`, where errexit is off: every step checks its own status, and the record is checked before use.
 write_round_record() {
-	local findings parsed source=model code_review=true no_sections=false approach ready meta tmp="${RECORD_FILE}.tmp"
+	local findings parsed md source=model code_review=true no_sections=false approach ready meta
+	local tmp="${RECORD_FILE}.tmp"
 	if [[ "$APPROACH_VERDICT" == rethink ]]; then
 		code_review=false
 		findings='[]'
 	else
+		# The Markdown is read as the reader of the posted review reads it: the code-review part of the review
+		# (code_review_part in lib/records.jq), never the approach before it.
+		md="${RECORD_FILE}.md"
+		printf '%s\n' "$REVIEW" >"$md"
 		# The Markdown's findings: the fallback, and the check that the block shows every blocker the review does.
 		# A parse failure leaves a parsed record without findings, as the spec says: it never blocks the post.
 		parsed="${RECORD_FILE}.parsed"
-		parse_findings "$REVIEW_BODY_FILE" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
+		parse_findings "$md" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
 		# The block must hold exactly one JSON value, an array: anything else ("[] [ … ]") is read from the Markdown.
 		# So is a block with an open finding of a severity the Markdown says it has none of ("*(none found)*").
-		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" --rawfile md "$REVIEW_BODY_FILE" \
+		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" --rawfile md "$md" \
 			'include "records"; length == 1 and (.[0] | findings_block_ok and block_covers_markdown($parsed[0])
-				and block_respects_empty($md | empty_severities))' "$FINDINGS_FILE" >/dev/null 2>&1; then
+				and block_respects_empty($md | code_review_part | empty_severities))' "$FINDINGS_FILE" >/dev/null 2>&1; then
 			findings=$(jq -cs '.[0]' "$FINDINGS_FILE") || return 1
 		else
 			if [[ -s "$FINDINGS_FILE" ]]; then
@@ -905,10 +910,10 @@ write_round_record() {
 			source=parsed
 			findings=$(jq -c . "$parsed") || findings='[]'
 			# No severity section in the Markdown: the blockers are unknown (null counts), as when read back.
-			no_sections=$(jq -Rs -L "$LIB_DIR" 'include "records"; _sections | length == 0' "$REVIEW_BODY_FILE") ||
+			no_sections=$(jq -Rs -L "$LIB_DIR" 'include "records"; code_review_part | _sections | length == 0' "$md") ||
 				no_sections=true
 		fi
-		rm -f "$parsed"
+		rm -f "$parsed" "$md"
 	fi
 	case "$APPROACH_VERDICT" in
 	sound | questionable | rethink) approach="$APPROACH_VERDICT" ;;

@@ -52,6 +52,17 @@ def _finding($severity):
 def _none_line:
 	sub("^\\s*([-*+]|\\d+\\.)\\s+"; "") | ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
 
+# The code-review part of a body in gh-pr-review's format: the text after its first approach verdict line
+# ("**Approach:** Sound", Questionable or Rethink: the line last_verdict reads), or the whole text when it has none.
+# Every Markdown read that decides a round's counts, sections or findings, the writer's and backfill_record's, reads
+# this part only: a heading in the approach ("#### Important context") is never a severity section, and the writer
+# and the reader read the same text.
+def code_review_part:
+	split("\n") as $l
+	| (first(range(0; $l | length) as $i
+		| select($l[$i] | test("^[\\s*_>-]*approach[*_]*[?:][\\s*_`]*(sound|questionable|rethink)\\b"; "i")) | $i) // null)
+	| if . == null then $l | join("\n") else $l[. + 1:] | join("\n") end;
+
 # A review's Markdown as lines, each with the severity section it is in (s, null outside any), and whether it is a
 # heading (h) or in fenced code (code). A heading (0–3 spaces, then 1–6 "#") that names a severity starts that
 # section, up to the next heading. Severity headings count only in the code review's Issues section, from a heading
@@ -282,8 +293,9 @@ def build_record($meta; $findings; $prev):
 		end)
 	};
 
-# A record rebuilt from an old review (GitHub REST review object). The caller reads the verdict lines. A code review
-# whose Markdown has no severity section (_sections) gets null counts (build_record).
+# A record rebuilt from an old review (GitHub REST review object). The caller reads the verdict lines. Its findings
+# and sections come from the code-review part (code_review_part), as the writer's do: a code review whose part has no
+# severity section (_sections) gets null counts (build_record).
 def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review):
 	($review.body // "") as $body
 	| build_record({
@@ -300,8 +312,8 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 			| .[$review.state | strings] // null),
 		posted_at: $review.submitted_at,
 		code_review: $code_review,
-		no_sections: ($body | _sections | length == 0)
-	}; (if $code_review then $body | parse_findings else [] end); $prev);
+		no_sections: ($body | code_review_part | _sections | length == 0)
+	}; (if $code_review then $body | code_review_part | parse_findings else [] end); $prev);
 
 # The first line of every body gh-pr-review posts.
 def generated_header: "<!-- gh-pr-review generated -->";
