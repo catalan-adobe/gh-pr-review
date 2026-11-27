@@ -139,6 +139,8 @@ jq -s . <(nocounts '[]' "$crit_md") >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "no counts, findings missing the Markdown's Critical: counted from the Markdown" \
 	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label]" <<<"$out") == "[[1],\"early\"]" ]]'
+expect "no counts, findings missing the Markdown's Critical: the list that failed the check is dropped" \
+	'[[ $(jq -c ".records[0] | [has(\"findings\"), .findings_dropped, .counts.critical]" <<<"$out") == "[false,true,1]" ]]'
 plain_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- \`a.js:1\` — boom.${nl}${nl}### Assessment${nl}**Ready to merge?** Yes"
 jq -s . <(nocounts '[]' "$plain_md") >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?

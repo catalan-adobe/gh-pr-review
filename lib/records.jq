@@ -267,8 +267,9 @@ def markdown_counts:
 # A marker record of a code-review round (not a Rethink) without a numeric counts.open_blocking: when its counts
 # still give critical and important, open_blocking is their sum. Otherwise the counts are rebuilt from its findings,
 # when it has some and they show every blocker its review's Markdown ($body) does (block_covers_markdown,
-# block_respects_empty); else from the Markdown. When neither can say, every count is null: the round's blocking is
-# unknown, never 0, and the loop never calls it ready. Other records are left as they are.
+# block_respects_empty); else from the Markdown, and then the findings list, which did not pass that check, is
+# dropped: findings_dropped: true says "no reliable list", not "no findings". When neither can say, every count is
+# null: the round's blocking is unknown, never 0, and the loop never calls it ready. Other records are left as they are.
 def with_counts($body):
 	if .code_review != false and (.counts.open_blocking? | type) != "number" then
 		if (.counts.critical? | type) == "number" and (.counts.important? | type) == "number" then
@@ -280,6 +281,7 @@ def with_counts($body):
 		else
 			.counts = (($body | markdown_counts) // {open_blocking: null, critical: null, important: null, minor: null,
 				new: null, fixed: null, declined: null, regressed: null})
+			| del(.findings) | .findings_dropped = true
 		end
 	else . end;
 
