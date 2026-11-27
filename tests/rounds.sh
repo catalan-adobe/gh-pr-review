@@ -169,6 +169,13 @@ jq -s '.[0].body |= sub("\"findings\":\\[\\]"; "\"counts\":{\"critical\":0,\"imp
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "the same with no findings: the Markdown's 1 blocker, not ready" \
 	'[[ $rc == 0 && $(jq -c "[.records[0].counts.open_blocking, .records[0].findings_dropped, .decision.label]" <<<"$out") == "[1,true,\"early\"]" ]]'
+# An older marker (no last_ids) whose F1 is a Critical the Markdown says it has none of: its list is dropped, but F1
+# stays reserved: the next new finding is F2.
+jq -s . <(nocounts '[{"id":"F1","severity":"critical","status":"new"}]' \
+	"#### 🚨 Critical (Must Fix Before Merge)${nl}*(none found)*${nl}${nl}### Assessment${nl}**Ready to merge?** Yes") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "a dropped list keeps its highest ID: the next new finding is F2" \
+	'[[ $rc == 0 && $(jq -c -L "$root/lib" "include \"records\"; [.records[0] | has(\"findings\"), .findings_dropped, .last_ids.F, .counts.open_blocking] + [.decision.label, (.records | id_floor.F + 1)]" <<<"$out") == "[false,true,1,0,\"ready\",2]" ]]'
 jq -s . <(nocounts '[]' "Looks fine.${nl}${nl}**Ready to merge?** Yes, with fixes") >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "no counts, no findings and no severity heading: blocking unknown, not ready" \

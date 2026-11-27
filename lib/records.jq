@@ -307,15 +307,21 @@ def markdown_counts:
 			minor: sev("minor"), new: length, fixed: 0, declined: 0, regressed: 0}
 	end;
 
+# A record read back without its findings list, which can't be trusted: findings_dropped: true says "no reliable
+# list", not "no findings". The highest IDs the list held stay in last_ids first (with any it had), so the ID floor
+# never goes down: reserving an ID does not need trusting the finding.
+def _drop_findings:
+	.last_ids = {F: _last_number("F"), L: _last_number("L")} | del(.findings) | .findings_dropped = true;
+
 # A marker record of a code-review round (not a Rethink) without a numeric counts.open_blocking: when its counts
 # still give critical and important, and those agree with the blockers the reader can see, open_blocking is their sum.
 # They agree when each severity's count is at least the Markdown's ($body: markdown_counts) and at least the open
 # findings of that severity in the record's own list (record_counts, with the statuses it stored). Otherwise the
 # counts are rebuilt from its findings, with the statuses it stored (record_counts), when it has some and they show
 # every blocker its review's Markdown does (record_covers_markdown, record_respects_empty); else from the Markdown, and
-# then the findings list, which did not pass that check, is dropped: findings_dropped: true says "no reliable list",
-# not "no findings". When neither can say, every count is null: the round's blocking is unknown, never 0, and the loop
-# never calls it ready. Other records are left as they are.
+# then the findings list, which did not pass that check, is dropped (_drop_findings). When neither can say, every
+# count is null: the round's blocking is unknown, never 0, and the loop never calls it ready. Other records are left
+# as they are.
 def with_counts($body):
 	if .code_review != false and (.counts.open_blocking? | type) != "number" then
 		($body | markdown_counts) as $shown
@@ -333,7 +339,7 @@ def with_counts($body):
 		else
 			.counts = ($shown // {open_blocking: null, critical: null, important: null, minor: null,
 				new: null, fixed: null, declined: null, regressed: null})
-			| del(.findings) | .findings_dropped = true
+			| _drop_findings
 		end
 	else . end;
 
