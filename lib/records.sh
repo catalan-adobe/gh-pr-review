@@ -83,7 +83,7 @@ marker_record() { # <body>
 
 # A record rebuilt from an old review: a GitHub REST review object ({body, commit_id, submitted_at, user, state}).
 # No Approach section: approach "skipped". An Approach section without a "Ready to merge?" line or any severity
-# heading is a Rethink: no code review.
+# section (_sections in records.jq) is a Rethink: no code review.
 backfill_record() { # <review-json> <previous-record-or-null> <round> <pr-json>
 	local body approach ready code_review=true has_approach=false
 	body=$(jq -r '.body // ""' <<<"$1") || return 1
@@ -99,7 +99,7 @@ backfill_record() { # <review-json> <previous-record-or-null> <round> <pr-json>
 	ready=$(normalize_ready "$(last_verdict 'ready to merge' "$body")")
 	if [[ "$has_approach" == true ]] &&
 		! grep -qiE '^[[:space:]*_>-]*ready to merge[*_]*[?:]' <<<"$body" &&
-		! grep -qiE '^#{1,6}[[:space:]].*(critical|important|minor)' <<<"$body"; then
+		[[ $(jq -Rs -L "${LIB_DIR:?}" 'include "records"; _sections | length' <<<"$body") == 0 ]]; then
 		code_review=false
 	fi
 	jq -L "${LIB_DIR:?}" --argjson prev "${2:-null}" --argjson round "$3" \

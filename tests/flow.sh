@@ -191,7 +191,9 @@ expect() { # name condition
 	fi
 }
 
-setup $'### Approach\n**Approach:** Sound' $'### Issues\n**Ready to merge?** Yes'
+# A clean code review: a severity section that says none, so its blockers are known (0) and a bare yes approves.
+clean=$'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n*(none found)*\n\n### Assessment\n**Ready to merge?** Yes'
+setup $'### Approach\n**Approach:** Sound' "$clean"
 run
 expect "sound: two model calls" '[[ $calls == 2 ]]'
 expect "sound: code prompt gets the approach notes" 'grep -q "Maintainer.s approach notes" "$stub/code-prompt.txt"'
@@ -232,18 +234,18 @@ expect "skip-approach: one model call" '[[ $calls == 1 ]]'
 expect "skip-approach: code prompt points to the discussion" 'grep -q "context/pr-discussion.md" "$stub/code-prompt.txt"'
 expect "skip-approach: no approach in body" '[[ $rc == 0 && $body != *"Approach"* ]]'
 expect "skip-approach: posts the code review and its decision" '[[ $flag == --request-changes && $body == *"**Ready to merge?** No"* ]]'
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes' 0 owner
+setup $'**Approach:** Sound' "$clean" 0 owner
 run
 expect "owner pass fails: run fails" '[[ $rc != 0 ]]'
 expect "owner pass fails: no code review" '[[ $calls == 1 ]]'
 expect "owner pass fails: nothing posted" '[[ -z $flag ]]'
 
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes' 0 code
+setup $'**Approach:** Sound' "$clean" 0 code
 run
 expect "code review fails: run fails" '[[ $rc != 0 ]]'
 expect "code review fails: nothing posted" '[[ -z $flag ]]'
 expect "code review fails: names the session" 'grep -q "pr-review-sessions/pr-review-" "$stub/out.log"'
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 run --instructions 'Focus on db/ and $(skip) nits'
 expect "instructions: owner prompt gets them" 'grep -qF "Focus on db/ and \$(skip) nits" "$stub/owner-prompt.txt"'
 expect "instructions: code prompt gets them" 'grep -qF "Focus on db/ and \$(skip) nits" "$stub/code-prompt.txt"'
@@ -251,7 +253,7 @@ expect "instructions: owner prompt has them before the steps" '[[ $(grep -n -e "
 expect "instructions: both prompts say not to quote them" 'grep -q "do not quote" "$stub/owner-prompt.txt" && grep -q "do not quote" "$stub/code-prompt.txt"'
 expect "instructions: not posted" '[[ $rc == 0 && $body != *"Focus on db/"* ]]'
 
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 run
 expect "no instructions: no section in either prompt" '! grep -q "Reviewer instructions" "$stub/owner-prompt.txt" "$stub/code-prompt.txt"'
 
@@ -261,7 +263,7 @@ expect "instructions without a value: fails before any model call" '[[ $rc != 0 
 setup 'unused' 'unused'
 run --instructions --no-post
 expect "instructions followed by a flag: fails, nothing posted" '[[ $rc != 0 && $calls == 0 && -z $flag ]]'
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 run --instructions $'- focus on db/\n- skip nits'
 expect "instructions as a bullet list: accepted" '[[ $rc == 0 ]] && grep -qF -- "- skip nits" "$stub/code-prompt.txt"'
 setup 'unused' 'unused'
@@ -375,7 +377,7 @@ expect "records: earlier generated reviews count as rounds" '[[ $(jq -r ".round"
 expect "records: finding IDs continue from the previous record" '[[ $(jq -r ".findings[0].id, .previous_head_sha" <<<"$record" | paste -sd, -) == "F4,old" ]]'
 
 # F7 two rounds back; the last marker was compacted (no findings) by an older version (no last_ids).
-compacted='{"schema":1,"round":2,"head_sha":"old","findings_dropped":true,"counts":{"open_blocking":0}}'
+compacted='{"schema":1,"round":2,"head_sha":"old","findings_dropped":true,"counts":{"open_blocking":0,"critical":0,"important":0,"minor":0}}'
 jq -n --arg r1 '<!-- gh-pr-review:round {"schema":1,"round":1,"findings":[{"id":"F7","severity":"minor"}]} -->' \
 	--arg r2 "<!-- gh-pr-review:round $compacted -->" '[
 	{user: {login: "x"}, commit_id: "c1", submitted_at: "2026-01-01T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n" + $r1)},
@@ -406,7 +408,7 @@ S
 	chmod +x "$stub/bin/jq"
 }
 for mode in fail junk; do
-	setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+	setup $'**Approach:** Sound' "$clean"
 	break_record "$mode"
 	run
 	expect "record $mode: the review is still posted, without a marker" \
@@ -416,7 +418,7 @@ for mode in fail junk; do
 		'[[ $flag == --comment && -z $record ]] && grep -q "posting as comment, not approve" "$stub/out.log"'
 done
 
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 break_record posted
 run_tty "Post as review" ""
 expect "posted record fails, default approve taken at the prompt: posts as comment, without a marker" \
@@ -427,7 +429,7 @@ expect "posted record fails, approve typed at the prompt: stays an approval" '[[
 
 # A valid preview that is gone by the time the review is posted: no posted record, so no marker and no automatic
 # approval; an approval chosen at the prompt stays.
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 touch "$stub/record.vanish"
 run
 expect "preview emptied before posting: a bare yes posts as comment, without a marker" \
@@ -455,7 +457,7 @@ comment_by() { # login type -> one issue comment after the last round
 }
 no_session() { [[ ! -d "$stub/work/pr-review-sessions" ]]; }
 
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 rounds_with 9 12 8 10 >"$stub/rest-reviews.json"
 run
 expect "loop stop: exit 3 with -y" '[[ $rc == 3 && $calls == 0 && -z $flag ]]'
@@ -493,7 +495,7 @@ expect "--check: stop exits 3 without clone or pi" '[[ $rc == 3 && $calls == 0 ]
 	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>/dev/null) && rc=0 || rc=$?
 expect "--check --json: stdout is the decision JSON only" '[[ $rc == 3 && $(jq -r ".decision, .label, .next_round" "$stub/check.json" | paste -sd, -) == "stop,churning,5" ]]'
 
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 rounds_with 9 12 8 >"$stub/rest-reviews.json"
 run
 expect "loop warn: the round runs" '[[ $rc == 0 && $calls == 2 ]]'
@@ -502,7 +504,7 @@ expect "loop warn: the decision still comes from Ready to merge" '[[ $flag == --
 run --check
 expect "--check: warn exits 0, no model call" '[[ $rc == 0 && $calls == 0 ]]'
 
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 rounds_with 2 >"$stub/rest-reviews.json"
 jq '.[0].commit_id = "head1" | .[0].body |= sub("\"head_sha\":\"h1\""; "\"head_sha\":\"head1\"")' "$stub/rest-reviews.json" >"$stub/r.json"
 mv "$stub/r.json" "$stub/rest-reviews.json"
@@ -520,7 +522,7 @@ run --force-round
 expect "no new commits: --force-round runs" '[[ $rc == 0 && $calls == 2 && $(jq -r ".forced" <<<"$record") == true ]]'
 
 # The last round on this head was a Rethink: the code was never reviewed.
-setup 'unused' $'**Ready to merge?** Yes'
+setup 'unused' "$clean"
 jq -n '[{schema: 1, round: 1, head_sha: "head1", approach: "rethink", code_review: false,
 	counts: {open_blocking: null}}] | map({user: {login: "ann", type: "User"}, commit_id: "head1",
 	submitted_at: "2026-01-01T00:00:00Z", body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\nx")})' \
@@ -551,7 +553,7 @@ expect "overlap, in a terminal: no prompt, nothing posted, exit 6" \
 
 # Same count, other rounds: review 10 was the history; at the recheck its generated header is edited out and review 11,
 # a new round by ann, is there. One round then, one round now, but not the same one.
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 rounds_with 2 | jq -c '.[0].id = 10' >"$stub/rest-reviews.json"
 jq -c '.[0].body |= sub("^<!-- gh-pr-review generated -->\n"; "") | . + [{id: 11, user: {login: "ann", type: "User"},
 	state: "COMMENTED", commit_id: "h1", submitted_at: "2026-01-05T00:00:00Z",
@@ -571,7 +573,7 @@ untrusted() { # login association commit -> one generated review
 		author_association: $assoc, state: "COMMENTED", commit_id: $commit, submitted_at: "2026-01-05T00:00:00Z",
 		body: "<!-- gh-pr-review generated -->\n**Ready to merge?** No"}]'
 }
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 untrusted eve CONTRIBUTOR head1 >"$stub/rest-reviews.json"
 run --check
 expect "trust: an outsider's generated review on this head is not a round: --check runs, and names it" \
@@ -610,7 +612,7 @@ run
 expect "trust: an outsider's generated review during the review is no overlap: posted" '[[ $rc == 0 && $flag == --approve ]]'
 
 # The history can't be read again before posting: one retry, then nothing is posted.
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 echo 1 >"$stub/reviews.fail.after"
 run
 expect "final history read fails once: the retry reads it, and the review is posted" '[[ $rc == 0 && $flag == --approve ]]'
@@ -624,7 +626,7 @@ run_tty "Post as review" ""
 expect "final history read fails twice, in a terminal: exit 1, nothing posted" '[[ $rc == 1 && -z $flag ]]'
 
 # The history is read again, but rebuilding a round from it fails (the reconciling jq): that is a failed read too.
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 rounds_with 2 >"$stub/rest-reviews.json"
 cat >"$stub/bin/jq" <<S
 #!/usr/bin/env bash
@@ -638,7 +640,7 @@ expect "final history read cannot rebuild a round: exit 1, nothing posted" \
 	'[[ $rc == 1 && -z $flag && $(jq -r .preview <<<"$record") == true ]] &&
 		grep -q "history could not be verified; nothing was posted" "$stub/out.log"'
 
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 run
 expect "first round: round 1, no loop line" '[[ $rc == 0 && $(jq -r ".round, .loop.decision, .forced" <<<"$record" | paste -sd, -) == "1,run,false" && $body != *"**Loop:**"* ]]'
 run --check
@@ -881,7 +883,7 @@ check_json() {
 echo head2 >"$stub/heads"
 check_json
 expect "round trip: a push makes head2 eligible" '[[ $rc == 0 && $check == run,2 ]]'
-printf '%s' $'**Ready to merge?** Yes' >"$stub/review.out"
+printf '%s' "$clean" >"$stub/review.out"
 printf 'head2\nhead3\n' >"$stub/heads"
 run
 expect "round trip: round 2 reads head2 while head3 lands: posted on head2, not approved" \
@@ -998,7 +1000,8 @@ expect "compaction: the minimal marker reads back as unknown, not ready" \
 	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 --json >"$stub/rounds.json" 2>"$stub/out.log") && rc=0 || rc=$?
 expect "compaction: the record read back has no findings and no counts" \
 	'[[ $rc == 0 && $(jq -c ".records[0] | [has(\"findings\"), .findings_dropped, .counts.open_blocking, .counts.critical]" "$stub/rounds.json") == "[false,true,null,null]" ]]'
-# The same review under other markers without counts: its findings give the Critical back, or it is unknown.
+# The same review under other markers without counts: read from the Markdown, which shows no severity section, so
+# unknown too, even when the marker still lists the Critical.
 remark() { # jq filter on round.json -> the review's marker replaced by it
 	jq --arg m "<!-- gh-pr-review:round $(jq -c "$1" <<<"$record") -->" \
 		'.[-1].body |= (split("\n") | .[1] = $m | join("\n"))' "$stub/rest-reviews.json" >"$stub/r.json"
@@ -1006,15 +1009,115 @@ remark() { # jq filter on round.json -> the review's marker replaced by it
 }
 remark 'del(.counts)'
 check_json
-expect "compaction: a marker with its findings but no counts gives the Critical back" \
-	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"early\",[1]]" ]]'
+expect "compaction: a marker with its findings but no counts: unknown, as the minimal one" \
+	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"unknown\",[null]]" ]]'
 remark 'del(.counts, .findings) | .findings_dropped = true'
 check_json
 expect "compaction: a marker with neither findings nor counts: unknown, as the minimal one" \
 	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"unknown\",[null]]" ]]'
 
+# A code review with no severity section and no findings block: parsed, and its blockers are unknown (null counts),
+# never 0. Read back, it is unknown under the full marker, the minimal one and none. A bare yes then comments.
+setup $'**Approach:** Sound' $'Looks fine.\n\n**Ready to merge?** Yes with fixes'
+run
+expect "no severity section, parsed: the record's counts are null" \
+	'[[ $rc == 0 && $(jq -c "[.source, .counts.open_blocking, .counts.critical]" <<<"$record") == "[\"parsed\",null,null]" &&
+		$body == *"gh-pr-review:round"* ]]'
+landed 51 COMMENTED 2026-09-01T10:00:00Z
+echo head2 >"$stub/heads"
+for shape in 'full marker~.' 'minimal marker~{schema, round, findings_dropped: true, last_ids}' 'no marker~'; do
+	if [[ -n ${shape#*~} ]]; then remark "${shape#*~}"; else
+		jq '.[-1].body |= (split("\n") | del(.[1]) | join("\n"))' "$stub/rest-reviews.json" >"$stub/r.json"
+		mv "$stub/r.json" "$stub/rest-reviews.json"
+	fi
+	check_json
+	expect "no severity section, ${shape%~*}: reads back unknown, not ready" \
+		'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"unknown\",[null]]" ]]'
+done
+setup $'**Approach:** Sound' $'Looks fine.\n\n**Ready to merge?** Yes'
+run
+expect "no severity section, bare yes: comments, not approve" \
+	'[[ $rc == 0 && $flag == --comment ]] && grep -q "blockers are unknown: posting as comment" "$stub/out.log"'
+# The last landed round read back under the full marker, the minimal one and none: the loop check's decision, label
+# and series are $2 each time.
+reads_back() { # name want
+	local shape
+	want=$2
+	for shape in 'full marker~.' 'minimal marker~{schema, round, findings_dropped: true, last_ids}' 'no marker~'; do
+		if [[ -n ${shape#*~} ]]; then remark "${shape#*~}"; else
+			jq '.[-1].body |= (split("\n") | del(.[1]) | join("\n"))' "$stub/rest-reviews.json" >"$stub/r.json"
+			mv "$stub/r.json" "$stub/rest-reviews.json"
+		fi
+		check_json
+		expect "$1, ${shape%~*}" '[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "$want" ]]'
+	done
+}
+# The same with a heading in the approach that names a severity ("Important context"), whatever the verdict line looks
+# like, or with none: the writer reads the code review alone (review-body.md) and the reader the text after the
+# boundary line, so the round is unknown when written and when read back, never ready.
+for verdict in '**Approach:** Sound' '**Approach:** _Sound_' ''; do
+	setup $'### Approach\n\n#### Important context\n\nThe handler is new.'"${verdict:+$'\n\n'$verdict}" \
+		$'Looks fine.\n\n**Ready to merge?** Yes'
+	run
+	expect "approach heading (${verdict:-no verdict}), no severity section in the code review: written unknown, comments" \
+		'[[ $rc == 0 && $flag == --comment &&
+			$(jq -c "[.source, .counts.open_blocking]" <<<"$record") == "[\"parsed\",null]" && $body == *"Important context"* ]]'
+	landed 52 COMMENTED 2026-09-02T10:00:00Z
+	echo head2 >"$stub/heads"
+	reads_back "approach heading (${verdict:-no verdict}): reads back unknown, not ready" '["run","unknown",[null]]'
+done
+# --skip-approach: a Critical quoting a verdict line, empty Important and Minor sections, and an empty findings block.
+# The block does not show the Critical: it is rejected, and the Critical is kept when written and when read back.
+setup 'unused' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`a.js:1` — the verdict is read from a quote.** The doc says:\n\n  > **Approach:** Sound\n\n#### ⚠️ Important (Should Fix)\n*(none found)*\n#### 💡 Minor (Nice to Have)\n*(none found)*\n\n**Ready to merge?** No\n\n```json findings\n[]\n```'
+run --skip-approach
+expect "skip-approach, a Critical quoting a verdict line: the empty block is rejected, the Critical kept" \
+	'[[ $rc == 0 && $flag == --request-changes &&
+		$(jq -c "[.source, .counts.critical, .findings[0].file]" <<<"$record") == "[\"parsed\",1,\"a.js\"]" ]] &&
+		grep -q "does not match the review" "$stub/out.log"'
+landed 53 CHANGES_REQUESTED 2026-09-03T10:00:00Z
+echo head2 >"$stub/heads"
+reads_back "skip-approach, a Critical quoting a verdict line: read back with its Critical" '["run","early",[1]]'
+# A review ending in a Critical section that says none, with a Critical in the block: the footer is not part of the
+# code review, so the section is empty, the block is rejected, and the round has no blockers, written and read back.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n*(none found)*\n\n```json findings\n[{"severity":"critical","file":"a.js","line":1,"title":"boom"}]\n```'
+run
+expect "last section none found, a Critical in the block: parsed, none blocking" \
+	'[[ $rc == 0 && $(jq -c "[.source, .counts.open_blocking, .counts.critical]" <<<"$record") == "[\"parsed\",0,0]" ]]'
+landed 54 APPROVED 2026-09-04T10:00:00Z
+echo head2 >"$stub/heads"
+reads_back "last section none found: read back with no blockers" '["run","ready",[0]]'
+# An automatic approve needs the check that the blocker count is known to succeed: when jq fails on it, the round
+# posts as comment, even with a clean review whose count is a known 0.
+setup $'**Approach:** Sound' "$clean"
+cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == *'(.counts.open_blocking | type)'* ]] && exit 5; done
+exec "$(command -v jq)" "\$@"
+S
+chmod +x "$stub/bin/jq"
+run
+expect "the blocker-count check fails: comments, not approve" \
+	'[[ $rc == 0 && $flag == --comment && $(jq -r .counts.open_blocking <<<"$record") == 0 ]]'
+rm "$stub/bin/jq"
+run
+expect "the blocker-count check works again: the same review approves" '[[ $rc == 0 && $flag == --approve ]]'
+# Only the second check, on the posted record, fails: the event, the marker and round.json all say comment.
+cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+if [[ "\$*" == *'(.counts.open_blocking | type)'* && "\${*: -1}" == *round.json.posted ]]; then exit 5; fi
+exec "$(command -v jq)" "\$@"
+S
+chmod +x "$stub/bin/jq"
+run
+expect "only the pre-post blocker-count check fails: event, marker and round.json all say comment" \
+	'[[ $rc == 0 && $flag == --comment &&
+		$(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" | jq -r .decision) == comment &&
+		$(jq -c "[.decision, .preview]" <<<"$record") == "[\"comment\",false]" ]] &&
+		grep -q "blockers are unknown: posting as comment" "$stub/out.log"'
+rm "$stub/bin/jq"
+
 # ── the review is bound to the commit it read
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 run
 expect "commit: the review is posted on the reviewed commit, through the review API" '[[ $rc == 0 && $commit == head1 && $flag == --approve ]]'
 printf 'head1\nhead2\n' >"$stub/heads"
@@ -1036,7 +1139,7 @@ expect "head moved during the review: --check on the new head runs" '[[ $rc == 0
 
 # A loop warning and a head that moved: the review's head (here the progress lines, which replace the loop line) stays
 # first, the note comes right after it.
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 rounds_with 9 12 8 >"$stub/rest-reviews.json"
 printf 'head1\nhead2\n' >"$stub/heads"
 run
@@ -1046,7 +1149,7 @@ expect "progress lines and moved head: the progress lines first, then the note" 
 		$(sed -n 6p <<<"$body") == "**Note:** The PR moved to head2 during the review; this review covers head1." &&
 		-z $(sed -n 7p <<<"$body") && $(sed -n 8p <<<"$body") == "**Approach:** Sound" ]]'
 
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 touch "$stub/post.fail"
 run
 expect "the review API fails and no review landed: exit 1, unconfirmed, the record still a preview" \
@@ -1066,7 +1169,7 @@ unconfirmed() { # rc, output and record of a failed post that could not be confi
 	[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] && grep -q "could not confirm whether the review was posted" "$stub/out.log" &&
 		! grep -q "Posted →" "$stub/out.log"
 }
-setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+setup $'**Approach:** Sound' "$clean"
 lost_as ". + [$review_by_me]"
 run
 expect "the review API fails but the review landed: posted, the record finished as posted" \
@@ -1145,6 +1248,73 @@ expect "three rounds: round 3 compares with round 2's head" \
 expect "three rounds: every carried finding is identifiable, details recovered from round 1" \
 	'[[ $(session_file previous-findings.md) == "F2 · critical · c.js:9 · data loss"$'"'"'\n'"'"'"F3 · minor · d.js:4 · typo in a comment"$'"'"'\n'"'"'"F1 · important · a.js:3 · thing breaks" ]]'
 expect "three rounds: both blockers still count" '[[ $(jq -r ".counts.open_blocking, .counts.unverified" <<<"$record" | paste -sd, -) == "2,3" ]]'
+
+# ── producer to reader, a later round: round 2 with fixed, declined, carried, new and Later findings, posted with the
+# boundary line, read back by rounds with its full marker and with the minimal ones
+read_rounds() { # [--json]: rounds over the stub's REST reviews -> $stub/rounds.out
+	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+		bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 "$@" >"$stub/rounds.out" 2>"$stub/out.log") &&
+		rc=0 || rc=$?
+}
+p1=$'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`a.js:1` — one.**\n#### ⚠️ Important (Should Fix)\n'
+p1+=$'- **`b.js:2` — two.**\n- **`c.js:3` — three.**\n#### 💡 Minor (Nice to Have)\n- **`m.js:4` — four.**\n\n'
+p1+=$'**Ready to merge?** No\n\n```json findings\n[{"severity":"critical","file":"a.js","line":1,"title":"one"},'
+p1+=$'{"severity":"important","file":"b.js","line":2,"title":"two"},{"severity":"important","file":"c.js","line":3,'
+p1+=$'"title":"three"},{"severity":"minor","file":"m.js","line":4,"title":"four"}]\n```'
+setup $'**Approach:** Sound' "$p1"
+echo "$H1" >"$stub/heads"
+echo "$B1" >"$stub/git.base"
+run
+expect "later round read back: round 1 posted, F1–F4" \
+	'[[ $rc == 0 && $(jq -c "[.last_ids.F, .counts.open_blocking]" <<<"$record") == "[4,3]" ]]'
+post_back "$H1" 2026-07-01T10:00:00Z
+# Round 2: F1 fixed, F2 declined with a quote, F3 left out (carried, not re-checked), F4 still open, a new Important
+# in d.js (the delta), and an Important outside it filed under Later.
+p2=$'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n*(none found)*\n#### ⚠️ Important (Should Fix)\n'
+p2+=$'- **`d.js:5` — new bug.**\n#### 💡 Minor (Nice to Have)\n- **F4 · `m.js:4`** — still four.\n\n'
+p2+=$'<details><summary>Fixed since the last round (2)</summary>\n\n- **F1** — fixed.\n'
+p2+=$'- **F2** — declined: "by design" (@bob)\n\n</details>\n\n<details><summary>Later (1)</summary>\n\n'
+p2+=$'- **`z.js:9`** — can wait.\n\n</details>\n\n**Ready to merge?** No\n\n```json findings\n'
+p2+=$'[{"id":"F1","status":"fixed","in_delta":false,"later":false},'
+p2+=$'{"id":"F2","status":"declined","reason":"\\"by design\\" (@bob)","in_delta":false,"later":false},'
+p2+=$'{"id":"F4","status":"open","severity":"minor","file":"m.js","line":4,"title":"four","in_delta":false,"later":false},'
+p2+=$'{"id":null,"status":"new","severity":"important","file":"d.js","line":5,"title":"new bug","in_delta":true,"later":false},'
+p2+=$'{"id":null,"status":"new","severity":"important","file":"z.js","line":9,"title":"can wait","in_delta":false,"later":true}]\n```'
+printf '%s' "$p2" >"$stub/review.out"
+echo "$H2" >"$stub/heads"
+run
+expect "later round read back: round 2 written from the block, every status" \
+	'[[ $rc == 0 && $(jq -c "[.source, ([.findings[] | .id + \":\" + .status + (if .unverified then \"?\" else \"\" end)] | join(\" \")), (.later | map(.id)), .last_ids, (.counts | [.open_blocking, .critical, .important, .minor, .fixed, .declined])]" <<<"$record") == "[\"model\",\"F1:fixed F2:declined F4:open F5:new F3:open?\",[\"L1\"],{\"F\":5,\"L\":1},[2,0,2,1,1,1]]" ]]'
+expect "later round read back: the progress lines, then the approach, then the boundary before the code review" \
+	'[[ $(sed -n 3p <<<"$body") == "### Round 2 · since round 1" && $(sed -n 4p <<<"$body") == *"open blocking: 2 (was 3)"* &&
+		$(sed -n 6p <<<"$body") == "**Approach:** Sound" && $(sed -n 8p <<<"$body") == "<!-- gh-pr-review:code-review -->" &&
+		$(sed -n 9p <<<"$body") == "### Issues" ]]'
+post_back "$H2" 2026-07-02T10:00:00Z
+full_body="$body"
+read_rounds --json
+full_rounds=$(cat "$stub/rounds.out")
+r2_view() { jq -c '[.records[1] | .source, .counts.open_blocking, .counts.critical, .last_ids.F, .last_ids.L] + [.decision.labels[1], .decision.label]' "$stub/rounds.out"; }
+expect "later round read back, full marker: as written, 2 blockers, last_ids F5 and L1" \
+	'[[ $rc == 0 && $(r2_view) == "[\"model\",2,0,5,1,\"early\",\"early\"]" ]]'
+read_rounds
+full_table=$(grep '^2 ' "$stub/rounds.out")
+# The same posted body with the minimal marker in place of the full one, with last_ids and without: read from the
+# Markdown after the boundary, with the progress line's 2 blockers (the carried F3 is not in the Markdown), and the
+# same label. With last_ids the floor is the writer's, F5 and L1; without, every finding the Markdown shows takes a
+# new ID after round 1's F4 (F5, F6: never below the writer's), and the Later item reserves L1.
+for m in '{"schema":1,"round":2,"findings_dropped":true,"last_ids":{"F":5,"L":1}}~5,1' \
+	'{"schema":1,"round":2,"findings_dropped":true}~6,1'; do
+	min_body=$(sed "2s/.*/<!-- gh-pr-review:round ${m%%~*} -->/" <<<"$full_body")
+	jq -c --arg b "$min_body" '.[1].body = $b' "$stub/rest-reviews.json" >"$stub/r.tmp" && mv "$stub/r.tmp" "$stub/rest-reviews.json"
+	read_rounds --json
+	expect "later round read back, minimal marker ${m%%~*}: 2 blockers, the same label, last_ids F,L ${m##*~}" \
+		'[[ $rc == 0 && $(r2_view) == "[\"backfill\",2,0,${m##*~},\"early\",\"early\"]" &&
+			$(jq -c ".records[1] | [.findings_dropped, has(\"findings\")]" "$stub/rounds.out") == "[true,false]" &&
+			$(jq -c "[.records[] | .counts.open_blocking]" "$stub/rounds.out") == "$(jq -c "[.records[] | .counts.open_blocking]" <<<"$full_rounds")" ]]'
+	read_rounds
+	expect "later round read back, minimal marker ${m%%~*}: the table row differs only in IMP and the source" \
+		'[[ $rc == 0 && $(grep "^2 " "$stub/rounds.out" | sed "s/  */ /g") == "$(sed "s/  */ /g; s/ 2 1 early model/ 1 1 early backfill/" <<<"$full_table")" ]]'
+done
 
 finished=true
 exit "$fail"

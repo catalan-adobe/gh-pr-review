@@ -34,10 +34,14 @@ out=$(in_lib "PI_ARGS=(); run_pi '$stub/p.md' '$stub/o.md'; echo SHOULD-NOT-REAC
 eq "run_pi failure exits" "$([[ "$out" == *"(exit 1)"* && "$out" != *SHOULD-NOT-REACH* ]] && echo y)" y
 eq "run_pi failure names the session" "$([[ "$out" == *"$stub"* ]] && echo y)" y
 
-eq "approach, review, footer" "$(in_lib "assemble_review 'APPROACH' 'REVIEW'")" \
-	$'APPROACH\n\nREVIEW\n\n---\n'"$footer"
-eq "skip-approach: review and footer" "$(in_lib "assemble_review '' 'REVIEW'")" $'REVIEW\n\n---\n'"$footer"
-eq "rethink: approach and footer" "$(in_lib "assemble_review 'APPROACH' ''")" $'APPROACH\n\n---\n'"$footer"
-eq "nothing to post stays empty" "$(in_lib "assemble_review '' ''")" ""
+boundary='<!-- gh-pr-review:code-review -->'
+eq "approach, boundary, review, footer" "$(in_lib "assemble_review '' 'APPROACH' 'REVIEW'")" \
+	$'APPROACH\n\n'"$boundary"$'\nREVIEW\n\n---\n'"$footer"
+eq "loop line first" "$(in_lib "assemble_review 'LOOP' 'APPROACH' 'REVIEW'")" \
+	$'LOOP\n\nAPPROACH\n\n'"$boundary"$'\nREVIEW\n\n---\n'"$footer"
+eq "skip-approach: boundary, review and footer" "$(in_lib "assemble_review '' '' 'REVIEW'")" \
+	"$boundary"$'\nREVIEW\n\n---\n'"$footer"
+eq "rethink: approach and footer, no boundary" "$(in_lib "assemble_review '' 'APPROACH' ''")" $'APPROACH\n\n---\n'"$footer"
+eq "nothing to post stays empty" "$(in_lib "assemble_review '' '' ''")" ""
 finished=true
 exit "$fail"

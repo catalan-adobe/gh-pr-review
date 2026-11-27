@@ -2,18 +2,19 @@
 # A PR's review rounds, read from GitHub, and the `gh pr-review rounds` subcommand. Functions only.
 
 # Prints the PR's round records as a JSON array, oldest first: the hidden marker of each gh-pr-review review, or a
-# record rebuilt from the review's Markdown (backfill) when the review predates the markers. A generated review is one
-# whose first line is the generated marker (is_generated_review in lib/records.jq). GitHub's facts win over the
-# marker's: the round is the review's position in submission order, posted_at its submission time, head_sha the
-# commit it was posted on, reviewer its author and review_id its GitHub review ID, so two reviews posted at once can't
-# both be round K, nor both give out the same new finding IDs (reconcile_record in lib/records.jq).
+# record rebuilt from the review's Markdown (backfill) when the review has no marker, or one without the full counts
+# (complete_marker in lib/records.jq). A generated review is one whose first line is the generated marker
+# (is_generated_review in lib/records.jq). GitHub's facts win over the marker's: the round is the review's position
+# in submission order, posted_at its submission time, head_sha the commit it was posted on, reviewer its author and
+# review_id its GitHub review ID, so two reviews posted at once can't both be round K, nor both give out the same new
+# finding IDs (reconcile_record in lib/records.jq).
 # Only trusted reviews are rounds (trusted_review in lib/records.jq): by an owner, member or collaborator of the repo,
 # or by <me>, the account running the tool (empty when unknown). The other generated reviews are left out, and listed
 # in <ignored-out> when given: a JSON array of {login, association} (ignored_line prints it for a person).
 # Callers run it in conditions, where errexit is off: every step checks its own status, and the result is checked
 # (an array of records, each with a round number) before it is printed. Any failure prints nothing and returns 1.
 fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
-	local me="${5:-}" generated reviews pr records='[]' previous=null round=0 review record body facts minimal dropped
+	local me="${5:-}" generated reviews pr records='[]' previous=null round=0 review record body facts marker complete
 	generated=$(gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" | jq -cs -L "${LIB_DIR:?}" '
 		include "records";
 		add // [] | map(select((.body | is_generated_review) and .state != "PENDING"))
@@ -36,19 +37,10 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 		round=$((round + 1))
 		body=$(jq -r '.body' <<<"$review") || return 1
 		record=$(marker_record "$body") || return 1
-		minimal=""
-		# A minimal marker (no room for the counts) says only that the findings are missing: the counts come from the
-		# Markdown, as for a marker without counts, and the record keeps findings_dropped and the marker's last_ids.
+		marker=""
 		if [[ -n "$record" ]]; then
-			dropped=$(jq '.findings_dropped == true and (has("counts") | not)' <<<"$record") || return 1
-			if [[ "$dropped" == true ]]; then
-				minimal="$record"
-				record=""
-			else
-				# A code-review marker without its blocking count: rebuilt, or unknown, never 0 (with_counts).
-				record=$(printf '%s\n%s\n' "$record" "$review" | jq -cs -L "${LIB_DIR:?}" \
-					'include "records"; .[1].body as $body | .[0] | with_counts($body)') || return 1
-			fi
+			complete=$(jq -L "${LIB_DIR:?}" 'include "records"; complete_marker' <<<"$record") || return 1
+			[[ "$complete" == true ]] || marker="$record" record=""
 		fi
 		if [[ -z "$record" ]]; then
 			# The previous record carries the history's ID floor, so backfilled IDs never restart either.
@@ -57,18 +49,22 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 					jq -cs -L "${LIB_DIR:?}" 'include "records"; .[1] + {last_ids: (.[0] | id_floor)}') || return 1
 			fi
 			record=$(backfill_record "$review" "$previous" "$round" "$pr") || return 1
-			if [[ -n "$minimal" ]]; then
-				# Its counts come from the Markdown as with_counts reads them: null, so unknown, when it has no severity
-				# heading, exactly as for a marker without counts. A Rethink keeps the backfill's counts, all null, so
-				# the record has the same shape whatever the marker's size. A later round's Markdown leaves out the
-				# findings it carried: its counts stay the backfill's, with the open blocking count of its progress line.
-				record=$(printf '%s\n%s\n' "$record" "$review" | jq -cs -L "${LIB_DIR:?}" --argjson m "$minimal" '
-					include "records";
-					.[1].body as $body | .[0] as $b | $b + ($m | del(.last_ids)) | del(.findings)
-					| .last_ids = {F: ([$b.last_ids.F, $m.last_ids.F?] | map(numbers) | max // 0),
-						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}
-					| if .code_review == false or ($body | later_round_body) then .
-					else del(.counts) | with_counts($body) end') || return 1
+			if [[ -n "$marker" ]]; then
+				# Counts from the Markdown (source backfill), the marker's other facts, no findings list
+				# (findings_dropped), and the IDs the marker held kept as the ID floor. A marker with last_ids that
+				# claims its own position wrote that floor itself: it is the round's (never below the history's), and
+				# counts.new is the marker's. Otherwise every finding the Markdown shows takes a new ID
+				# (backfill_record), and reconcile_record numbers a round two runs claimed after the floor. The L floor
+				# is the marker's and the backfill's, which reserves an L ID per item of a later round's Later list.
+				record=$(printf '%s\n%s\n%s\n' "$records" "$record" "$marker" |
+					jq -cs -L "${LIB_DIR:?}" --argjson round "$round" 'include "records";
+						.[0] as $earlier | .[2] as $m
+						| ($m.round == $round and ($m.last_ids.F? | type) == "number") as $own
+						| (if $own then [$m, $earlier[]] else .[1:] end) as $from
+						| {F: ($from | map(_last_number("F")) | max), L: (.[1:] | map(_last_number("L")) | max)} as $ids
+						| .[1] + ($m | del(.source, .findings, .later, .counts)) + {findings_dropped: true, last_ids: $ids}
+						| del(.findings)
+						| if $own then .counts.new = (($m.counts.new? | numbers) // null) else . end') || return 1
 			fi
 		fi
 		facts=$(jq -c '({posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
