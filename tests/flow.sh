@@ -294,6 +294,13 @@ run
 expect "records: a block repeating one blocker's location falls back to the Markdown" \
 	'[[ $rc == 0 && $(jq -c "[.source, [.findings[] | .file]]" <<<"$record") == "[\"parsed\",[\"a.go\",\"b.go\"]]" ]]'
 
+# A real reply (PR #8, round 4): the Markdown gives ranges (gh-pr-review:974–977), the block a line inside each.
+setup $'### Approach\n**Approach:** Questionable' "$(cat "$root/tests/fixtures/reviews/pr8-round4-model.md")"
+run
+expect "records: Markdown ranges match the block's lines inside them, so the block is the record" \
+	'[[ $rc == 0 && $(jq -c "[.source, (.findings | length), [.findings[].line], .counts.open_blocking]" <<<"$record") == \
+		"[\"model\",7,[976,1031,260,88,885,173,129],4]" ]] && ! grep -q "does not match the review" "$stub/out.log"'
+
 setup $'### Approach\n**Approach:** Rethink' 'never used'
 run
 expect "records: a Rethink has no code review" '[[ $(jq -r ".code_review, .counts.open_blocking" <<<"$record" | paste -sd, -) == "false,null" ]]'

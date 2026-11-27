@@ -7,8 +7,9 @@ def _str: if type == "string" and (_blank | not) then . else null end;
 def _num: if type == "number" then floor elif type == "string" and test("^\\d+$") then tonumber else null end;
 def _title100: if type == "string" then .[0:100] else null end;
 
-# "path:line" right after a backtick or "[": the first one in the text, line = start of a range.
-def _location: [capture("[`\\[](?<f>[\\w./@+~-]+):(?<l>\\d+)")] | .[0];
+# "path:line" right after a backtick or "[": the first one in the text. A range ("a.ts:10–12", en dash or hyphen)
+# gives its end too (e).
+def _location: [capture("[`\\[](?<f>[\\w./@+~-]+):(?<l>\\d+)(?:[–-](?<e>\\d+))?")] | .[0];
 # A leading location, with its range and closing mark ("`a.ts:10–12`", "[a.ts:10]", "a.ts:10").
 def _strip_location: sub("^\\s*[`\\[]?[\\w./@+~-]+:\\d+[^\\s`\\]]*[`\\]]?"; "");
 
@@ -38,14 +39,17 @@ def _finding($severity):
 	sub("^(-|\\d+\\.)\\s+"; "") as $rest
 	| ($rest | _location) as $loc
 	| (if $loc then {file: $loc.f, line: ($loc.l | tonumber)}
+		+ (if $loc.e != null and ($loc.e | tonumber) > ($loc.l | tonumber) then {line_end: ($loc.e | tonumber)} else {} end)
 	else ([$rest | capture("^\\*\\*[`\\[](?<f>[\\w./@+~-]+)[`\\]]")] | .[0].f) as $f
 		| if $f != null and ($f | test("[./]")) and ($f | startswith("-") | not)
 		then {file: $f, line: null} else {file: null, line: null} end
 	end) as $where
-	| {severity: $severity, file: $where.file, line: $where.line, title: ($rest | _title)};
+	| {severity: $severity, file: $where.file, line: $where.line, title: ($rest | _title)}
+		+ (if $where.line_end then {line_end: $where.line_end} else {} end);
 
 # Markdown in, findings out: the "- **" and "<n>. **" items under each heading that names a severity, up to the
-# next heading. Fenced code is skipped.
+# next heading. Fenced code is skipped. A location given as a range keeps its last line in line_end (the record
+# itself keeps line only: normalize_findings drops it).
 def parse_findings:
 	reduce (split("\n")[] | sub("\r$"; "")) as $l ({severity: null, fence: false, out: []};
 		if ($l | test("^\\s*(```|~~~)")) then .fence |= not
@@ -72,22 +76,34 @@ def findings_block_ok:
 # with status fixed or declined, or with later: true, is not open; status and later may be absent. A block that
 # leaves out or downgrades a visible blocker ([] next to a Critical bullet) fails, and the round is parsed instead.
 # The locations must match too, one to one: every Critical or Important bullet with a file:line needs its own open
-# blocking entry at that file:line (two bullets at a.go:10 need two entries there). An entry repeated at one bullet's
-# location does not cover another bullet's. Entries and bullets without a file and line take no part in this.
+# blocking entry in that file at that line, or, for a range (a.go:10–12, line_end 12), at a line within it (two
+# bullets at a.go:10 need two entries there). An entry repeated at one bullet's location does not cover another
+# bullet's. Entries and bullets without a file and line take no part in this. Each file's bullets take, shortest end
+# first, the lowest free entry line in their range: the greedy choice finds a one-to-one match whenever there is one.
 def block_covers_markdown($parsed):
 	def blocking: (.severity | strings | ascii_downcase) as $s | $s == "critical" or $s == "important";
-	def location: if (.file | type == "string" and . != "") and (.line | type == "number")
-		then "\(.file):\(.line | floor)" else empty end;
+	def located: (.file | type == "string" and . != "") and (.line | type == "number");
+	def location: if located then {file, line: (.line | floor)} else empty end;
+	def span: if located then {file, a: (.line | floor),
+		b: ([.line, .line_end] | map(numbers | floor) | max)} else empty end;
+	def matched($have): group_by(.file) | all(.[];
+		.[0].file as $f
+		| reduce sort_by(.b, .a)[] as $x ({free: [$have[] | select(.file == $f) | .line] | sort, ok: true};
+			if .ok then
+				(first(range(0; .free | length) as $i | select(.free[$i] >= $x.a and .free[$i] <= $x.b) | $i) // null) as $i
+				| if $i == null then .ok = false else .free |= del(.[$i]) end
+			else . end)
+		| .ok);
 	def open_entries: [.[] | objects | select(.later != true)
 		| select((.status // "new") | . != "fixed" and . != "declined")];
 	def open($sev): [open_entries[] | select((.severity | strings | ascii_downcase) == $sev)] | length;
 	def shown($sev): [($parsed // [])[]? | objects | select(.severity == $sev)] | length;
 	(if type == "array" then . else [] end)
 	| [open_entries[] | select(blocking) | location] as $have
-	| [($parsed // [])[]? | objects | select(blocking) | location] as $seen
+	| [($parsed // [])[]? | objects | select(blocking) | span] as $seen
 	| open("critical") >= shown("critical")
 		and open("critical") + open("important") >= shown("critical") + shown("important")
-		and all($seen | group_by(.)[]; .[0] as $at | ($have | map(select(. == $at)) | length) >= length);
+		and ($seen | matched($have));
 
 # Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
 def normalize_findings:
