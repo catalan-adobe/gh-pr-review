@@ -47,15 +47,19 @@ def _finding($severity):
 	| {severity: $severity, file: $where.file, line: $where.line, title: ($rest | _title)}
 		+ (if $where.line_end then {line_end: $where.line_end} else {} end);
 
-# Markdown in, findings out: the "- **" and "<n>. **" items under each heading that names a severity, up to the
-# next heading. Fenced code is skipped. A location given as a range keeps its last line in line_end (the record
-# itself keeps line only: normalize_findings drops it).
+# A line that only says there is nothing: "*(none found)*", "None.", "_None found_".
+def _none_line: ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
+
+# Markdown in, findings out: the top-level "- " and "<n>. " items, bold or plain, under each heading that names a
+# severity, up to the next heading ("- None." is not one). Fenced code is skipped. A location given as a range keeps
+# its last line in line_end (the record itself keeps line only: normalize_findings drops it).
 def parse_findings:
 	reduce (split("\n")[] | sub("\r$"; "")) as $l ({severity: null, fence: false, out: []};
 		if ($l | test("^\\s*(```|~~~)")) then .fence |= not
 		elif .fence then .
 		elif ($l | test("^#{1,6}\\s")) then .severity = ($l | _severity)
-		elif .severity != null and ($l | test("^(-|\\d+\\.)\\s+\\*\\*")) then
+		elif .severity != null and ($l | test("^(-|\\d+\\.)\\s+\\S"))
+			and ($l | sub("^(-|\\d+\\.)\\s+"; "") | _none_line | not) then
 			.severity as $s | .out += [$l | _finding($s)]
 		else . end)
 	| .out;
@@ -78,9 +82,8 @@ def _sections:
 # The severities the Markdown says it has none of: each section of that severity holds only a "none" line
 # ("*(none found)*", "None.", "_None found_"), or nothing at all before the next heading.
 def empty_severities:
-	def none_line: ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
 	_sections | group_by(.severity)
-	| map(select(all(.[]; (.lines | length == 1 and (.[0] | none_line)) or (.closed and (.lines | length == 0)))))
+	| map(select(all(.[]; (.lines | length == 1 and (.[0] | _none_line)) or (.closed and (.lines | length == 0)))))
 	| map(.[0].severity);
 
 # False when the block has an open entry of a severity the Markdown says it has none of ($empty: empty_severities):
@@ -261,19 +264,23 @@ def markdown_counts:
 			minor: sev("minor"), new: length, fixed: 0, declined: 0, regressed: 0}
 	end;
 
-# A marker record of a code-review round (not a Rethink) without a numeric counts.open_blocking: the counts are rebuilt
-# from its findings, when it has some and they show every blocker its review's Markdown ($body) does
-# (block_covers_markdown, block_respects_empty); else from the Markdown. When neither can say, every count is null:
-# the round's blocking is unknown, never 0, and the loop never calls it ready. Other records are left as they are.
+# A marker record of a code-review round (not a Rethink) without a numeric counts.open_blocking: when its counts
+# still give critical and important, open_blocking is their sum. Otherwise the counts are rebuilt from its findings,
+# when it has some and they show every blocker its review's Markdown ($body) does (block_covers_markdown,
+# block_respects_empty); else from the Markdown. When neither can say, every count is null: the round's blocking is
+# unknown, never 0, and the loop never calls it ready. Other records are left as they are.
 def with_counts($body):
 	if .code_review != false and (.counts.open_blocking? | type) != "number" then
-		($body | parse_findings) as $parsed
-		| (if (.findings | type == "array" and length > 0) and .findings_dropped != true
-			and (.findings | block_covers_markdown($parsed) and block_respects_empty($body | empty_severities))
-			then .findings | _findings_counts
-			else $body | markdown_counts end) as $c
-		| .counts = ($c // {open_blocking: null, critical: null, important: null, minor: null, new: null,
-			fixed: null, declined: null, regressed: null})
+		if (.counts.critical? | type) == "number" and (.counts.important? | type) == "number" then
+			.counts.open_blocking = (.counts.critical + .counts.important)
+		elif (.findings | type == "array" and length > 0) and .findings_dropped != true
+			and (.findings | block_covers_markdown($body | parse_findings)
+				and block_respects_empty($body | empty_severities)) then
+			.counts = (.findings | _findings_counts)
+		else
+			.counts = (($body | markdown_counts) // {open_blocking: null, critical: null, important: null, minor: null,
+				new: null, fixed: null, declined: null, regressed: null})
+		end
 	else . end;
 
 # The first line of every body gh-pr-review posts.

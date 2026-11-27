@@ -38,7 +38,7 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 		record=$(marker_record "$body") || return 1
 		minimal=""
 		# A minimal marker (no room for the counts) says only that the findings are missing: the counts come from the
-		# Markdown, as for a review without a marker, and the record keeps findings_dropped and the marker's last_ids.
+		# Markdown, as for a marker without counts, and the record keeps findings_dropped and the marker's last_ids.
 		if [[ -n "$record" ]]; then
 			dropped=$(jq '.findings_dropped == true and (has("counts") | not)' <<<"$record") || return 1
 			if [[ "$dropped" == true ]]; then
@@ -58,9 +58,14 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 			fi
 			record=$(backfill_record "$review" "$previous" "$round" "$pr") || return 1
 			if [[ -n "$minimal" ]]; then
-				record=$(jq -c --argjson m "$minimal" '. as $b | $b + ($m | del(.last_ids)) | del(.findings)
+				# Its counts come from the Markdown as with_counts reads them: null, so unknown, when it has no severity
+				# heading, exactly as for a marker without counts.
+				record=$(printf '%s\n%s\n' "$record" "$review" | jq -cs -L "${LIB_DIR:?}" --argjson m "$minimal" '
+					include "records";
+					.[1].body as $body | .[0] as $b | $b + ($m | del(.last_ids)) | del(.findings, .counts)
 					| .last_ids = {F: ([$b.last_ids.F, $m.last_ids.F?] | map(numbers) | max // 0),
-						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}' <<<"$record") || return 1
+						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}
+					| with_counts($body)') || return 1
 			fi
 		fi
 		facts=$(jq -c '({posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}

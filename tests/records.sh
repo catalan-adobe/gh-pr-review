@@ -57,6 +57,11 @@ long=$(printf 'x%.0s' {1..150})
 printf '#### 🚨 Critical\n\n- **`a.ts:1` — %s**\n' "$long" >"$tmp/long.md"
 check "title cut to 100 characters" "$(parse_findings "$tmp/long.md" | jq '.[0].title | length')" 100
 
+printf '#### 🚨 Critical\n\n- `a.ts:1` — plain bullet.\n  - a sub-point\n- None.\n\n#### 💡 Minor\n\n1. plain numbered\n' >"$tmp/plain.md"
+f=$(parse_findings "$tmp/plain.md")
+check "plain bullets: counted, sub-points and a None line not" "$(counts "$f")" "1 0 1"
+check "plain bullets: item" "$(item "$f" 0)" "critical | a.ts | 1 | plain bullet."
+
 # ── cut_findings_block ──────────────────────────────────────────────────────
 block() { printf '```json findings\n[{"severity":"%s","file":"a.ts","line":1,"title":"t"}]\n```\n' "$1"; }
 cut() { # review-text -> sets body and found

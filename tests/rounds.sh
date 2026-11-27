@@ -139,12 +139,29 @@ jq -s . <(nocounts '[]' "$crit_md") >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "no counts, findings missing the Markdown's Critical: counted from the Markdown" \
 	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label]" <<<"$out") == "[[1],\"early\"]" ]]'
+plain_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- \`a.js:1\` — boom.${nl}${nl}### Assessment${nl}**Ready to merge?** Yes"
+jq -s . <(nocounts '[]' "$plain_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no counts: a plain bullet under Critical counts from the Markdown" \
+	'[[ $rc == 0 && $(jq -c "[.records[0].counts.critical, .decision.series, .decision.label]" <<<"$out") == "[1,[1],\"early\"]" ]]'
+jq -s '.[0].body |= sub("\"findings\":\\[\\]"; "\"findings\":[],\"counts\":{\"critical\":1,\"important\":0}")' \
+	<(nocounts '[]' "$plain_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no open_blocking but critical and important: their sum, not the Markdown" \
+	'[[ $rc == 0 && $(jq -c ".records[0] | [.counts.critical, .counts.open_blocking, .findings_dropped]" <<<"$out") == "[1,1,null]" &&
+		$(jq -r .decision.label <<<"$out") == early ]]'
 jq -s . <(nocounts '[]' "Looks fine.${nl}${nl}**Ready to merge?** Yes, with fixes") >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "no counts, no findings and no severity heading: blocking unknown, not ready" \
 	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking]" <<<"$out") == "[[null],\"unknown\",null]" ]]'
 out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
 expect "no counts: the table shows dashes and the unknown label" '[[ $rc == 0 && $(row 1) == *" – – – unknown –" ]]'
+minimal='{"schema":1,"round":1,"findings_dropped":true,"last_ids":{"F":0,"L":0}}'
+jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${minimal} -->${nl}Looks fine.${nl}${nl}**Ready to merge?** Yes" \
+	'[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "a minimal marker and no severity heading: blocking unknown, not ready, as without counts" \
+	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking, .records[0].findings_dropped]" <<<"$out") == "[[null],\"unknown\",null,true]" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
 # Only trusted reviews are rounds. eve, a contributor, posts a generated review on the PR's head: not a round, so the
