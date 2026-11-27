@@ -1116,9 +1116,20 @@ expect "three rounds: round 2 carries F1, and its marker drops what the body doe
 	'[[ $(jq -r "[.findings[] | .id + \":\" + .status + (if .unverified then \"?\" else \"\" end)] | join(\" \")" <<<"$record") == "F2:open F3:new F1:open?" ]] &&
 		[[ $(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" | jq -c "[.findings[] | select(.id != \"F3\") | [.id, .file, .title]]") == "[[\"F2\",\"c.js\",null],[\"F1\",null,null]]" ]]'
 post_back "$H2" 2026-06-02T10:00:00Z
+# An outsider's generated review between rounds 1 and 2: no round, so it must not shift round 2 out of place as the
+# previous review.
+outsider=$'<!-- gh-pr-review generated -->\n### Issues\n- outsider text'
+jq -c --arg body "$outsider" '. + [{id: (length + 1), user: {login: "eve", type: "User"}, author_association: "NONE",
+	state: "COMMENTED", commit_id: "'"$H1"'", submitted_at: "2026-06-01T12:00:00Z", body: $body}]' \
+	"$stub/rest-reviews.json" >"$stub/r.tmp" && mv "$stub/r.tmp" "$stub/rest-reviews.json"
+jq -c --arg body "$outsider" '.reviews += [{author: {login: "eve"}, authorAssociation: "NONE", state: "COMMENTED",
+	submittedAt: "2026-06-01T12:00:00Z", body: $body}]' "$stub/discussion.json" >"$stub/d.tmp" &&
+	mv "$stub/d.tmp" "$stub/discussion.json"
 printf '%s' $'**Ready to merge?** No\n\n```json findings\n[]\n```' >"$stub/review.out"
 echo "$H3" >"$stub/heads"
 run
+expect "three rounds: an outsider's generated review is not the previous review" \
+	'[[ $(session_file previous-review.md) == *"still loses data"* && $(session_file previous-review.md) != *"outsider text"* ]]'
 expect "three rounds: round 3 compares with round 2's head" \
 	'[[ $rc == 0 && $(jq -r ".round, .mode, .previous_head_sha" <<<"$record" | paste -sd, -) == "3,incremental,$H2" ]] &&
 		grep -qF "git diff --stat $H2..$H3" "$stub/code-prompt.txt" && grep -qF "git diff $H2..$H3" "$stub/code-prompt.txt"'

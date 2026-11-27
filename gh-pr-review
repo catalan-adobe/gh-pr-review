@@ -550,9 +550,11 @@ fi
 
 # The n-th gh-pr-review review on the PR, without its marker lines.
 round_body() { # <round>
-	# The same test as fetch_round_records (the header on the first line), so the n-th body is round n.
-	jq -r -L "$LIB_DIR" --argjson n "$1" 'include "records";
-		[.reviews[] | select(.state != "PENDING" and (.body | is_generated_review))]
+	# The same tests as fetch_round_records (the header on the first line, a trusted author: trusted_review), so the
+	# n-th body is round n. An outsider's generated review is no round, and never the previous review.
+	jq -r -L "$LIB_DIR" --argjson n "$1" --arg me "${ROUNDS_ME:-}" 'include "records";
+		[.reviews[] | select(.state != "PENDING" and (.body | is_generated_review)
+			and ({author_association: .authorAssociation, user: {login: .author.login?}} | trusted_review($me)))]
 		| sort_by(.submittedAt) | .[$n - 1].body // ""' "$CONTEXT_DIR/discussion.json" | grep -v '^<!-- gh-pr-review' || true
 }
 
