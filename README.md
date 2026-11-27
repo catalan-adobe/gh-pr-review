@@ -127,8 +127,11 @@ record on GitHub, in an HTML comment right below the
 `<!-- gh-pr-review generated -->` line: the round number, the commits reviewed,
 the approach and "Ready to merge?" verdicts, and the findings (severity,
 `file:line`, a short title, an ID such as `F4` that later rounds keep). The same
-record is saved as `round.json`. It holds only what the review already says:
-never the `--instructions` text, never the prompts. Rounds posted by anyone with
+record is saved as `round.json`. The record on GitHub holds only what the
+review already says: a title or path the posted review does not show is left
+out of the marker, and the `--instructions` text and the prompts are never in
+it. `round.json` in the session folder is not filtered: it keeps everything the
+model returned, so inspect it before sharing it. Rounds posted by anyone with
 this tool count, so the history is the same on every machine.
 
 `gh pr-review rounds <PR-URL | PR-number>` prints that history, one row per
