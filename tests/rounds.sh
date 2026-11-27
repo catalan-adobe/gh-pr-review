@@ -31,7 +31,11 @@ cat >"$stub/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
 *pulls/1/reviews*) jq 'map(.author_association //= "MEMBER")' "$stub/reviews.json" ;; # members unless set
-*" user --jq"*) echo me ;;
+*" user --jq"*)
+	# user.fail: how many reads of this account's login fail from now on.
+	n=\$(cat "$stub/user.fail" 2>/dev/null || echo 0)
+	[[ "\$n" -gt 0 ]] && { echo "\$((n - 1))" >"$stub/user.fail"; exit 1; }
+	echo me ;;
 *pulls/1/commits*) cat "$stub/commits.json" ;;
 *issues/1/comments*) cat "$stub/comments.json" ;;
 *pulls/1/comments*) echo '[]' ;;
@@ -187,6 +191,16 @@ mv "$stub/r.json" "$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "trust: my own review counts where I am only a contributor" \
 	'[[ $(jq -c "[(.records | length), .decision.decision, (.ignored | length)]" <<<"$out") == "[4,\"nothing-new\",1]" ]]'
+echo 1 >"$stub/user.fail"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "trust: the login read fails once: the retry reads it, and my review still counts" \
+	'[[ $rc == 0 && $(jq -c "[(.records | length), .decision.decision]" <<<"$out") == "[4,\"nothing-new\"]" ]]'
+echo 2 >"$stub/user.fail"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "trust: the login read fails twice: rounds fails and says why" \
+	'[[ $rc == 1 && $out == *"could not read the account running the tool, so the round history can'"'"'t be checked"* &&
+		$out != *records* ]]'
+rm -f "$stub/user.fail"
 out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
 expect "trust: one left out, one author" 'grep -qx "ignored: 1 generated review by @eve (not a member or collaborator of the repo)" <<<"$out"'
 cp "$stub/reviews.saved" "$stub/reviews.json"

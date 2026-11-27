@@ -130,6 +130,22 @@ lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 	fi
 }
 
+# The login of the account running the tool, read with one retry. Its own rounds count even where it is only a
+# contributor (fetch_round_records), so the history can't be checked without it: when both reads fail, it says so and
+# fails.
+operator_login() { # <host>
+	local login try
+	for try in 1 2; do
+		if login=$(gh api --hostname "$1" user --jq .login 2>/dev/null) && [[ -n "$login" ]]; then
+			printf '%s\n' "$login"
+			return 0
+		fi
+		[[ "$try" == 2 ]] || sleep 1
+	done
+	echo "Error: could not read the account running the tool, so the round history can't be checked; check gh auth and network." >&2
+	return 1
+}
+
 cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 	local target="" as_json=false user="${GH_PR_REVIEW_USER:-}" records shape commits decision lifted me ignored_file ignored
 	while [[ $# -gt 0 ]]; do
@@ -174,7 +190,7 @@ cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 	resolve_target "$target"
 
 	# Your own rounds count even where you are only a contributor (fetch_round_records).
-	me=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
+	me=$(operator_login "$GH_HOST_NAME") || return 1
 	ignored_file=$(mktemp)
 	if ! records=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$me" "$ignored_file"); then
 		rm -f "$ignored_file"

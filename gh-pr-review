@@ -369,8 +369,9 @@ echo ""
 # round should run: not when nothing changed, and not when the loop has stopped converging (see `gh pr-review rounds`).
 HEAD_OID=$(echo "$PR_JSON" | jq -r '.headRefOid // empty')
 # Only trusted reviews are rounds: by an owner, member or collaborator of the repo, or by this account (ROUNDS_ME, the
-# same login for the final re-read). The others are named once, here.
-ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
+# same login for the final re-read). The others are named once, here. Without this account's login its own rounds
+# would be missed: the run stops here, before any clone or model call.
+ME=$(operator_login "$GH_HOST_NAME") || exit 1
 ROUNDS_ME="$ME"
 IGNORED_FILE=$(mktemp)
 RECORDS=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$ROUNDS_ME" "$IGNORED_FILE") || {

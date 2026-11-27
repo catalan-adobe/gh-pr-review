@@ -40,7 +40,11 @@ case "\$*" in
 *issues/1/comments*) cat "$stub/rest-comments.json" ;;
 *pulls/1/comments*) echo '[]' ;;
 *"auth status"*) exit 0 ;;
-*"api"*user*) echo me ;;
+*"api"*user*)
+	# user.fail: how many reads of this account's login fail from now on.
+	n=\$(cat "$stub/user.fail" 2>/dev/null || echo 0)
+	[[ "\$n" -gt 0 ]] && { echo "\$((n - 1))" >"$stub/user.fail"; exit 1; }
+	echo me ;;
 *graphql*) echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}' ;;
 *"--json comments,reviews"*) [[ "${3:-0}" == 0 ]] || exit ${3:-0}; cat "$stub/discussion.json" ;;
 *"pr view"*)
@@ -533,6 +537,26 @@ expect "trust: an outsider's generated review on this head: the review runs as r
 untrusted me CONTRIBUTOR head1 >"$stub/rest-reviews.json"
 run
 expect "trust: this account's review counts where it is only a contributor: nothing new" '[[ $rc == 5 && $calls == 0 ]]'
+# This account's login can't be read: its own rounds would be missed, so nothing runs (one retry first).
+echo 1 >"$stub/user.fail"
+run
+expect "trust: the login read fails once: the retry reads it, and its own review still means nothing new" \
+	'[[ $rc == 5 && $calls == 0 ]]'
+login_error="could not read the account running the tool, so the round history can't be checked; check gh auth and network"
+echo 2 >"$stub/user.fail"
+run --check
+expect "trust: the login read fails twice: --check exits 1 and says why" \
+	'[[ $rc == 1 && $calls == 0 ]] && no_session && grep -qF "$login_error" "$stub/out.log" && ! grep -q "Loop check" "$stub/out.log"'
+echo 2 >"$stub/user.fail"
+run
+expect "trust: the login read fails twice: the review exits 1, with no clone and no model call" \
+	'[[ $rc == 1 && $calls == 0 && -z $flag ]] && no_session && grep -qF "$login_error" "$stub/out.log"'
+echo 2 >"$stub/user.fail"
+(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+	bash "$root/gh-pr-review" rounds https://github.com/o/r/pull/1 >"$stub/out.log" 2>&1) && rc=0 || rc=$?
+expect "trust: the login read fails twice: rounds exits 1 and says why" \
+	'[[ $rc == 1 ]] && grep -qF "$login_error" "$stub/out.log" && ! grep -q "^next round" "$stub/out.log"'
+rm -f "$stub/user.fail"
 untrusted eve NONE head1 | jq '.[0].user.login = "eve2"' >"$stub/reviews.after"
 echo '[]' >"$stub/rest-reviews.json"
 run
