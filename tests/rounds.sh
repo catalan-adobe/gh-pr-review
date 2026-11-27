@@ -262,7 +262,9 @@ T
 # The same round under every marker shape marker_line emits, each the largest that fits as the review grows: full,
 # without titles, without locations, without the Later list, without findings, minimal. Each reads back with the full
 # marker's counts, ID floor (F30) and next decision, and the next round's first new finding is F31; the minimal
-# marker's counts come from the Markdown, and match.
+# marker's counts come from the Markdown, and match. The last step drops last_ids too: the round's own floor is gone,
+# so the floor is the conservative one, higher than the writer's F30 and never lower: each of the 5 findings the
+# Markdown shows takes an ID after round 4's F27, F32, and the next finding is F33.
 sed -n 2p "$root/tests/fixtures/reviews/pr8-round5.md" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' |
 	jq '.findings[].title = "Round 5"' >"$stub/r5.json"
 sed 1,2d "$root/tests/fixtures/reviews/pr8-round5.md" >"$stub/review5.md"
@@ -289,6 +291,12 @@ while IFS='~' read -r shape filter; do
 	elif [[ $shape == minimal ]]; then
 		expect "marker shape minimal: the Markdown's open counts match the full marker's, same ID floor and decision" \
 			'[[ $rc == 0 && $(open_counts "$got") == "$(open_counts "$full")" ]]'
+	elif [[ $shape == "without last_ids" ]]; then
+		expect "marker shape without last_ids: the full marker's open counts and label, the conservative ID floor F32" \
+			'[[ $rc == 0 && $(open_counts "$got" | jq -c ".[0]") == "$(open_counts "$full" | jq -c ".[0]")" &&
+				$(jq -c "[.[1].F, .[2].label]" <<<"$got") == "[32,\"nit-loop\"]" ]]'
+		expect "marker shape without last_ids: the next finding is F33, after the writer's F30" '[[ $(next_id) == F33 ]]'
+		continue
 	else
 		expect "marker shape $shape: the full marker's counts, ID floor and decision" '[[ $rc == 0 && $got == "$full" ]]'
 	fi
@@ -300,6 +308,7 @@ without locations~del(.findings[] | .title, .file, .line, .first_round, .in_delt
 without the Later list~del(.findings[] | .title, .file, .line, .first_round, .in_delta) | del(.later)
 without findings~del(.later, .findings) | .findings_dropped = true
 minimal~{schema: 1, round, findings_dropped: true, last_ids}
+without last_ids~{schema: 1, round, findings_dropped: true}
 T
 # Two runs both post round 5 with F28–F30: the second, posted later with the minimal marker, is round 6. Its marker's
 # floor is not its own: each of its 5 bullets takes an ID after the first run's F30, so the next finding is F36.
