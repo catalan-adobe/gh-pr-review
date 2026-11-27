@@ -572,6 +572,31 @@ expect "round trip: the history has each round on the commit it read" \
 	'[[ $(jq -c "[.records[] | [.round, .head_sha, .reviewer]]" "$stub/rounds.json") == \
 		"[[1,\"head1\",\"me\"],[2,\"head2\",\"me\"],[3,\"head3\",\"ann\"]]" ]]'
 
+# Two runs post round 1 at once, and the second one's marker was compacted (findings dropped, counts kept): read
+# back, its 40 new IDs come after the first run's F1, so round 3 numbers from F42.
+block=$'```json findings\n[{"severity":"important","file":"a.js","line":3,"title":"thing breaks"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### ⚠️ Important (Should Fix)\n- **`a.js:3` — thing breaks.**\n\n**Ready to merge?** No\n\n'"$block"
+run
+expect "at once: the first run posts round 1 with F1" '[[ $rc == 0 && $(jq -c "[.round, .last_ids.F]" <<<"$record") == "[1,1]" ]]'
+first_body="$body" first_commit="$commit"
+many=$(jq -nc '[range(40) | {severity: "minor", file: null, line: null, title: "nit \(.)"}]')
+printf '%s' "$(head -c 58000 /dev/zero | tr '\0' x)"$'\n\n**Ready to merge?** Yes with fixes\n\n```json findings\n'"$many"$'\n```' \
+	>"$stub/review.out"
+run
+expect "at once: the second run also claims round 1, and its marker drops the findings but keeps the counts" \
+	'[[ $rc == 0 && $(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" |
+		jq -c "[.round, .findings_dropped, has(\"findings\"), .counts.new, .last_ids.F]") == "[1,true,false,40,40]" ]]'
+second_body="$body"
+body="$first_body" commit="$first_commit"
+landed 21 CHANGES_REQUESTED 2026-06-01T10:00:00Z
+body="$second_body"
+landed 22 COMMENTED 2026-06-01T10:00:00Z
+echo head2 >"$stub/heads"
+printf '%s' $'**Ready to merge?** No\n\n```json findings\n[{"severity":"minor","title":"one more"}]\n```' >"$stub/review.out"
+run
+expect "at once: round 3 numbers its new finding after both runs' IDs" \
+	'[[ $rc == 0 && $(jq -c "[.round, .findings[0].id, .last_ids.F]" <<<"$record") == "[3,\"F42\",42]" ]]'
+
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run

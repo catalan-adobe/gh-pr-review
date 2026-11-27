@@ -106,11 +106,19 @@ def id_floor: map(objects) | {F: (map(_last_number("F")) | max // 0), L: (map(_l
 # same new IDs. When the claimed round is not the position, or a new finding's ID is not above the ID floor of the
 # earlier rounds, its new findings (status new, or none) are numbered after that floor, with first_round set to the
 # position, and last_ids follows. Other findings, and a record that agrees with its position, are left as they are.
+# A compacted record (no findings list, or findings_dropped) still says how many new findings it gave out
+# (counts.new): those took the IDs up to its last_ids.F. When it claims a round that is not its position, or those
+# IDs reach down to the floor, they are the floor's next ones instead: last_ids.F is at least floor + counts.new.
 def reconcile_record($earlier; $position):
 	($earlier | id_floor) as $floor
 	| def is_new: type == "object" and ((.status // "new") == "new");
 	def number: .id | strings | capture("^F(?<n>\\d+)$").n | tonumber;
-	if .round != $position or any((.findings // [])[]? | select(is_new); (number // 0) <= $floor.F) then
+	(.counts.new? | if type == "number" then floor else 0 end) as $new
+	| if ((.findings | type) != "array" or .findings_dropped == true) and $new > 0 then
+		if .round != $position or _last_number("F") - $new < $floor.F then
+			.last_ids = {F: ([_last_number("F"), $floor.F + $new] | max), L: ([_last_number("L"), $floor.L] | max)}
+		else . end
+	elif .round != $position or any((.findings // [])[]? | select(is_new); (number // 0) <= $floor.F) then
 		(reduce range(0; (.findings // []) | length) as $i ({rec: ., n: $floor.F};
 			if (.rec.findings[$i] | is_new) then .n += 1 | .rec.findings[$i] += {id: "F\(.n)", first_round: $position}
 			else . end)) as $r

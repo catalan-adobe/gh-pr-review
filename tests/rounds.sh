@@ -104,6 +104,22 @@ expect "rounds: reconciling keeps the rest of the finding" \
 	'[[ $(jq -c "[.records[2].findings[0] | .severity, .status, .title]" <<<"$out") == "[\"important\",\"new\",\"a\"]" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
+# Two runs claim round 1 with one new finding each, F1; the later marker was compacted (findings_dropped, counts kept).
+# Its F1 is the floor's next ID, F2, so round 3 numbers from F3.
+cp "$stub/reviews.json" "$stub/reviews.saved"
+dropped='{"schema":1,"round":1,"code_review":true,"findings_dropped":true,"last_ids":{"F":1,"L":0},'
+dropped+='"counts":{"open_blocking":1,"critical":0,"important":1,"minor":0,"new":1}}'
+jq -n --arg m "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${one} -->${nl}x" \
+	--arg d "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${dropped} -->${nl}x" '[
+	{body: $m, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}},
+	{body: $d, commit_id: "c1", submitted_at: "2026-03-01T00:00:01Z", user: {login: "ann"}}]' >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "rounds: a compacted round posted at once takes the floor's next IDs" \
+	'[[ $rc == 0 && $(jq -c "[.records[] | [.round, .last_ids.F]]" <<<"$out") == "[[1,1],[2,2]]" ]]'
+expect "rounds: after it, round 3 numbers from F3" \
+	'[[ $(jq -c -L "$root/lib" "include \"records\"; .records | id_floor.F + 1" <<<"$out") == 3 ]]'
+cp "$stub/reviews.saved" "$stub/reviews.json"
+
 # A processing step that fails inside fetch_round_records (here: reconciling a record) fails the whole read: no
 # output, status 1. Callers run it in conditions, where errexit would not stop it.
 real_jq=$(command -v jq)
