@@ -1028,7 +1028,13 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	elif [[ "$NOW_HEAD" != "$HEAD_SHA" ]]; then
 		HEAD_NOTE="The PR moved to ${NOW_HEAD:0:7} during the review; this review covers ${HEAD_SHA:0:7}."
 		echo "$HEAD_NOTE"
-		REVIEW=$(printf '**Note:** %s\n\n%s' "$HEAD_NOTE" "$REVIEW")
+		# Right after the loop line when there is one: that line stays the review's first.
+		if [[ "$REVIEW" == "**Loop:** "* && "$REVIEW" == *$'\n'* ]]; then
+			REVIEW_REST=${REVIEW#*$'\n'}
+			REVIEW=$(printf '%s\n\n**Note:** %s\n\n%s' "${REVIEW%%$'\n'*}" "$HEAD_NOTE" "${REVIEW_REST#$'\n'}")
+		else
+			REVIEW=$(printf '**Note:** %s\n\n%s' "$HEAD_NOTE" "$REVIEW")
+		fi
 	fi
 	if [[ -n "$HEAD_NOTE" && "$DECISION" == approve ]]; then
 		DECISION=comment

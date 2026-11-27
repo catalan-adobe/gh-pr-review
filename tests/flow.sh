@@ -624,6 +624,17 @@ jq -n --arg body "$body" --arg commit "$commit" '[{id: 1, user: {login: "me", ty
 echo head2 >"$stub/heads"
 run --check
 expect "head moved during the review: --check on the new head runs" '[[ $rc == 0 ]] && grep -q "Loop check for round 2: run" "$stub/out.log"'
+
+# A loop warning and a head that moved: the loop line stays the review's first line, the note comes right after it.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+rounds_with 9 12 8 >"$stub/rest-reviews.json"
+printf 'head1\nhead2\n' >"$stub/heads"
+run
+expect "loop line and moved head: the loop line first, then the note" \
+	'[[ $rc == 0 && $flag == --comment && $(sed -n 3p <<<"$body") == "**Loop:** Churning"* && -z $(sed -n 4p <<<"$body") &&
+		$(sed -n 5p <<<"$body") == "**Note:** The PR moved to head2 during the review; this review covers head1." &&
+		-z $(sed -n 6p <<<"$body") && $(sed -n 7p <<<"$body") == "**Approach:** Sound" ]]'
+
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 touch "$stub/post.fail"
 run
