@@ -308,22 +308,30 @@ def markdown_counts:
 	end;
 
 # A marker record of a code-review round (not a Rethink) without a numeric counts.open_blocking: when its counts
-# still give critical and important, open_blocking is their sum. Otherwise the counts are rebuilt from its findings,
-# with the statuses it stored (record_counts), when it has some and they show every blocker its review's Markdown
-# ($body) does (record_covers_markdown, record_respects_empty); else from the Markdown, and then the findings list,
-# which did not pass that check, is dropped: findings_dropped: true says "no reliable list", not "no findings". When
-# neither can say, every count is null: the round's blocking is unknown, never 0, and the loop never calls it ready.
-# Other records are left as they are.
+# still give critical and important, and those agree with the blockers the reader can see, open_blocking is their sum.
+# They agree when each severity's count is at least the Markdown's ($body: markdown_counts) and at least the open
+# findings of that severity in the record's own list (record_counts, with the statuses it stored). Otherwise the
+# counts are rebuilt from its findings, with the statuses it stored (record_counts), when it has some and they show
+# every blocker its review's Markdown does (record_covers_markdown, record_respects_empty); else from the Markdown, and
+# then the findings list, which did not pass that check, is dropped: findings_dropped: true says "no reliable list",
+# not "no findings". When neither can say, every count is null: the round's blocking is unknown, never 0, and the loop
+# never calls it ready. Other records are left as they are.
 def with_counts($body):
 	if .code_review != false and (.counts.open_blocking? | type) != "number" then
-		if (.counts.critical? | type) == "number" and (.counts.important? | type) == "number" then
-			.counts.open_blocking = (.counts.critical + .counts.important)
+		($body | markdown_counts) as $shown
+		| (if (.findings | type) == "array" and .findings_dropped != true then .findings | record_counts else null end) as $own
+		| def num: if type == "number" then . else null end;
+		def agrees($n; $s): $n != null and $n >= (($shown // {})[$s] // 0) and $n >= (($own // {})[$s] // 0);
+		(.counts.critical? | num) as $critical
+		| (.counts.important? | num) as $important
+		| if agrees($critical; "critical") and agrees($important; "important") then
+			.counts.open_blocking = ($critical + $important)
 		elif (.findings | type == "array" and length > 0) and .findings_dropped != true
 			and (.findings | record_covers_markdown($body | parse_findings)
 				and record_respects_empty($body | empty_severities)) then
-			.counts = (.findings | record_counts)
+			.counts = $own
 		else
-			.counts = (($body | markdown_counts) // {open_blocking: null, critical: null, important: null, minor: null,
+			.counts = ($shown // {open_blocking: null, critical: null, important: null, minor: null,
 				new: null, fixed: null, declined: null, regressed: null})
 			| del(.findings) | .findings_dropped = true
 		end

@@ -156,6 +156,19 @@ out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "no open_blocking but critical and important: their sum, not the Markdown" \
 	'[[ $rc == 0 && $(jq -c ".records[0] | [.counts.critical, .counts.open_blocking, .findings_dropped]" <<<"$out") == "[1,1,null]" &&
 		$(jq -r .decision.label <<<"$out") == early ]]'
+# Counts that contradict a Critical both the marker's findings and the Markdown show (critical 0, important 0): the
+# sum is not used, the findings are, and the round is not ready.
+a7_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- **\`a.go:7\` — boom.**${nl}${nl}### Assessment${nl}**Ready to merge?** Yes with fixes"
+jq -s '.[0].body |= sub("\"findings\":\\["; "\"counts\":{\"critical\":0,\"important\":0},\"findings\":[")' \
+	<(nocounts '[{"id":"F1","severity":"critical","status":"new","file":"a.go","line":7}]' "$a7_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no open_blocking, critical and important 0 next to a visible Critical: 1 blocker, not ready" \
+	'[[ $rc == 0 && $(jq -c "[.records[0].counts.open_blocking, .records[0].counts.critical, .decision.label]" <<<"$out") == "[1,1,\"early\"]" ]]'
+jq -s '.[0].body |= sub("\"findings\":\\[\\]"; "\"counts\":{\"critical\":0,\"important\":0},\"findings\":[]")' \
+	<(nocounts '[]' "$a7_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "the same with no findings: the Markdown's 1 blocker, not ready" \
+	'[[ $rc == 0 && $(jq -c "[.records[0].counts.open_blocking, .records[0].findings_dropped, .decision.label]" <<<"$out") == "[1,true,\"early\"]" ]]'
 jq -s . <(nocounts '[]' "Looks fine.${nl}${nl}**Ready to merge?** Yes, with fixes") >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "no counts, no findings and no severity heading: blocking unknown, not ready" \
