@@ -225,6 +225,22 @@ check "block_respects_empty: fixed, declined and later Criticals are stored as n
 	"$(respects '[{"severity":"critical","status":"fixed"}]'),$(respects '[{"severity":"critical","status":"declined"}]'),$(respects '[{"severity":"critical","later":true}]')" \
 	false,false,false
 check "block_respects_empty: other severities are fine" "$(respects '[{"severity":"important"},{"severity":"minor"}]')" true
+# Reading a posted record keeps its stored statuses: a fixed or declined finding is not open (record_*). Writing from
+# the model's block stores every entry as new (block_*), so the same list is judged open there.
+fixed_crit='[{"severity":"critical","status":"fixed","file":"a.go","line":10},{"severity":"critical","status":"declined"}]'
+check "record_findings: keeps each entry's status, new when it has none" \
+	"$(jq -c -n -L "$LIB_DIR" 'include "records"; [{severity: "Minor", status: "fixed"}, {severity: "minor"}] | record_findings | map(.status)')" \
+	'["fixed","new"]'
+check "record_counts: fixed and declined findings are not open" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_counts | [.open_blocking, .critical, .fixed, .declined, .new]')" \
+	'[0,0,1,1,0]'
+check "record_respects_empty: fixed and declined Criticals where the Markdown has none are fine" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_respects_empty(["critical"])')" true
+check "record_covers_markdown: a fixed Critical does not cover a visible one" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | record_covers_markdown([{severity: "critical", file: "a.go", line: 10}])')" false
+check "block_*: the same entries from the model's block are judged open" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | [block_respects_empty(["critical"]), block_covers_markdown([{severity: "critical", file: "a.go", line: 10}])]')" \
+	'[false,true]'
 stored=$(build_record '{"round":1,"code_review":true}' '[{"severity":"critical","status":"fixed","later":true,"title":"x"}]' null)
 check "build_record: stores a fixed, later entry as the checks judge it: new and open" \
 	"$(jq -c '[.findings[0].status, .counts.open_blocking, .later]' <<<"$stored")" '["new",1,[]]'

@@ -170,6 +170,34 @@ expect "a minimal marker and no severity heading: blocking unknown, not ready, a
 	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking, .records[0].findings_dropped]" <<<"$out") == "[[null],\"unknown\",null,true]" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
+# This PR's round 5, as posted (tests/fixtures/reviews/pr8-round5.md), after rounds 1–4 with 8, 6, 4 and 4 blockers.
+# pr8 <filter> changes its marker with a jq filter. Read back, its findings keep the statuses it stored: F21 and F22
+# stay fixed, never open, so the round keeps its 3 blockers, 5 fixed and its label, nit-loop.
+cp "$stub/reviews.json" "$stub/reviews.saved"
+pr8() { # jq filter on round 5's marker -> reviews.json: rounds 1–4, then round 5 with that marker
+	local marker
+	marker=$(sed -n 2p "$root/tests/fixtures/reviews/pr8-round5.md" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' |
+		jq -c "$1" | sed 's/--/-\\u002d/g')
+	jq -n --rawfile b "$root/tests/fixtures/reviews/pr8-round5.md" --arg m "<!-- gh-pr-review:round ${marker} -->" '
+		[[8, 0], [6, 1], [4, 0], [4, 0]] as $c
+		| [range(4) as $i | {schema: 1, round: ($i + 1), code_review: true, approach: "sound", ready: "no",
+			counts: {open_blocking: $c[$i][0], critical: $c[$i][1], important: ($c[$i][0] - $c[$i][1])}}
+			| {body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\nx"),
+				commit_id: "c\($i + 1)", submitted_at: "2026-11-2\($i + 1)T00:00:00Z", user: {login: "me"}}]
+		+ [{body: ($b | split("\n") | .[1] = $m | join("\n")), commit_id: "c5", submitted_at: "2026-11-27T11:57:47Z",
+			user: {login: "me"}}]' >"$stub/reviews.json"
+}
+round5() { jq -c '[.records[4] | .counts.open_blocking, .counts.fixed, ([.findings[]? | select(.id == "F21" or .id == "F22") | .status] | join(" "))] + [.decision.labels[4]]' <<<"$out"; }
+pr8 .
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "PR 8 round 5 as posted: 3 blockers, 5 fixed, nit-loop" \
+	'[[ $rc == 0 && $(round5) == "[3,5,\"fixed fixed\",\"nit-loop\"]" ]]'
+pr8 'del(.counts)'
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "PR 8 round 5 without counts: its fixed findings stay fixed, not open: 3 blockers, 5 fixed, nit-loop" \
+	'[[ $rc == 0 && $(round5) == "[3,5,\"fixed fixed\",\"nit-loop\"]" ]]'
+cp "$stub/reviews.saved" "$stub/reviews.json"
+
 # Only trusted reviews are rounds. eve, a contributor, posts a generated review on the PR's head: not a round, so the
 # decision is not nothing-new, and the table says it was left out. My own review counts even as a contributor.
 cp "$stub/reviews.json" "$stub/reviews.saved"

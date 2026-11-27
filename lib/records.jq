@@ -96,46 +96,31 @@ def normalize_findings:
 			| select(.severity == "critical" or .severity == "important" or .severity == "minor"))
 	else [] end;
 
-# The status a findings entry is stored with. This version has no statuses across rounds: every entry is stored as a
-# new, open finding, so an entry marked fixed, declined or later is new too. The one place that decides it.
-def stored_status: "new";
+# Findings lists come from two places, and each has its own helpers, so neither can leak into the other:
+# - writing a record from the model's findings block (model input): stored_findings, block_covers_markdown,
+#   block_respects_empty. This version has no statuses across rounds: every entry is stored as new.
+# - reading a posted record back from GitHub (posted-record recovery): record_findings, record_covers_markdown,
+#   record_respects_empty, record_counts. The record's findings keep the statuses it stored: a fixed or declined
+#   finding is never counted as open.
+# Both sides judge a list of entries with a status through the same checks (_respects_empty, _covers_markdown, _counts).
 
-# A findings list as the record stores it: normalized, each entry with its stored_status. The record builder stores
-# these, and the block checks (block_respects_empty, block_covers_markdown) and the counts of a marker's findings
-# (_findings_counts) judge these, so they never disagree about which entries are open.
-def stored_findings:
-	if type == "array" then [.[] | objects | stored_status as $status | ([.] | normalize_findings)[] + {status: $status}]
-	else [] end;
+# True for an entry that is still open: not fixed or declined.
+def _open: .status | . != "fixed" and . != "declined";
 
-# True for a stored finding that is still open: not fixed or declined.
-def _stored_open: .status | . != "fixed" and . != "declined";
+# False when the list ({severity, status, file, line}) has an open entry of a severity the Markdown says it has none of
+# ($empty: empty_severities): what the reader sees wins.
+def _respects_empty($empty):
+	all(.[] | select(_open); .severity as $s | all($empty[]; . != $s));
 
-# False when the block has an open entry, as stored (stored_findings), of a severity the Markdown says it has none of
-# ($empty: empty_severities): what the reader sees wins, and the round is parsed instead.
-def block_respects_empty($empty):
-	stored_findings | all(.[] | select(_stored_open); .severity as $s | all($empty[]; . != $s));
-
-# True when the model's findings block can be used as it is: an array whose every entry is an object with a known
-# severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
-# back to the Markdown, so normalize_findings never drops a finding the reader can see.
-def findings_block_ok:
-	type == "array"
-	and all(.[]; type == "object"
-		and (.severity | type == "string" and (ascii_downcase | . == "critical" or . == "important" or . == "minor"))
-		and (.title | type == "string")
-		and (.file | . == null or type == "string")
-		and (.line | . == null or type == "number"));
-
-# True when the findings block reports at least the blockers the review's Markdown shows ($parsed: parse_findings of
-# the posted body): as many open Critical findings, and as many open Critical and Important ones together. Entries are
-# judged as the record stores them (stored_findings): in this version all of them are open. A block that leaves out
-# or downgrades a visible blocker ([] next to a Critical bullet) fails, and the round is parsed instead.
+# True when the list ({severity, status, file, line}) reports at least the blockers the review's Markdown shows
+# ($parsed: parse_findings of the posted body): as many open Critical entries, and as many open Critical and Important
+# ones together. A list that leaves out or downgrades a visible blocker ([] next to a Critical bullet) fails.
 # The locations must match too, one to one: every Critical or Important bullet with a file:line needs its own open
 # blocking entry in that file at that line, or, for a range (a.go:10–12, line_end 12), at a line within it (two
 # bullets at a.go:10 need two entries there). An entry repeated at one bullet's location does not cover another
 # bullet's. Entries and bullets without a file and line take no part in this. Each file's bullets take, shortest end
 # first, the lowest free entry line in their range: the greedy choice finds a one-to-one match whenever there is one.
-def block_covers_markdown($parsed):
+def _covers_markdown($parsed):
 	def blocking: (.severity | strings | ascii_downcase) as $s | $s == "critical" or $s == "important";
 	def located: (.file | type == "string" and . != "") and (.line | type == "number");
 	def location: if located then {file, line: (.line | floor)} else empty end;
@@ -151,12 +136,69 @@ def block_covers_markdown($parsed):
 		| .ok);
 	def open($sev): [.[] | select(.severity == $sev)] | length;
 	def shown($sev): [($parsed // [])[]? | objects | select(.severity == $sev)] | length;
-	[stored_findings[] | select(_stored_open)]
+	[.[] | select(_open)]
 	| [.[] | select(blocking) | location] as $have
 	| [($parsed // [])[]? | objects | select(blocking) | span] as $seen
 	| open("critical") >= shown("critical")
 		and open("critical") + open("important") >= shown("critical") + shown("important")
 		and ($seen | matched($have));
+
+# Counts of the list ({severity, status}): the open entries per severity, and the entries per status.
+def _counts:
+	. as $all
+	| [$all[] | select(_open)] as $open
+	| def sev($s): [$open[] | select(.severity == $s)] | length;
+	def st($s): [$all[] | select(.status == $s)] | length;
+	{open_blocking: (sev("critical") + sev("important")), critical: sev("critical"), important: sev("important"),
+		minor: sev("minor"), new: st("new"), fixed: st("fixed"), declined: st("declined"), regressed: st("regressed")};
+
+# ── Writing: the model's findings block ──
+
+# The status a findings entry from the model is stored with. This version has no statuses across rounds: every entry
+# is stored as a new, open finding, so an entry marked fixed, declined or later is new too. The one place that
+# decides it.
+def stored_status: "new";
+
+# The model's findings as the record will store them: normalized, each entry with its stored_status. The record
+# builder stores these, and the block checks (block_respects_empty, block_covers_markdown) judge these, so they never
+# disagree about which entries are open.
+def stored_findings:
+	if type == "array" then [.[] | objects | stored_status as $status | ([.] | normalize_findings)[] + {status: $status}]
+	else [] end;
+
+# False when the model's block has an open entry, as stored (stored_findings), of a severity the Markdown says it has
+# none of ($empty: empty_severities): the round is parsed instead.
+def block_respects_empty($empty): stored_findings | _respects_empty($empty);
+
+# True when the model's findings block can be used as it is: an array whose every entry is an object with a known
+# severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
+# back to the Markdown, so normalize_findings never drops a finding the reader can see.
+def findings_block_ok:
+	type == "array"
+	and all(.[]; type == "object"
+		and (.severity | type == "string" and (ascii_downcase | . == "critical" or . == "important" or . == "minor"))
+		and (.title | type == "string")
+		and (.file | . == null or type == "string")
+		and (.line | . == null or type == "number"));
+
+# True when the model's findings block, as stored (stored_findings: in this version all of it is open), shows every
+# blocker the review's Markdown does ($parsed: parse_findings of the posted body; _covers_markdown). Otherwise the
+# round is parsed instead.
+def block_covers_markdown($parsed): stored_findings | _covers_markdown($parsed);
+
+# ── Reading: a record posted on GitHub ──
+
+# A posted record's findings list as it stored it: normalized, each entry with its own status (none: new). Never
+# stored_status: reading a record does not reopen what it marked fixed or declined.
+def record_findings:
+	if type == "array" then [.[] | objects | ((.status | strings) // "new") as $status
+		| ([.] | normalize_findings)[] + {status: $status}]
+	else [] end;
+
+# The checks and counts of a posted record's findings list, with their stored statuses (record_findings).
+def record_respects_empty($empty): record_findings | _respects_empty($empty);
+def record_covers_markdown($parsed): record_findings | _covers_markdown($parsed);
+def record_counts: record_findings | _counts;
 
 # The highest "<prefix><n>" ID in a record's findings, its later list and its last_ids, or 0. last_ids keeps the
 # highest numbers even when the lists are empty (a Rethink) or cut from the marker, so an ID is never given twice.
@@ -255,16 +297,6 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 		code_review: $code_review
 	}; (if $code_review then $body | parse_findings else [] end); $prev);
 
-# Counts from a record's findings list, as stored (stored_findings): the open findings per severity, and the findings
-# per status.
-def _findings_counts:
-	stored_findings as $all
-	| [$all[] | select(_stored_open)] as $open
-	| def sev($s): [$open[] | select(.severity == $s)] | length;
-	def st($s): [$all[] | select(.status == $s)] | length;
-	{open_blocking: (sev("critical") + sev("important")), critical: sev("critical"), important: sev("important"),
-		minor: sev("minor"), new: st("new"), fixed: st("fixed"), declined: st("declined"), regressed: st("regressed")};
-
 # Counts from a review's Markdown, as a backfill counts them; null when it has no severity heading at all: then the
 # Markdown does not say how many blockers there are.
 def markdown_counts:
@@ -277,18 +309,19 @@ def markdown_counts:
 
 # A marker record of a code-review round (not a Rethink) without a numeric counts.open_blocking: when its counts
 # still give critical and important, open_blocking is their sum. Otherwise the counts are rebuilt from its findings,
-# when it has some and they show every blocker its review's Markdown ($body) does (block_covers_markdown,
-# block_respects_empty); else from the Markdown, and then the findings list, which did not pass that check, is
-# dropped: findings_dropped: true says "no reliable list", not "no findings". When neither can say, every count is
-# null: the round's blocking is unknown, never 0, and the loop never calls it ready. Other records are left as they are.
+# with the statuses it stored (record_counts), when it has some and they show every blocker its review's Markdown
+# ($body) does (record_covers_markdown, record_respects_empty); else from the Markdown, and then the findings list,
+# which did not pass that check, is dropped: findings_dropped: true says "no reliable list", not "no findings". When
+# neither can say, every count is null: the round's blocking is unknown, never 0, and the loop never calls it ready.
+# Other records are left as they are.
 def with_counts($body):
 	if .code_review != false and (.counts.open_blocking? | type) != "number" then
 		if (.counts.critical? | type) == "number" and (.counts.important? | type) == "number" then
 			.counts.open_blocking = (.counts.critical + .counts.important)
 		elif (.findings | type == "array" and length > 0) and .findings_dropped != true
-			and (.findings | block_covers_markdown($body | parse_findings)
-				and block_respects_empty($body | empty_severities)) then
-			.counts = (.findings | _findings_counts)
+			and (.findings | record_covers_markdown($body | parse_findings)
+				and record_respects_empty($body | empty_severities)) then
+			.counts = (.findings | record_counts)
 		else
 			.counts = (($body | markdown_counts) // {open_blocking: null, critical: null, important: null, minor: null,
 				new: null, fixed: null, declined: null, regressed: null})
