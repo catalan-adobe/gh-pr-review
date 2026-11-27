@@ -177,6 +177,10 @@ each `<details>` tag on its own line), and is best effort for other Markdown:
 fences nested in longer fences, HTML before `</details>` on the same line,
 headings nested in list items.
 
+After an upgrade, a round read from a minimal marker (a review over 60,000
+characters) written by an older version can number later findings differently,
+if that version counted its findings differently.
+
 `+COMMITS` counts the PR's commits whose commit date falls between the
 previous round's review and this one's. It is a date window, not the commits
 between the two reviewed heads: a commit pushed while a review runs can be
