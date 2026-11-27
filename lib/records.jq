@@ -379,9 +379,12 @@ def valid_record:
 		and (.file | _opt("string")) and (.line | _opt("number")))));
 
 # The record of a generated review: the marker on the line right below the generated marker, when it holds a valid
-# record. Nothing otherwise, and nothing for any other body.
+# record. A code-review marker valid but for its counts comes without them: it is then read from its review's
+# Markdown (complete_marker), and its IDs still count. Nothing otherwise, and nothing for any other body.
 def marker_record:
 	select(is_generated_review)
 	| (split("\n")[1] // "" | sub("\r$"; ""))
 	| [capture("^<!-- gh-pr-review:round (?<j>\\{.*\\}) -->\\s*$").j] | .[0]
-	| if . == null then empty else (fromjson? // empty) | select(valid_record) end;
+	| if . == null then empty else (fromjson? // empty)
+		| (if type == "object" and .code_review != false and (valid_record | not) then del(.counts) else . end)
+		| select(valid_record) end;

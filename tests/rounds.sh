@@ -165,6 +165,11 @@ done <<'T'
 T
 expect "partial marker: its source is backfill, its other facts stay" \
 	'[[ $(jq -c ".records[0] | [.source, .approach, .ready, .last_ids.L]" <<<"$out") == "[\"backfill\",\"sound\",\"yes-with-fixes\",2]" ]]'
+# A marker valid but for a count (a string): read from its Markdown, and its last_ids still hold the floor.
+partial '{"counts":{"minor":"1"},"last_ids":{"F":7,"L":0}}' "$none_md"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "malformed counts: the marker's last_ids still count, the next finding is F8" \
+	'[[ $rc == 0 && $(jq -c -L "$root/lib" "include \"records\"; [.records[0] | .source, .findings_dropped, .counts.open_blocking] + [(.records | id_floor.F)]" <<<"$out") == "[\"backfill\",true,0,7]" && $(next_id) == F8 ]]'
 # Two runs claim round 1 with a new F1 each; the second marker has partial counts and a list too short for them. Its
 # Markdown shows its finding: it takes the floor's next ID, F2, so round 3 numbers from F3.
 partial "$one" x

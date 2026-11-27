@@ -302,11 +302,16 @@ check "marker_record: a quoted header is not a generated review" \
 check "marker_record: a marker that is not right below the header is not read" \
 	"$(marker_record "$(printf '<!-- gh-pr-review generated -->\nText.\n%s\n' "$line")")" ""
 for bad in '"x"' '{"schema":2,"round":1}' '{"schema":1}' '{"schema":1,"round":"1"}' \
-	'{"schema":1,"round":1,"counts":{"critical":"2"}}' '{"schema":1,"round":1,"findings":[{"line":"3"}]}' \
-	'{"schema":1,"round":1,"findings":"F1"}' '{"schema":1,"round":1,"head_sha":7}'; do
+	'{"schema":1,"round":1,"code_review":false,"counts":{"critical":"2"}}' \
+	'{"schema":1,"round":1,"findings":[{"line":"3"}]}' '{"schema":1,"round":1,"findings":"F1"}' \
+	'{"schema":1,"round":1,"head_sha":7}' '{"schema":1,"round":1,"counts":{"minor":"1"},"last_ids":{"F":"7"}}'; do
 	check "marker_record: invalid record $bad, nothing" \
 		"$(marker_record "$(printf '<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round %s -->\n' "$bad")")" ""
 done
+# A code-review marker valid but for its counts comes without them, so its IDs still count (fetch_round_records).
+check "marker_record: malformed counts are dropped, the rest kept" \
+	"$(marker_record $'<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round {"schema":1,"round":1,"counts":{"minor":"1"},"last_ids":{"F":7}} -->')" \
+	'{"schema":1,"round":1,"last_ids":{"F":7}}'
 check "is_generated_review: first line only" "$(jq -c -L "$LIB_DIR" 'include "records"; map(is_generated_review)' <<<'
 	["<!-- gh-pr-review generated -->\nx", "<!-- gh-pr-review generated -->\t\r", "x\n<!-- gh-pr-review generated -->",
 	 " <!-- gh-pr-review generated -->", "", null]')" "[true,true,false,false,false,false]"
