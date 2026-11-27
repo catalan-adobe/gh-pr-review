@@ -43,10 +43,10 @@ records() { # blocking critical ready approach-letters
 		}]'
 }
 
-# Labels as letters: e early, c converging, R ready, n nit loop, C churning, - rethink.
+# Labels as letters: e early, c converging, R ready, n nit loop, C churning, - rethink, ? unknown.
 letters() { # records-json [params-json]
 	jq -r -L "$LIB_DIR" --argjson p "${2:-null}" 'include "loop";
-		loop_labels($p) | map({early: "e", converging: "c", ready: "R", "nit-loop": "n", churning: "C", rethink: "-"}[.])
+		loop_labels($p) | map({early: "e", converging: "c", ready: "R", "nit-loop": "n", churning: "C", rethink: "-", unknown: "?"}[.])
 		| join("")' <<<"$1"
 }
 
@@ -146,6 +146,19 @@ recs=$(records "9 12 8 null 10" "1 1 1 - 1" "no no no unknown no" sssrs)
 eq "Rethink does not break a bad run" "$(stop_round "$recs")" 6
 recs=$(records "9 12 8 null" "1 1 1 -" "no no no unknown" sssr)
 eq "Rethink does not extend a bad run" "$(jq -r '.decision' <<<"$(loop_decide_json "$recs" '{}' new false)")" warn
+
+# A code-review round without a blocking count is unknown: never 0, so never ready, and not bad either.
+unknown_at() { # records-json index -> the same records, that round's counts gone
+	jq -c --argjson i "$2" '.[$i].counts = {} | .[$i].ready = "yes-with-fixes"' <<<"$1"
+}
+recs=$(unknown_at "$(records "0" "0" "yes" s)" 0)
+got=$(loop_decide_json "$recs" '{}' new false)
+eq "unknown count: not ready, series null" "$(jq -c '[.decision, .label, .series]' <<<"$got")" '["run","unknown",[null]]'
+recs=$(unknown_at "$(records "9 12 8 10 9" "1 1 1 1 1" "no no no no no" sssss)" 2)
+eq "unknown count: counts as a round, no B(K-2) from it" "$(letters "$recs")" "ee?CC"
+eq "unknown count: two bad rounds after it still stop" "$(stop_round "$recs")" 6
+eq "unknown count: the loop text shows a dash" \
+	"$(loop_text "$(loop_decide_json "$recs" '{}' new false)" | sed -n 3p)" "  blocking  9 12 - 10 9"
 
 # Parameters override the defaults.
 r763=$(records "3 2 3" "0 0 0" "no no no" ---)

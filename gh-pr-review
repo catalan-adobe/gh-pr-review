@@ -23,7 +23,7 @@
 #   -h, --help      Show this help
 #
 # Exit codes: 0 done, 1 error, 3 stopped by the loop check, 5 no new commits since the last round,
-#   6 another round was posted while the review ran (nothing posted, the session is kept).
+#   6 the rounds changed while the review ran (nothing posted, the session is kept).
 #
 # Examples:
 #   gh pr-review https://github.com/owner/repo/pull/42
@@ -370,14 +370,22 @@ echo "    ${PR_TITLE}"
 echo "    @${PR_AUTHOR}  ·  +${ADDITIONS} -${DELETIONS}  ·  ${N_FILES} files changed"
 echo ""
 
-# When this run started, in GitHub's UTC time format: a review this run posted was submitted after it.
-RUN_STARTED=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-
 # ── loop check ─────────────────────────────────────────────────────────────────────
-# Earlier gh-pr-review reviews (by anyone) are earlier rounds. Before any clone or model call, decide whether this
+# Earlier gh-pr-review reviews by trusted authors are earlier rounds. Before any clone or model call, decide whether this
 # round should run: not when nothing changed, and not when the loop has stopped converging (see `gh pr-review rounds`).
 HEAD_OID=$(echo "$PR_JSON" | jq -r '.headRefOid // empty')
-RECORDS=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM")
+# Only trusted reviews are rounds: by an owner, member or collaborator of the repo, or by this account (ROUNDS_ME, the
+# same login for the final re-read). The others are named once, here.
+ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
+ROUNDS_ME="$ME"
+IGNORED_FILE=$(mktemp)
+RECORDS=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$ROUNDS_ME" "$IGNORED_FILE") || {
+	rm -f "$IGNORED_FILE"
+	exit 1
+}
+IGNORED_LINE=$(ignored_line "$(cat "$IGNORED_FILE")")
+rm -f "$IGNORED_FILE"
+[[ -z "$IGNORED_LINE" ]] || echo "    $IGNORED_LINE"
 LIFTED=false
 if [[ $(jq 'length' <<<"$RECORDS") -gt 0 ]]; then
 	LIFTED=$(lifted_since "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$(jq -r 'last.posted_at // ""' <<<"$RECORDS")" "$PR_AUTHOR")
@@ -387,6 +395,8 @@ LOOP=$(loop_decide_json "$RECORDS" "$PR_SHAPE" "$HEAD_OID" "$LIFTED" "{\"skip_ap
 LOOP_DECISION=$(jq -r '.decision' <<<"$LOOP")
 ROUND=$(jq -r '.next_round' <<<"$LOOP")
 PREVIOUS_RECORD=$(jq -c 'last // null' <<<"$RECORDS")
+# The GitHub review ID of each round, in order: the history this round is reviewed on top of.
+ROUND_IDS=$(jq -c 'map(.review_id)' <<<"$RECORDS")
 # New findings are numbered after the highest ID anywhere in the history, so an ID never restarts.
 ID_FLOOR=$(jq -c -L "$LIB_DIR" 'include "records"; id_floor' <<<"$RECORDS")
 
@@ -1166,10 +1176,13 @@ write_round_record() {
 		parsed="${RECORD_FILE}.parsed"
 		parse_findings "$REVIEW_BODY_FILE" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
 		# Status-only entries are allowed for the last code review's IDs only, and take their severity from it here.
-		if jq -e -L "$LIB_DIR" --slurpfile parsed "$parsed" --argjson base "$FINDINGS_BASE" 'include "records";
-			findings_block_ok($base | known_ids) and (with_base_severity($base) | block_covers_markdown($parsed[0]))' \
-			"$FINDINGS_FILE" >/dev/null 2>&1; then
-			findings=$(jq -c . "$FINDINGS_FILE") || return 1
+		# The block must hold exactly one JSON value, an array: anything else ("[] [ … ]") is read from the Markdown.
+		# So is a block with an open finding of a severity the Markdown says it has none of ("*(none found)*").
+		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" --rawfile md "$REVIEW_BODY_FILE" \
+			--argjson base "$FINDINGS_BASE" 'include "records"; length == 1 and (.[0] | findings_block_ok($base | known_ids)
+				and (with_base_severity($base) | block_covers_markdown($parsed[0])
+					and block_respects_empty($md | empty_severities)))' "$FINDINGS_FILE" >/dev/null 2>&1; then
+			findings=$(jq -cs '.[0]' "$FINDINGS_FILE") || return 1
 		else
 			if [[ -s "$FINDINGS_FILE" ]]; then
 				echo "Note: the findings block does not match the review's findings; the record is read from the Markdown." >&2
@@ -1216,7 +1229,6 @@ write_round_record() {
 	fi
 	rm -f "$tmp"
 }
-ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
 if ! write_round_record; then
 	echo "Warning: could not write the round record; the review is posted without it." >&2
 	RECORD_FILE=""
@@ -1256,7 +1268,7 @@ echo ""
 rounds_now() {
 	local try
 	for try in 1 2; do
-		fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" 2>/dev/null && return 0
+		fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "${ROUNDS_ME:-}" 2>/dev/null && return 0
 		[[ "$try" == 2 ]] || sleep 1
 	done
 	return 1
@@ -1276,17 +1288,24 @@ pr_head_now() {
 }
 
 # After the post request failed: true when the review is on the PR all the same (the request reached GitHub, the
-# answer did not come back). That is a generated review by this user, on the reviewed commit, submitted since the run
-# started. One read; anything in doubt (no login, a failed read) is false.
+# answer did not come back). That is exactly one review that was not a round at the final re-read (its ID is not in
+# NOW_IDS), by this user, on the reviewed commit, in the state the event gives, with the body post.json sent (CRLF
+# and trailing whitespace aside). Another review by the same account on the same commit is not this one. One read;
+# anything in doubt (no login, a failed read, no match or several) is false.
 review_landed() {
 	local json
 	[[ -n "${ME:-}" ]] || return 1
 	json=$(gh api --hostname "$GH_HOST_NAME" --paginate "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" 2>/dev/null) ||
 		return 1
-	jq -se -L "$LIB_DIR" --arg me "$ME" --arg commit "$HEAD_SHA" --arg since "${RUN_STARTED:-}" '
-		include "records";
-		any(add // [] | .[]; (.body | is_generated_review) and .state != "PENDING" and .user.login == $me
-			and .commit_id == $commit and (.submitted_at // "") >= $since)' <<<"$json" >/dev/null 2>&1
+	jq -se --arg me "$ME" --arg commit "$HEAD_SHA" --argjson before "${NOW_IDS:-null}" \
+		--slurpfile post "${SESSION_DIR}/post.json" '
+		def norm: gsub("\r\n"; "\n") | gsub("[ \t]+\n"; "\n") | sub("\\s+$"; "");
+		($post[0].body | norm) as $body
+		| ({APPROVE: "APPROVED", REQUEST_CHANGES: "CHANGES_REQUESTED", COMMENT: "COMMENTED"}[$post[0].event]) as $state
+		| [add // [] | .[] | select(.id as $id | ($id | type == "number") and all($before[]; . != $id))
+			| select(.user.login == $me and .commit_id == $commit and .state == $state
+				and (.body | type == "string") and (.body | norm) == $body)]
+		| length == 1' <<<"$json" >/dev/null 2>&1
 }
 
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
@@ -1344,13 +1363,20 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		echo "    Session: ${SESSION_DIR}" >&2
 		exit 1
 	fi
-	NOW_COUNT=$(jq 'length' <<<"$NOW_RECORDS")
-	if [[ "$NOW_COUNT" != "$((ROUND - 1))" ]]; then
-		echo "Not posted (exit 6): another round was posted while this review ran ($((ROUND - 1)) rounds then, ${NOW_COUNT} now):" >&2
-		jq -r --argjson from "$((ROUND - 1))" '.[$from:][]
-			| "    round \(.round) by \(.reviewer // "unknown") at \(.posted_at // "an unknown time")"' \
-			<<<"$NOW_RECORDS" >&2
-		echo "    Run the review again to review on top of it. Session: ${SESSION_DIR}" >&2
+	# The same rounds, by GitHub review ID and in order: a new round, a round gone or one that is no longer a round (its
+	# generated header edited out) all mean this review was not made on top of the history as it is now.
+	NOW_IDS=$(jq -c 'map(.review_id)' <<<"$NOW_RECORDS")
+	if [[ "$NOW_IDS" != "$ROUND_IDS" ]]; then
+		NEW_ROUNDS=$(jq -r --argjson old "$ROUND_IDS" 'to_entries[]
+			| select(.value.review_id as $id | if $id == null then .key >= ($old | length) else all($old[]; . != $id) end)
+			| .value | "    round \(.round) by \(.reviewer // "unknown") at \(.posted_at // "an unknown time")"' <<<"$NOW_RECORDS")
+		if [[ -n "$NEW_ROUNDS" ]]; then
+			echo "Not posted (exit 6): another round was posted while this review ran ($((ROUND - 1)) rounds then, $(jq length <<<"$NOW_RECORDS") now):" >&2
+			printf '%s\n' "$NEW_ROUNDS" >&2
+		else
+			echo "Not posted (exit 6): the PR's rounds changed while this review ran (a round was removed or is no longer one)." >&2
+		fi
+		echo "    Run the review again to review on top of them. Session: ${SESSION_DIR}" >&2
 		exit 6
 	fi
 

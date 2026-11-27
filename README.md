@@ -128,9 +128,25 @@ record on GitHub, in an HTML comment right below the
 `<!-- gh-pr-review generated -->` line: the round number, the commits reviewed,
 the approach and "Ready to merge?" verdicts, and the findings (severity,
 `file:line`, a short title, an ID such as `F4` that later rounds keep). The same
-record is saved as `round.json`. It holds only what the review already says:
-never the `--instructions` text, never the prompts. Rounds posted by anyone with
-this tool count, so the history is the same on every machine.
+record is saved as `round.json`. The record on GitHub holds only what the
+review already says: a title or path the posted review does not show is left
+out of the marker, and the `--instructions` text and the prompts are never in
+it. `round.json` in the session folder is not filtered: it keeps everything the
+model returned, so inspect it before sharing it.
+
+Not every review that looks generated is a round. Anyone who can comment on
+a PR can post a review that starts with the `<!-- gh-pr-review generated -->`
+line, and a round can stop the next one, so only trusted reviews count: those
+whose author GitHub reports as an owner, member or collaborator of the repo
+(the review's `author_association`), and your own, so your rounds count where
+you are only a contributor. Everything that reads the history uses the same
+rule (the loop check, `--check`, `rounds`, the re-read before posting, finding
+IDs), so the history is the same for everyone with the same access. The
+reviews left out are named once, for example
+`ignored: 1 generated review by @x (not a member or collaborator of the repo)`.
+GitHub can report a member of an organization whose membership is private as
+a contributor, to a token that cannot see that membership: their rounds are
+then left out. `--force-round` still runs a round the loop check would not.
 
 `gh pr-review rounds <PR-URL | PR-number>` prints that history, one row per
 round. Reviews posted before the records existed are read back from their
@@ -143,9 +159,16 @@ ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LA
 next round: stop · churning · approach-stuck too-big · Settle the approach before the next round: …
 ```
 
+`+COMMITS` counts the PR's commits whose commit date falls between the
+previous round's review and this one's. It is a date window, not the commits
+between the two reviewed heads: a commit pushed while a review runs can be
+counted toward that review instead of the next one.
+
 The label says whether the loop converges: `early` (fewer than 3 rounds),
 `converging`, `ready`, `nit-loop` (a few Important findings that keep coming
-back) or `churning`. `--json` prints the records and the decision; `-u <login>`
+back) or `churning`; `unknown` when a round's record has no blocking count and
+neither its findings nor its Markdown can rebuild one (never read as 0, so
+never `ready`). `--json` prints the records and the decision; `-u <login>`
 picks the gh account, as for a review.
 
 ## Round 2 and later
@@ -226,9 +249,11 @@ as the author cannot lift its own stop. Comments without an identified user
 without asking, and the record says so (`forced`).
 
 Rounds are numbered in the order GitHub received them. Just before posting,
-the tool reads the rounds again: if someone posted one while this review ran,
-it says who, posts nothing, keeps the session folder, and exits with code 6,
-in a terminal too: run the review again to review on top of that round. If
+the tool reads the rounds again and compares them, by GitHub review ID, with
+the rounds it started from: if someone posted one while this review ran (or a
+round was deleted, or edited so it is no longer one), it says who, posts
+nothing, keeps the session folder, and exits with code 6, in a terminal too:
+run the review again to review on top of the rounds as they are now. If
 the rounds can't be read again (one retry), it posts nothing either, keeps
 the session, and exits with code 1. Two runs that post at the very same
 moment both land; reading the history then gives the later one the next
@@ -249,9 +274,14 @@ every push should turn on "Dismiss stale pull request approvals when new
 commits are pushed" in the branch protection rules (or rulesets).
 
 If the post request fails, the review may still have landed (the answer can
-be lost after GitHub took it). The tool then reads the reviews once: if this
-run's review is there, it reports it posted; otherwise it says it could not
-confirm whether the review was posted and exits with code 1. Run
+be lost after GitHub took it). The tool then reads the reviews once and looks
+for this run's review: one that was not there at the last read before the
+post, by this account, on the reviewed commit, in the state the decision
+gives (approved, changes requested, commented), with exactly the body it sent.
+Exactly one such review: it reports it posted. None, several, or a failed
+read: it says it could not confirm whether the review was posted, keeps the
+record a preview, and exits with code 1. Another run's review on the same
+commit, by the same account, does not count. Run
 `gh pr-review rounds <PR>` before retrying, so the round is not posted twice.
 
 `gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
@@ -264,7 +294,7 @@ scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
 | 1 | Error |
 | 3 | Stopped by the loop check |
 | 5 | No new commits since the last round |
-| 6 | History changed while the review ran: someone posted another round; nothing posted, the session is kept |
+| 6 | History changed while the review ran (someone posted another round, or a round went away); nothing posted, the session is kept |
 
 ## Troubleshooting
 

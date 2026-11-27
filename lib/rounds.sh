@@ -5,20 +5,30 @@
 # record rebuilt from the review's Markdown (backfill) when the review predates the markers. A generated review is one
 # whose first line is the generated marker (is_generated_review in lib/records.jq). GitHub's facts win over the
 # marker's: the round is the review's position in submission order, posted_at its submission time, head_sha the
-# commit it was posted on and reviewer its author, so two reviews posted at once can't both be round K, nor both give
-# out the same new finding IDs (reconcile_record in lib/records.jq).
+# commit it was posted on, reviewer its author and review_id its GitHub review ID, so two reviews posted at once can't
+# both be round K, nor both give out the same new finding IDs (reconcile_record in lib/records.jq).
+# Only trusted reviews are rounds (trusted_review in lib/records.jq): by an owner, member or collaborator of the repo,
+# or by <me>, the account running the tool (empty when unknown). The other generated reviews are left out, and listed
+# in <ignored-out> when given: a JSON array of {login, association} (ignored_line prints it for a person).
 # Callers run it in conditions, where errexit is off: every step checks its own status, and the result is checked
 # (an array of records, each with a round number) before it is printed. Any failure prints nothing and returns 1.
-fetch_round_records() { # <host> <owner> <repo> <N>
-	local reviews pr records='[]' previous=null round=0 review record body facts minimal dropped
-	reviews=$(gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" | jq -cs -L "${LIB_DIR:?}" '
+fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
+	local me="${5:-}" generated reviews pr records='[]' previous=null round=0 review record body facts minimal dropped
+	generated=$(gh api --hostname "$1" --paginate "repos/$2/$3/pulls/$4/reviews" | jq -cs -L "${LIB_DIR:?}" '
 		include "records";
 		add // [] | map(select((.body | is_generated_review) and .state != "PENDING"))
-		| sort_by([.submitted_at // "", .id // 0]) | .[]
-		| {body, state, commit_id, submitted_at, user: {login: .user.login}}') || {
+		| sort_by([.submitted_at // "", .id // 0])
+		| map({id, body, state, commit_id, submitted_at, author_association, user: {login: .user.login?}})') || {
 		echo "Error: could not fetch the reviews of $2/$3#$4 (check gh auth and network)." >&2
 		return 1
 	}
+	reviews=$(jq -c -L "${LIB_DIR:?}" --arg me "$me" 'include "records"; .[] | select(trusted_review($me))' \
+		<<<"$generated") || return 1
+	if [[ -n "${6:-}" ]]; then
+		jq -c -L "${LIB_DIR:?}" --arg me "$me" 'include "records";
+			map(select(trusted_review($me) | not) | {login: .user.login, association: .author_association})' \
+			<<<"$generated" >"$6" || return 1
+	fi
 	pr=$(jq -cn --arg host "$1" --arg owner "$2" --arg repo "$3" --argjson number "$4" \
 		'{host: $host, owner: $owner, repo: $repo, number: $number}') || return 1
 	while IFS= read -r review; do
@@ -34,6 +44,10 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 			if [[ "$dropped" == true ]]; then
 				minimal="$record"
 				record=""
+			else
+				# A code-review marker without its blocking count: rebuilt, or unknown, never 0 (with_counts).
+				record=$(printf '%s\n%s\n' "$record" "$review" | jq -cs -L "${LIB_DIR:?}" \
+					'include "records"; .[1].body as $body | .[0] | with_counts($body)') || return 1
 			fi
 		fi
 		if [[ -z "$record" ]]; then
@@ -49,8 +63,9 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}' <<<"$record") || return 1
 			fi
 		fi
-		facts=$(jq -c '{posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
-			| with_entries(select(.value | type == "string" and . != ""))' <<<"$review") || return 1
+		facts=$(jq -c '({posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
+			| with_entries(select(.value | type == "string" and . != "")))
+			+ (if .id | type == "number" then {review_id: .id} else {} end)' <<<"$review") || return 1
 		# Two runs posted at once: the later one's new IDs and first_round follow its position (reconcile_record).
 		record=$(printf '%s\n%s\n' "$records" "$record" | jq -cs -L "${LIB_DIR:?}" --argjson round "$round" \
 			--argjson facts "$facts" 'include "records"; .[0] as $earlier | .[1] | reconcile_record($earlier; $round)
@@ -65,6 +80,17 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 		return 1
 	fi
 	printf '%s\n' "$records"
+}
+
+# One line for a person about the generated reviews fetch_round_records left out (what it wrote to <ignored-out>), or
+# nothing:  ignored: 1 generated review by @x (not a member or collaborator of the repo)
+ignored_line() { # <ignored-json>
+	[[ -n "$1" ]] || return 0
+	jq -r 'select(type == "array" and length > 0)
+		| ([.[].login | "@\(. // "ghost")"] | unique) as $who
+		| "ignored: \(length) generated review\(if length == 1 then "" else "s" end) by \($who | join(", "))"
+			+ (if ($who | length) == 1 then " (not a member or collaborator of the repo)"
+			else " (not members or collaborators of the repo)" end)' <<<"$1"
 }
 
 # The PR's size, head and author, as `{lines, files, head, author}`.
@@ -100,7 +126,7 @@ lifted_since() { # <host> <owner> <repo> <N> <time> <pr-author>
 }
 
 cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
-	local target="" as_json=false user="${GH_PR_REVIEW_USER:-}" records shape commits decision lifted
+	local target="" as_json=false user="${GH_PR_REVIEW_USER:-}" records shape commits decision lifted me ignored_file ignored
 	while [[ $# -gt 0 ]]; do
 		case "$1" in
 		--json)
@@ -117,6 +143,8 @@ cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 			;;
 		-h | --help)
 			echo "Usage: gh pr-review rounds <PR-URL | PR-number> [--json] [-u <login>]"
+			echo "+COMMITS: the commits dated between the previous round's review and this one's (a date window:"
+			echo "a commit pushed while a review ran can count toward that review)."
 			return 0
 			;;
 		-*)
@@ -140,7 +168,16 @@ cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 	use_gh_user "$user"
 	resolve_target "$target"
 
-	records=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM")
+	# Your own rounds count even where you are only a contributor (fetch_round_records).
+	me=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
+	ignored_file=$(mktemp)
+	if ! records=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$me" "$ignored_file"); then
+		rm -f "$ignored_file"
+		return 1
+	fi
+	ignored=$(cat "$ignored_file")
+	rm -f "$ignored_file"
+	[[ -n "$ignored" ]] || ignored='[]'
 	shape=$(fetch_pr_shape "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM")
 	lifted=false
 	if [[ $(jq 'length' <<<"$records") -gt 0 ]]; then
@@ -150,7 +187,8 @@ cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 	decision=$(loop_decide_json "$records" "$shape" "$(jq -r '.head // ""' <<<"$shape")" "$lifted")
 
 	if [[ "$as_json" == true ]]; then
-		jq --argjson decision "$decision" '{records: ., decision: $decision}' <<<"$records"
+		jq --argjson decision "$decision" --argjson ignored "$ignored" \
+			'{records: ., decision: $decision, ignored: $ignored}' <<<"$records"
 		return 0
 	fi
 
@@ -177,6 +215,7 @@ cmd_rounds() { # <PR-URL | PR-number> [--json] [-u <login>]
 			| (transpose | map(map(length) | max)) as $widths
 			| .[] | [range(0; length) as $c | .[$c] | pad($widths[$c])] | join("  ") | sub(" +$"; "")' <<<"$records"
 	fi
+	ignored_line "$ignored"
 	jq -r '"next round: " + ([.decision, .label, (.flags | join(" ")), .suggestion]
 		| map(select(. != null and . != "")) | join(" · "))' <<<"$decision"
 }

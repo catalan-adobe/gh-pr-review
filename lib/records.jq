@@ -7,8 +7,9 @@ def _str: if type == "string" and (_blank | not) then . else null end;
 def _num: if type == "number" then floor elif type == "string" and test("^\\d+$") then tonumber else null end;
 def _title100: if type == "string" then .[0:100] else null end;
 
-# "path:line" right after a backtick or "[": the first one in the text, line = start of a range.
-def _location: [capture("[`\\[](?<f>[\\w./@+~-]+):(?<l>\\d+)")] | .[0];
+# "path:line" right after a backtick or "[": the first one in the text. A range ("a.ts:10–12", en dash or hyphen)
+# gives its end too (e).
+def _location: [capture("[`\\[](?<f>[\\w./@+~-]+):(?<l>\\d+)(?:[–-](?<e>\\d+))?")] | .[0];
 # A leading location, with its range and closing mark ("`a.ts:10–12`", "[a.ts:10]", "a.ts:10").
 def _strip_location: sub("^\\s*[`\\[]?[\\w./@+~-]+:\\d+[^\\s`\\]]*[`\\]]?"; "");
 
@@ -38,11 +39,13 @@ def _finding($severity):
 	sub("^(-|\\d+\\.)\\s+"; "") as $rest
 	| ($rest | _location) as $loc
 	| (if $loc then {file: $loc.f, line: ($loc.l | tonumber)}
+		+ (if $loc.e != null and ($loc.e | tonumber) > ($loc.l | tonumber) then {line_end: ($loc.e | tonumber)} else {} end)
 	else ([$rest | capture("^\\*\\*[`\\[](?<f>[\\w./@+~-]+)[`\\]]")] | .[0].f) as $f
 		| if $f != null and ($f | test("[./]")) and ($f | startswith("-") | not)
 		then {file: $f, line: null} else {file: null, line: null} end
 	end) as $where
-	| {severity: $severity, file: $where.file, line: $where.line, title: ($rest | _title)};
+	| {severity: $severity, file: $where.file, line: $where.line, title: ($rest | _title)}
+		+ (if $where.line_end then {line_end: $where.line_end} else {} end);
 
 # A later-round item that names an earlier finding: "**F1 · [a.ts:1]** — …" (the ID inside the bold) or
 # "**F1** · `a.ts:1` — …". Out: {id, line: the item without its ID, for _finding, after: the text after the bold},
@@ -69,9 +72,10 @@ def _fixed_item:
 def _folded: ascii_downcase | if test("fixed") then "fixed" elif test("later") then "later" else "other" end;
 
 # Markdown in, findings out: the "- **" and "<n>. **" items under each heading that names a severity, up to the
-# next heading. Fenced code is skipped. Round 2 and later: an item that starts with an earlier ID ("**F1 · …") keeps
-# it, as open; the folded <details> sections are not open findings: the Fixed one gives its IDs as fixed (or
-# declined, with the quoted reason), the Later one is left out (its items carry no severity).
+# next heading. Fenced code is skipped. A location given as a range keeps its last line in line_end (the record
+# itself keeps line only: normalize_findings drops it). Round 2 and later: an item that starts with an earlier ID
+# ("**F1 · …") keeps it, as open; the folded <details> sections are not open findings: the Fixed one gives its IDs as
+# fixed (or declined, with the quoted reason), the Later one is left out (its items carry no severity).
 def parse_findings:
 	def item: test("^(-|\\d+\\.)\\s+\\*\\*");
 	reduce (split("\n")[] | sub("\r$"; "")) as $l ({severity: null, fence: false, folded: null, out: []};
@@ -93,6 +97,36 @@ def parse_findings:
 		else . end)
 	| .out;
 
+# The severity sections of a review's Markdown, in order: {severity, lines (the non-blank lines up to the next
+# heading), closed (another heading follows)}. Fenced code belongs to the section it is in.
+def _sections:
+	reduce (split("\n")[] | sub("\r$"; "")) as $l ({fence: false, open: false, out: []};
+		if .fence or ($l | test("^\\s*(```|~~~)")) then
+			(if ($l | test("^\\s*(```|~~~)")) then .fence |= not else . end)
+			| if .open then .out[-1].lines += [$l] else . end
+		elif ($l | test("^#{1,6}\\s")) then
+			(if .open then .out[-1].closed = true else . end)
+			| ($l | _severity) as $s
+			| if $s != null then .out += [{severity: $s, lines: [], closed: false}] | .open = true else .open = false end
+		elif .open and ($l | _blank | not) then .out[-1].lines += [$l]
+		else . end)
+	| .out;
+
+# The severities the Markdown says it has none of: each section of that severity holds only a "none" line
+# ("*(none found)*", "None.", "_None found_"), or nothing at all before the next heading.
+def empty_severities:
+	def none_line: ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
+	_sections | group_by(.severity)
+	| map(select(all(.[]; (.lines | length == 1 and (.[0] | none_line)) or (.closed and (.lines | length == 0)))))
+	| map(.[0].severity);
+
+# False when the block has an open entry of a severity the Markdown says it has none of ($empty: empty_severities):
+# what the reader sees wins, and the round is parsed instead.
+def block_respects_empty($empty):
+	(if type == "array" then . else [] end)
+	| all(.[] | objects | select(.later != true) | select((.status // "new") | . != "fixed" and . != "declined");
+		(.severity | strings | ascii_downcase) as $s | all($empty[]; . != $s));
+
 # True when the model's findings block can be used as it is: an array whose every entry is an object with a known
 # severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
 # back to the Markdown, so normalize_findings never drops a finding the reader can see. $ids: the IDs of the last
@@ -113,22 +147,34 @@ def findings_block_ok($ids):
 # with status fixed or declined, or with later: true, is not open; status and later may be absent. A block that
 # leaves out or downgrades a visible blocker ([] next to a Critical bullet) fails, and the round is parsed instead.
 # The locations must match too, one to one: every Critical or Important bullet with a file:line needs its own open
-# blocking entry at that file:line (two bullets at a.go:10 need two entries there). An entry repeated at one bullet's
-# location does not cover another bullet's. Entries and bullets without a file and line take no part in this.
+# blocking entry in that file at that line, or, for a range (a.go:10–12, line_end 12), at a line within it (two
+# bullets at a.go:10 need two entries there). An entry repeated at one bullet's location does not cover another
+# bullet's. Entries and bullets without a file and line take no part in this. Each file's bullets take, shortest end
+# first, the lowest free entry line in their range: the greedy choice finds a one-to-one match whenever there is one.
 def block_covers_markdown($parsed):
 	def blocking: (.severity | strings | ascii_downcase) as $s | $s == "critical" or $s == "important";
-	def location: if (.file | type == "string" and . != "") and (.line | type == "number")
-		then "\(.file):\(.line | floor)" else empty end;
+	def located: (.file | type == "string" and . != "") and (.line | type == "number");
+	def location: if located then {file, line: (.line | floor)} else empty end;
+	def span: if located then {file, a: (.line | floor),
+		b: ([.line, .line_end] | map(numbers | floor) | max)} else empty end;
+	def matched($have): group_by(.file) | all(.[];
+		.[0].file as $f
+		| reduce sort_by(.b, .a)[] as $x ({free: [$have[] | select(.file == $f) | .line] | sort, ok: true};
+			if .ok then
+				(first(range(0; .free | length) as $i | select(.free[$i] >= $x.a and .free[$i] <= $x.b) | $i) // null) as $i
+				| if $i == null then .ok = false else .free |= del(.[$i]) end
+			else . end)
+		| .ok);
 	def open_entries: [.[] | objects | select(.later != true)
 		| select((.status // "new") | . != "fixed" and . != "declined")];
 	def open($sev): [open_entries[] | select((.severity | strings | ascii_downcase) == $sev)] | length;
 	def shown($sev): [($parsed // [])[]? | objects | select(.severity == $sev)] | length;
 	(if type == "array" then . else [] end)
 	| [open_entries[] | select(blocking) | location] as $have
-	| [($parsed // [])[]? | objects | select(blocking) | location] as $seen
+	| [($parsed // [])[]? | objects | select(blocking) | span] as $seen
 	| open("critical") >= shown("critical")
 		and open("critical") + open("important") >= shown("critical") + shown("important")
-		and all($seen | group_by(.)[]; .[0] as $at | ($have | map(select(. == $at)) | length) >= length);
+		and ($seen | matched($have));
 
 # Findings from the model's block or the parser, checked: known severities only, file/line/title typed.
 def normalize_findings:
@@ -396,6 +442,41 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 			| .ready_overridden = ((.ready == "yes" or .ready == "yes-with-fixes") and $blocking > 0) end
 	end;
 
+# Counts from a record's findings list: the open findings (not fixed or declined, not later) per severity, and the
+# findings per status (no status is new).
+def _findings_counts:
+	map(objects) as $all
+	| [$all[] | select(.later != true) | select((.status // "new") | . != "fixed" and . != "declined")] as $open
+	| def sev($s): [$open[] | select((.severity | strings | ascii_downcase) == $s)] | length;
+	def st($s): [$all[] | select((.status // "new") == $s)] | length;
+	{open_blocking: (sev("critical") + sev("important")), critical: sev("critical"), important: sev("important"),
+		minor: sev("minor"), new: st("new"), fixed: st("fixed"), declined: st("declined"), regressed: st("regressed")};
+
+# Counts from a review's Markdown, as a backfill counts them; null when it has no severity heading at all: then the
+# Markdown does not say how many blockers there are.
+def markdown_counts:
+	if (_sections | length) == 0 then null
+	else parse_findings
+		| def sev($s): map(select(.severity == $s)) | length;
+		{open_blocking: (sev("critical") + sev("important")), critical: sev("critical"), important: sev("important"),
+			minor: sev("minor"), new: length, fixed: 0, declined: 0, regressed: 0}
+	end;
+
+# A marker record of a code-review round (not a Rethink) without a numeric counts.open_blocking: the counts are rebuilt
+# from its findings, when it has some and they show every blocker its review's Markdown ($body) does
+# (block_covers_markdown, block_respects_empty); else from the Markdown. When neither can say, every count is null:
+# the round's blocking is unknown, never 0, and the loop never calls it ready. Other records are left as they are.
+def with_counts($body):
+	if .code_review != false and (.counts.open_blocking? | type) != "number" then
+		($body | parse_findings) as $parsed
+		| (if (.findings | type == "array" and length > 0) and .findings_dropped != true
+			and (.findings | block_covers_markdown($parsed) and block_respects_empty($body | empty_severities))
+			then .findings | _findings_counts
+			else $body | markdown_counts end) as $c
+		| .counts = ($c // {open_blocking: null, critical: null, important: null, minor: null, new: null,
+			fixed: null, declined: null, regressed: null})
+	else . end;
+
 # The first line of every body gh-pr-review posts.
 def generated_header: "<!-- gh-pr-review generated -->";
 
@@ -449,6 +530,14 @@ def marker_line($body):
 # or CR allowed). A review that quotes the marker further down is a person's review.
 def is_generated_review:
 	type == "string" and ((split("\n")[0] // "" | sub("\\s+$"; "")) == generated_header);
+
+# True when a generated review (a GitHub REST review object) counts as a round: its author is an owner, member or
+# collaborator of the repo (author_association), or is $me, the account running the tool ("" when unknown: then the
+# association alone decides). Anyone can post a review that starts with the generated header.
+def trusted_review($me):
+	(.author_association // "") as $a
+	| $a == "OWNER" or $a == "MEMBER" or $a == "COLLABORATOR"
+		or ($me != "" and (.user.login? // null) == $me);
 
 def _opt($t): . == null or type == $t;
 

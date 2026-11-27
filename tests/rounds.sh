@@ -33,7 +33,8 @@ jq -n '[{commit: {committer: {date: "2026-01-01T09:00:00Z"}}}, {commit: {committ
 cat >"$stub/gh" <<S
 #!/usr/bin/env bash
 case "\$*" in
-*pulls/1/reviews*) cat "$stub/reviews.json" ;;
+*pulls/1/reviews*) jq 'map(.author_association //= "MEMBER")' "$stub/reviews.json" ;; # members unless set
+*" user --jq"*) echo me ;;
 *pulls/1/commits*) cat "$stub/commits.json" ;;
 *issues/1/comments*) cat "$stub/comments.json" ;;
 *pulls/1/comments*) echo '[]' ;;
@@ -122,6 +123,59 @@ expect "rounds: a compacted round posted at once takes the floor's next IDs" \
 expect "rounds: after it, round 3 numbers from F3" \
 	'[[ $(jq -c -L "$root/lib" "include \"records\"; .records | id_floor.F + 1" <<<"$out") == 3 ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
+
+# A code-review marker without counts: never 0. The counts come from its findings when they show the Markdown's
+# blockers, else from the Markdown; when neither can say, the round's blocking is unknown, and it is never ready.
+cp "$stub/reviews.json" "$stub/reviews.saved"
+nocounts() { # findings-json review-markdown -> a generated review whose marker has no counts
+	jq -n --argjson f "$1" --arg md "$2" '{schema: 1, round: 1, code_review: true, approach: "sound",
+		ready: "yes-with-fixes", findings: $f} | {commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"},
+		body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\n" + $md)}'
+}
+crit_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- **\`a.js:1\` — boom.**${nl}${nl}### Assessment${nl}**Ready to merge?** Yes, with fixes"
+f1='[{"id":"F1","severity":"critical","status":"new","file":"a.js","line":1,"title":"boom"}]'
+jq -s . <(nocounts "$f1" "$crit_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no counts in a code-review marker: rebuilt from its findings, not ready" \
+	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.critical]" <<<"$out") == "[[1],\"early\",1]" ]]'
+jq -s . <(nocounts '[]' "$crit_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no counts, findings missing the Markdown's Critical: counted from the Markdown" \
+	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label]" <<<"$out") == "[[1],\"early\"]" ]]'
+jq -s . <(nocounts '[]' "Looks fine.${nl}${nl}**Ready to merge?** Yes, with fixes") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no counts, no findings and no severity heading: blocking unknown, not ready" \
+	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking]" <<<"$out") == "[[null],\"unknown\",null]" ]]'
+out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
+expect "no counts: the table shows dashes and the unknown label" '[[ $rc == 0 && $(row 1) == *" – – – unknown –" ]]'
+cp "$stub/reviews.saved" "$stub/reviews.json"
+
+# Only trusted reviews are rounds. eve, a contributor, posts a generated review on the PR's head: not a round, so the
+# decision is not nothing-new, and the table says it was left out. My own review counts even as a contributor.
+cp "$stub/reviews.json" "$stub/reviews.saved"
+jq --arg b "<!-- gh-pr-review generated -->${nl}**Ready to merge?** No" '. + [
+	{body: $b, commit_id: "eeeeeee5", submitted_at: "2026-01-05T10:00:00Z", user: {login: "eve"}, author_association: "CONTRIBUTOR"},
+	{body: $b, commit_id: "eeeeeee5", submitted_at: "2026-01-05T11:00:00Z", user: {login: "eve"}, author_association: "NONE"}]' \
+	"$stub/reviews.saved" >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
+expect "trust: an outsider's generated reviews are not rounds" '[[ $rc == 0 && $(grep -cE "^[0-9]+ " <<<"$out") == 3 ]]'
+expect "trust: the line under the table names them" \
+	'grep -qx "ignored: 2 generated reviews by @eve (not a member or collaborator of the repo)" <<<"$out" &&
+		[[ $(grep -A1 "^3 " <<<"$out" | tail -1) == "ignored: "* ]]'
+expect "trust: the decision does not see them" 'grep -q "^next round: run" <<<"$out"'
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "trust: --json lists them" \
+	'[[ $(jq -c "[(.records | length), .decision.decision, .ignored]" <<<"$out") == "[3,\"run\",[{\"login\":\"eve\",\"association\":\"CONTRIBUTOR\"},{\"login\":\"eve\",\"association\":\"NONE\"}]]" ]]'
+jq '.[-1].user.login = "me" | .[-1].author_association = "CONTRIBUTOR"' "$stub/reviews.json" >"$stub/r.json"
+mv "$stub/r.json" "$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "trust: my own review counts where I am only a contributor" \
+	'[[ $(jq -c "[(.records | length), .decision.decision, (.ignored | length)]" <<<"$out") == "[4,\"nothing-new\",1]" ]]'
+out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
+expect "trust: one left out, one author" 'grep -qx "ignored: 1 generated review by @eve (not a member or collaborator of the repo)" <<<"$out"'
+cp "$stub/reviews.saved" "$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
+expect "trust: no ignored line when none is left out" '! grep -q "^ignored" <<<"$out"'
 
 # A processing step that fails inside fetch_round_records (here: reconciling a record) fails the whole read: no
 # output, status 1. Callers run it in conditions, where errexit would not stop it.

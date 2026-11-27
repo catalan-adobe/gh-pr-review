@@ -29,11 +29,9 @@ case "\$*" in
 *"--method POST"*pulls/1/reviews*)
 	[[ -f "$stub/post.fail" ]] && exit 1
 	while [[ \$# -gt 0 ]]; do [[ "\$1" == --input ]] && cp "\$2" "$stub/posted.json"; shift; done
-	# post.lost: GitHub takes the review, and its answer is lost.
+	# post.lost: the request fails, and the reviews change as this jq program says (\$p[0]: the request; lost_as).
 	if [[ -f "$stub/post.lost" ]]; then
-		jq --slurpfile p "$stub/posted.json" --arg at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" '. + [{id: 99,
-			user: {login: "me", type: "User"}, state: "COMMENTED", commit_id: \$p[0].commit_id, submitted_at: \$at,
-			body: \$p[0].body}]' "$stub/rest-reviews.json" >"$stub/rest-reviews.tmp"
+		jq --slurpfile p "$stub/posted.json" -f "$stub/post.lost" "$stub/rest-reviews.json" >"$stub/rest-reviews.tmp"
 		mv "$stub/rest-reviews.tmp" "$stub/rest-reviews.json"
 		exit 1
 	fi ;;
@@ -41,7 +39,8 @@ case "\$*" in
 	# reviews.fail: how many reads of the reviews fail from now on.
 	n=\$(cat "$stub/reviews.fail" 2>/dev/null || echo 0)
 	[[ "\$n" -gt 0 ]] && { echo "\$((n - 1))" >"$stub/reviews.fail"; exit 1; }
-	cat "$stub/rest-reviews.json" ;;
+	# Reviews by members unless a fixture says otherwise.
+	jq 'map(.author_association //= "MEMBER")' "$stub/rest-reviews.json" ;;
 *issues/1/comments*) cat "$stub/rest-comments.json" ;;
 *pulls/1/comments*) echo '[]' ;;
 *"auth status"*) exit 0 ;;
@@ -335,11 +334,26 @@ expect "records: an empty block next to a Critical bullet falls back to the Mark
 	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .counts.open_blocking, .findings[0].file" <<<"$record" | paste -sd, -) == "parsed,1,1,b.js" ]] &&
 		grep -q "does not match the review" "$stub/out.log"'
 
+# Two JSON values in one fence: not one array, so the Markdown is the record, and the marker is posted.
+block=$'```json findings\n[]\n[{"severity":"critical","file":"b.js","line":9,"title":"data loss"}]\n```'
+setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`b.js:9` — data loss.**\n\n**Ready to merge?** No\n\n'"$block"
+run
+expect "records: two JSON values in the findings block fall back to the Markdown, with a record and a marker" \
+	'[[ $rc == 0 && $(jq -r ".source, .counts.critical, .preview" <<<"$record" | paste -sd, -) == "parsed,1,false" &&
+		$body == *"gh-pr-review:round"* ]] && grep -q "does not match the review" "$stub/out.log"'
+
 block=$'```json findings\n[{"severity":"critical","file":"a.go","line":10,"title":"one"},{"severity":"critical","file":"a.go","line":10,"title":"two"}]\n```'
 setup $'**Approach:** Sound' $'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n- **`a.go:10` — one.**\n- **`b.go:11` — two.**\n\n**Ready to merge?** No\n\n'"$block"
 run
 expect "records: a block repeating one blocker's location falls back to the Markdown" \
 	'[[ $rc == 0 && $(jq -c "[.source, [.findings[] | .file]]" <<<"$record") == "[\"parsed\",[\"a.go\",\"b.go\"]]" ]]'
+
+# A real reply (PR #8, round 4): the Markdown gives ranges (gh-pr-review:974–977), the block a line inside each.
+setup $'### Approach\n**Approach:** Questionable' "$(cat "$root/tests/fixtures/reviews/pr8-round4-model.md")"
+run
+expect "records: Markdown ranges match the block's lines inside them, so the block is the record" \
+	'[[ $rc == 0 && $(jq -c "[.source, (.findings | length), [.findings[].line], .counts.open_blocking]" <<<"$record") == \
+		"[\"model\",7,[976,1031,260,88,885,173,129],4]" ]] && ! grep -q "does not match the review" "$stub/out.log"'
 
 setup $'### Approach\n**Approach:** Rethink' 'never used'
 run
@@ -426,7 +440,7 @@ rounds_with() { # blocking per earlier round... -> REST reviews whose markers ca
 		rec=$(jq -cn --argjson r "$i" --argjson b "$b" '{schema: 1, source: "model", round: $r, head_sha: "h\($r)",
 			posted_at: "2026-01-0\($r)T00:00:00Z", approach: "sound", ready: "no", code_review: true, findings: [],
 			counts: {open_blocking: $b, critical: 0, important: $b, minor: 0}}')
-		out=$(jq -c --arg rec "$rec" --argjson r "$i" '. + [{user: {login: "me", type: "User"}, commit_id: "h\($r)",
+		out=$(jq -c --arg rec "$rec" --argjson r "$i" '. + [{id: $r, user: {login: "me", type: "User"}, commit_id: "h\($r)",
 			submitted_at: "2026-01-0\($r)T00:00:00Z",
 			body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + $rec + " -->\nround")}]' <<<"$out")
 	done
@@ -530,6 +544,46 @@ overlap
 run_tty "Post as review" ""
 expect "overlap, in a terminal: no prompt, nothing posted, exit 6" \
 	'[[ $rc == 6 && -z $flag ]] && grep -q "round 2 by ann" "$stub/out.log" && ! grep -q "Post anyway" "$stub/out.log"'
+
+# Same count, other rounds: review 10 was the history; at the recheck its generated header is edited out and review 11,
+# a new round by ann, is there. One round then, one round now, but not the same one.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+rounds_with 2 | jq -c '.[0].id = 10' >"$stub/rest-reviews.json"
+jq -c '.[0].body |= sub("^<!-- gh-pr-review generated -->\n"; "") | . + [{id: 11, user: {login: "ann", type: "User"},
+	state: "COMMENTED", commit_id: "h1", submitted_at: "2026-01-05T00:00:00Z",
+	body: "<!-- gh-pr-review generated -->\n**Ready to merge?** No"}]' "$stub/rest-reviews.json" >"$stub/reviews.after"
+run
+expect "overlap, same count but another round: nothing posted, exit 6, the new round named" \
+	'[[ $rc == 6 && -z $flag && $(jq -r .preview <<<"$record") == true ]] && grep -q "round 1 by ann" "$stub/out.log"'
+rounds_with 2 | jq -c '.[0].id = 10' >"$stub/rest-reviews.json"
+jq -c '.[0].body |= sub("^<!-- gh-pr-review generated -->\n"; "")' "$stub/rest-reviews.json" >"$stub/reviews.after"
+run
+expect "overlap, a round that is no longer one: nothing posted, exit 6" \
+	'[[ $rc == 6 && -z $flag ]] && grep -q "rounds changed while this review ran" "$stub/out.log"'
+
+# Only trusted reviews are rounds: an owner's, member's or collaborator's, or this account's.
+untrusted() { # login association commit -> one generated review
+	jq -n --arg login "$1" --arg assoc "$2" --arg commit "$3" '[{id: 7, user: {login: $login, type: "User"},
+		author_association: $assoc, state: "COMMENTED", commit_id: $commit, submitted_at: "2026-01-05T00:00:00Z",
+		body: "<!-- gh-pr-review generated -->\n**Ready to merge?** No"}]'
+}
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+untrusted eve CONTRIBUTOR head1 >"$stub/rest-reviews.json"
+run --check
+expect "trust: an outsider's generated review on this head is not a round: --check runs, and names it" \
+	'[[ $rc == 0 ]] && grep -q "Loop check for round 1: run" "$stub/out.log" &&
+		[[ $(grep -c "ignored: 1 generated review by @eve (not a member or collaborator of the repo)" "$stub/out.log") == 1 ]]'
+run
+expect "trust: an outsider's generated review on this head: the review runs as round 1 and is posted" \
+	'[[ $rc == 0 && $calls == 2 && $flag == --approve && $(jq -r .round <<<"$record") == 1 ]] &&
+		[[ $(grep -c "ignored: 1 generated review by @eve" "$stub/out.log") == 1 ]]'
+untrusted me CONTRIBUTOR head1 >"$stub/rest-reviews.json"
+run
+expect "trust: this account's review counts where it is only a contributor: nothing new" '[[ $rc == 5 && $calls == 0 ]]'
+untrusted eve NONE head1 | jq '.[0].user.login = "eve2"' >"$stub/reviews.after"
+echo '[]' >"$stub/rest-reviews.json"
+run
+expect "trust: an outsider's generated review during the review is no overlap: posted" '[[ $rc == 0 && $flag == --approve ]]'
 
 # The history can't be read again before posting: one retry, then nothing is posted.
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
@@ -832,6 +886,21 @@ run
 expect "at once: round 3 numbers its new finding after both runs' IDs" \
 	'[[ $rc == 0 && $(jq -c "[.round, .findings[0].id, .last_ids.F]" <<<"$record") == "[3,\"F42\",42]" ]]'
 
+# The Markdown says there is nothing to fix; the block claims four Criticals. The reader's version wins: the record
+# is parsed, with no blockers, the bare yes approves, and the round reads back as ready.
+none=$'*(none found)*\n\n'
+block=$'```json findings\n'"$(jq -nc '[range(4) | {severity: "critical", file: "a.js", line: (. + 1), title: "c\(.)"}]')"$'\n```'
+setup $'**Approach:** Sound' $'### Issues\n\n#### 🚨 Critical (Must Fix Before Merge)\n\n'"$none"$'#### ⚠️ Important (Should Fix)\n\n'"$none"$'#### 💡 Minor (Nice to Have)\n\n'"$none"$'### Assessment\n\n**Ready to merge?** Yes\n\n'"$block"
+run
+expect "records: blockers in the block under empty Markdown sections: parsed, none blocking, approved" \
+	'[[ $rc == 0 && $flag == --approve && $(jq -c "[.source, .counts.open_blocking, .counts.critical, (.findings | length)]" <<<"$record") == "[\"parsed\",0,0,0]" ]] &&
+		grep -q "does not match the review" "$stub/out.log"'
+landed 31 APPROVED 2026-07-01T10:00:00Z
+echo head2 >"$stub/heads"
+check_json
+expect "records: that round reads back with no blockers, as ready" \
+	'[[ $rc == 0 && $(jq -c "[.decision, .label, .series]" "$stub/check.json") == "[\"run\",\"ready\",[0]]" ]]'
+
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
@@ -872,12 +941,42 @@ expect "the review API fails and no review landed: exit 1, unconfirmed, the reco
 	'[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] &&
 		grep -q "could not confirm whether the review was posted; run .gh pr-review rounds https://github.com/o/r/pull/1. before retrying" "$stub/out.log" &&
 		! grep -q "nothing was posted" "$stub/out.log"'
+# The post request fails; then the reviews change as <program> says, with $p[0] the request and $state its review state.
+lost_as() { # jq-program (the history starts empty again)
+	echo '[]' >"$stub/rest-reviews.json"
+	printf '({APPROVE: "APPROVED", REQUEST_CHANGES: "CHANGES_REQUESTED", COMMENT: "COMMENTED"}[$p[0].event]) as $state\n| %s' \
+		"$1" >"$stub/post.lost"
+}
+# Submitted now: inside the time window the old check trusted, so only the ID, state and body tell them apart.
+review_by_me='{id: 99, user: {login: "me", type: "User"}, state: $state, commit_id: $p[0].commit_id,
+	submitted_at: (now | todate), body: $p[0].body}'
+unconfirmed() { # rc, output and record of a failed post that could not be confirmed
+	[[ $rc == 1 && $(jq -r .preview <<<"$record") == true ]] && grep -q "could not confirm whether the review was posted" "$stub/out.log" &&
+		! grep -q "Posted →" "$stub/out.log"
+}
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
-touch "$stub/post.lost"
+lost_as ". + [$review_by_me]"
 run
 expect "the review API fails but the review landed: posted, the record finished as posted" \
 	'[[ $rc == 0 && $flag == --approve && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "false,approve" ]] &&
 		grep -q "the review is on the PR: it was posted" "$stub/out.log" && grep -q "Posted →" "$stub/out.log"'
+lost_as ". + [$review_by_me | .body |= (gsub(\"\\n\"; \"  \\r\\n\") + \"\\n\")]"
+run
+expect "the review landed, read back with CRLF and trailing spaces: posted" '[[ $rc == 0 ]] && grep -q "it was posted" "$stub/out.log"'
+lost_as ". + [$review_by_me | .body = \"<!-- gh-pr-review generated -->\\nanother run's review\"]"
+run
+expect "another review by this account on this commit, another body: unconfirmed, exit 1, still a preview" 'unconfirmed'
+lost_as ". + [$review_by_me | .state = \"COMMENTED\"]"
+run
+expect "the posted body in another state than the event's: unconfirmed" 'unconfirmed'
+lost_as ". + [$review_by_me, ($review_by_me | .id = 100)]"
+run
+expect "two reviews match: unconfirmed" 'unconfirmed'
+lost_as "map(if .id == 1 then . + {state: \$state, commit_id: \$p[0].commit_id, body: \$p[0].body,
+	submitted_at: (now | todate)} else . end)"
+rounds_with 2 >"$stub/rest-reviews.json"
+run
+expect "the matching review was already a round before the post: unconfirmed" 'unconfirmed'
 
 # ── producer to consumer, three code-review rounds: each round reads the last one back as GitHub returns it
 H3=$(printf 'c3%.0s' {1..20})

@@ -10,13 +10,15 @@ def loop_params($p): loop_defaults + ($p // {});
 # A record without a code review (a Rethink-only round) has no blocking count.
 def loop_code_review: .code_review != false;
 
-# Blocking count of one record, null for a Rethink round.
-def loop_blocking: if loop_code_review then (.counts.open_blocking // 0) else null end;
+# Blocking count of one record: null for a Rethink round, and for a code-review round whose count is unknown (no
+# number: never read as 0).
+def loop_blocking: if loop_code_review then (.counts.open_blocking | numbers) // null else null end;
 
 def loop_bad: . == "nit-loop" or . == "churning";
 
 # One label per record. N and B(K−2) count code-review rounds only, so a Rethink round neither breaks nor extends
-# a run of bad rounds.
+# a run of bad rounds. A code-review round whose blocking count is unknown is "unknown": never ready, never bad, and
+# no B(K−2) for the round two later.
 def loop_labels($p):
   loop_params($p) as $q
   | . as $records
@@ -29,7 +31,8 @@ def loop_labels($p):
       | (if $n >= 3 then $bs[$n - 3] else null end) as $b2
       | .b = $bs
       | .labels += [
-        if $b == 0 and ($r.ready == "yes" or $r.ready == "yes-with-fixes") then "ready"
+        if $b == null then "unknown"
+        elif $b == 0 and ($r.ready == "yes" or $r.ready == "yes-with-fixes") then "ready"
         elif $n < $q.min_rounds then "early"
         elif $b <= 1 or ($b2 != null and $b <= $q.converge_ratio * $b2 + 1e-9) then "converging"
         elif $b <= $q.nit_max_blocking and (($r.counts.critical // 0) == 0) then "nit-loop"
