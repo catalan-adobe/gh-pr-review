@@ -36,7 +36,7 @@ def _title:
 
 # One finding from an item's first line.
 def _finding($severity):
-	sub("^(-|\\d+\\.)\\s+"; "") as $rest
+	sub("^([-*+]|\\d+\\.)\\s+"; "") as $rest
 	| ($rest | _location) as $loc
 	| (if $loc then {file: $loc.f, line: ($loc.l | tonumber)}
 		+ (if $loc.e != null and ($loc.e | tonumber) > ($loc.l | tonumber) then {line_end: ($loc.e | tonumber)} else {} end)
@@ -77,12 +77,12 @@ def _lines:
 		else .out += [{l: $l, s, i}] end)
 	| .has as $has | .out | map({l, s: (if $has then .i else .s end), h: (.h == true), code: (.code == true)});
 
-# Markdown in, findings out: the top-level "- " and "<n>. " items, bold or plain, in each severity section (_lines;
-# "- None." is not one). Fenced code is skipped. A location given as a range keeps its last line in line_end (the
-# record itself keeps line only: normalize_findings drops it).
+# Markdown in, findings out: the top-level "- ", "* ", "+ " and "<n>. " items, bold or plain, in each severity section
+# (_lines; "- None." is not one). Fenced code is skipped. A location given as a range keeps its last line in line_end
+# (the record itself keeps line only: normalize_findings drops it).
 def parse_findings:
 	[_lines[] | select(.s != null and (.h or .code | not)) | .s as $s | .l
-		| select(test("^(-|\\d+\\.)\\s+\\S") and (_none_line | not)) | _finding($s)];
+		| select(test("^([-*+]|\\d+\\.)\\s+\\S") and (_none_line | not)) | _finding($s)];
 
 # The severity sections of a review's Markdown (_lines), in order: {severity, lines (the non-blank lines up to the
 # next heading), closed (another heading follows)}. Fenced code belongs to the section it is in.

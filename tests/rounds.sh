@@ -139,6 +139,7 @@ partial() { # marker-fields-json review-markdown -> reviews.json: one generated 
 crit_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- **\`a.js:1\` — boom.**${nl}${nl}### Assessment${nl}**Ready to merge?** Yes, with fixes"
 plain_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- \`a.js:1\` — boom.${nl}${nl}### Assessment${nl}**Ready to merge?** Yes"
 none_md="#### 🚨 Critical (Must Fix Before Merge)${nl}*(none found)*${nl}${nl}### Assessment${nl}**Ready to merge?** Yes"
+star_md="#### 🚨 Critical (Must Fix Before Merge)${nl}* **\`a.go:7\` — boom.**${nl}#### ⚠️ Important (Should Fix)${nl}- None.${nl}### Assessment${nl}**Ready to merge?** Yes with fixes"
 minor_md="### Issues${nl}#### 🚨 Critical${nl}*(none found)*${nl}#### ⚠️ Important${nl}*(none found)*${nl}#### 💡 Minor${nl}- **\`a.js:2\` — nit.**${nl}### Assessment${nl}**Ready to merge?** Yes"
 while IFS='~' read -r marker md want; do
 	partial "$marker" "${!md}"
@@ -151,6 +152,7 @@ done <<'T'
 {"findings":[],"counts":{"critical":1,"important":0}}~plain_md~[1,1,0,false,true,"early",1]
 {"findings":[{"id":"F1","severity":"critical","status":"new","file":"a.js","line":1}],"counts":{"critical":0,"important":0}}~crit_md~[1,1,0,false,true,"early",1]
 {"findings":[],"counts":{"open_blocking":0,"critical":1,"important":0,"minor":0}}~crit_md~[1,1,0,false,true,"early",1]
+{"findings":[{"id":"F1","severity":"critical","status":"new","file":"a.go","line":7},{"id":"F2","severity":"important","status":"new"}],"counts":{"critical":1,"important":0}}~star_md~[1,1,0,false,true,"early",2]
 {"findings":[],"counts":{"critical":0,"important":0,"minor":1}}~minor_md~[0,0,1,false,true,"ready",1]
 {"findings":[{"id":"F1","severity":"critical","status":"new"}]}~none_md~[0,0,0,false,true,"ready",1]
 {"findings":[{"id":"F7","severity":"minor","status":"fixed"}],"last_ids":{"F":9,"L":2}}~none_md~[0,0,0,false,true,"ready",9]

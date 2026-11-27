@@ -185,6 +185,9 @@ check "block_covers_markdown: a fixed entry at the location is stored as new: it
 
 # Ranges: a bullet at a.go:10–12 (en dash) or a.go:10-12 (hyphen) is covered by an entry in that file at any line of
 # the range, one entry per bullet.
+check "parse_findings: * and + items are findings too" \
+	"$(printf '#### 🚨 Critical\n* **`a.go:7` — x.**\n+ y\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map([.file, .title])')" \
+	'[["a.go","x."],[null,"y"]]'
 check "parse_findings: an en-dash range keeps its end" \
 	"$(printf '#### 🚨 Critical\n- **`a.go:10–12` — x.**\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | .[0] | [.line, .line_end]')" "[10,12]"
 check "parse_findings: a hyphen range keeps its end" \
