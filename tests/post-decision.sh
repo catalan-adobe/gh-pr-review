@@ -31,7 +31,7 @@ S
 	# broken: the record is there when the run decides, and the final build of the posted record fails.
 	[[ "${9:-}" == broken ]] && echo 'not json' >"$record"
 	[[ "${9:-}" == empty ]] && : >"$record"
-	PATH="$stub:$PATH" LIB_DIR="$root/lib" bash -c 'set -euo pipefail; POST_TO_PR=true YES=true DECISION="$1" REVIEW="$2" CODE_REVIEW="$6" PR_AUTHOR="$3" APPROACH_VERDICT="$5" PR_NUM=1 GH_HOST_NAME=h OWNER=o REPO=r ROUND=1 HEAD_SHA=h1 RECORD_FILE="$7" SESSION_DIR="$8"; source "$4"' _ "$5" "$2" "$3" "$stub/post.sh" "$6" "${8-$2}" "$record" "$stub" >"$stub/out.log" 2>&1 &&
+	PATH="$stub:$PATH" LIB_DIR="$root/lib" bash -c 'set -euo pipefail; POST_TO_PR=true YES=true DECISION="$1" REVIEW="$2" CODE_REVIEW="$6" PR_AUTHOR="$3" APPROACH_VERDICT="$5" PR_NUM=1 GH_HOST_NAME=h OWNER=o REPO=r ROUND=1 ROUND_IDS="[]" HEAD_SHA=h1 RECORD_FILE="$7" SESSION_DIR="$8"; source "$4"' _ "$5" "$2" "$3" "$stub/post.sh" "$6" "${8-$2}" "$record" "$stub" >"$stub/out.log" 2>&1 &&
 		got=$(cat "$stub/flag" 2>/dev/null) || got="(exit failed)"
 	if [[ "$got" == "$7" ]]; then echo "ok   $1"; else
 		echo "FAIL $1: got '$got', want '$7'"

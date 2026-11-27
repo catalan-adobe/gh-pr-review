@@ -394,7 +394,7 @@ rounds_with() { # blocking per earlier round... -> REST reviews whose markers ca
 		rec=$(jq -cn --argjson r "$i" --argjson b "$b" '{schema: 1, source: "model", round: $r, head_sha: "h\($r)",
 			posted_at: "2026-01-0\($r)T00:00:00Z", approach: "sound", ready: "no", code_review: true, findings: [],
 			counts: {open_blocking: $b, critical: 0, important: $b, minor: 0}}')
-		out=$(jq -c --arg rec "$rec" --argjson r "$i" '. + [{user: {login: "me", type: "User"}, commit_id: "h\($r)",
+		out=$(jq -c --arg rec "$rec" --argjson r "$i" '. + [{id: $r, user: {login: "me", type: "User"}, commit_id: "h\($r)",
 			submitted_at: "2026-01-0\($r)T00:00:00Z",
 			body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + $rec + " -->\nround")}]' <<<"$out")
 	done
@@ -498,6 +498,22 @@ overlap
 run_tty "Post as review" ""
 expect "overlap, in a terminal: no prompt, nothing posted, exit 6" \
 	'[[ $rc == 6 && -z $flag ]] && grep -q "round 2 by ann" "$stub/out.log" && ! grep -q "Post anyway" "$stub/out.log"'
+
+# Same count, other rounds: review 10 was the history; at the recheck its generated header is edited out and review 11,
+# a new round by ann, is there. One round then, one round now, but not the same one.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+rounds_with 2 | jq -c '.[0].id = 10' >"$stub/rest-reviews.json"
+jq -c '.[0].body |= sub("^<!-- gh-pr-review generated -->\n"; "") | . + [{id: 11, user: {login: "ann", type: "User"},
+	state: "COMMENTED", commit_id: "h1", submitted_at: "2026-01-05T00:00:00Z",
+	body: "<!-- gh-pr-review generated -->\n**Ready to merge?** No"}]' "$stub/rest-reviews.json" >"$stub/reviews.after"
+run
+expect "overlap, same count but another round: nothing posted, exit 6, the new round named" \
+	'[[ $rc == 6 && -z $flag && $(jq -r .preview <<<"$record") == true ]] && grep -q "round 1 by ann" "$stub/out.log"'
+rounds_with 2 | jq -c '.[0].id = 10' >"$stub/rest-reviews.json"
+jq -c '.[0].body |= sub("^<!-- gh-pr-review generated -->\n"; "")' "$stub/rest-reviews.json" >"$stub/reviews.after"
+run
+expect "overlap, a round that is no longer one: nothing posted, exit 6" \
+	'[[ $rc == 6 && -z $flag ]] && grep -q "rounds changed while this review ran" "$stub/out.log"'
 
 # The history can't be read again before posting: one retry, then nothing is posted.
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'

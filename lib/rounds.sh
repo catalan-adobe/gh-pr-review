@@ -5,8 +5,8 @@
 # record rebuilt from the review's Markdown (backfill) when the review predates the markers. A generated review is one
 # whose first line is the generated marker (is_generated_review in lib/records.jq). GitHub's facts win over the
 # marker's: the round is the review's position in submission order, posted_at its submission time, head_sha the
-# commit it was posted on and reviewer its author, so two reviews posted at once can't both be round K, nor both give
-# out the same new finding IDs (reconcile_record in lib/records.jq).
+# commit it was posted on, reviewer its author and review_id its GitHub review ID, so two reviews posted at once can't
+# both be round K, nor both give out the same new finding IDs (reconcile_record in lib/records.jq).
 # Callers run it in conditions, where errexit is off: every step checks its own status, and the result is checked
 # (an array of records, each with a round number) before it is printed. Any failure prints nothing and returns 1.
 fetch_round_records() { # <host> <owner> <repo> <N>
@@ -15,7 +15,7 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 		include "records";
 		add // [] | map(select((.body | is_generated_review) and .state != "PENDING"))
 		| sort_by([.submitted_at // "", .id // 0]) | .[]
-		| {body, state, commit_id, submitted_at, user: {login: .user.login}}') || {
+		| {id, body, state, commit_id, submitted_at, user: {login: .user.login}}') || {
 		echo "Error: could not fetch the reviews of $2/$3#$4 (check gh auth and network)." >&2
 		return 1
 	}
@@ -53,8 +53,9 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 						L: ([$b.last_ids.L, $m.last_ids.L?] | map(numbers) | max // 0)}' <<<"$record") || return 1
 			fi
 		fi
-		facts=$(jq -c '{posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
-			| with_entries(select(.value | type == "string" and . != ""))' <<<"$review") || return 1
+		facts=$(jq -c '({posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
+			| with_entries(select(.value | type == "string" and . != "")))
+			+ (if .id | type == "number" then {review_id: .id} else {} end)' <<<"$review") || return 1
 		# Two runs posted at once: the later one's new IDs and first_round follow its position (reconcile_record).
 		record=$(printf '%s\n%s\n' "$records" "$record" | jq -cs -L "${LIB_DIR:?}" --argjson round "$round" \
 			--argjson facts "$facts" 'include "records"; .[0] as $earlier | .[1] | reconcile_record($earlier; $round)

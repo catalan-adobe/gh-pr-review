@@ -177,9 +177,11 @@ as the author cannot lift its own stop. Comments without an identified user
 without asking, and the record says so (`forced`).
 
 Rounds are numbered in the order GitHub received them. Just before posting,
-the tool reads the rounds again: if someone posted one while this review ran,
-it says who, posts nothing, keeps the session folder, and exits with code 6,
-in a terminal too: run the review again to review on top of that round. If
+the tool reads the rounds again and compares them, by GitHub review ID, with
+the rounds it started from: if someone posted one while this review ran (or a
+round was deleted, or edited so it is no longer one), it says who, posts
+nothing, keeps the session folder, and exits with code 6, in a terminal too:
+run the review again to review on top of the rounds as they are now. If
 the rounds can't be read again (one retry), it posts nothing either, keeps
 the session, and exits with code 1. Two runs that post at the very same
 moment both land; reading the history then gives the later one the next
@@ -215,7 +217,7 @@ scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
 | 1 | Error |
 | 3 | Stopped by the loop check |
 | 5 | No new commits since the last round |
-| 6 | History changed while the review ran: someone posted another round; nothing posted, the session is kept |
+| 6 | History changed while the review ran (someone posted another round, or a round went away); nothing posted, the session is kept |
 
 ## Troubleshooting
 
