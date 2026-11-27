@@ -234,6 +234,9 @@ check "parse_findings: the Issues section ends at the next heading of its level"
 check "parse_findings: a <details> Fixed list under Minor is not counted" \
 	"$(printf '### Issues\n#### Minor\n- a\n\n<details><summary>Fixed (2)</summary>\n\n- b\n- c\n\n</details>\n\n- d\n' |
 		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a","d"]'
+check "parse_findings: a finding that mentions <details> inside its line is still one, and so is the next" \
+	"$(printf '### Issues\n#### Critical\n- `a.html:3` — the `<details>` element has no summary.\n- b\n' |
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.severity)')" '["critical","critical"]'
 check "empty_severities: a Minor section holding only a <details> list is empty" \
 	"$(empties $'### Issues\n#### Minor\n*(none found)*\n<details><summary>Later (1)</summary>\n\n- x\n</details>\n### End\n')" '["minor"]'
 respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }

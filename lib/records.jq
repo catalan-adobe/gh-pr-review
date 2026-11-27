@@ -55,13 +55,13 @@ def _none_line:
 # A review's Markdown as lines, each with the severity section it is in (s, null outside any), and whether it is a
 # heading (h) or in fenced code (code). A heading that names a severity starts that section, up to the next heading.
 # Severity headings count only in the code review's Issues section, from a heading titled "Issues" to the next heading
-# of the same or a higher level; a body without one is read whole. Lines inside <details>…</details> (a folded Fixed
-# or Later list) are in no section. Fenced code belongs to the section it is in.
+# of the same or a higher level; a body without one is read whole. Lines from a line starting with <details> to its
+# </details> (a folded Fixed or Later list) are in no section. Fenced code belongs to the section it is in.
 def _lines:
 	def fence: test("^\\s*(```|~~~)");
 	reduce (split("\n")[] | sub("\r$"; "")) as $l ({fence: false, details: 0, s: null, i: null, issues: null, has: false, out: []};
-		if .details > 0 or (.fence == false and ($l | test("<details\\b"; "i"))) then
-			.details = ([.details + ([$l | match("<details\\b"; "gi")] | length)
+		if .details > 0 or (.fence == false and ($l | test("^\\s{0,3}<details\\b"; "i"))) then
+			.details = ([.details + ([$l | match("^\\s{0,3}<details\\b"; "i")] | length)
 				- ([$l | match("</details\\s*>"; "gi")] | length), 0] | max)
 			| .out += [{l: $l, s: null, i: null}]
 		elif .fence or ($l | fence) then
