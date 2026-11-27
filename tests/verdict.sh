@@ -2,10 +2,8 @@
 # Checks last_verdict, the shared parser for "**Approach:**" and "**Ready to merge?**" lines.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-lib=$(mktemp)
-sed -n '/^# ── verdicts/,/^}/p' "$root/gh-pr-review" >"$lib"
-# shellcheck source=/dev/null
-source "$lib"
+# shellcheck source=lib/verdicts.sh
+source "$root/lib/verdicts.sh"
 fail=0
 
 check() { # name label text expected

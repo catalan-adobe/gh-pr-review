@@ -3,6 +3,7 @@
 #
 # Usage:
 #   gh pr-review <PR-URL | PR-number> [options]
+#   gh pr-review rounds <PR-URL | PR-number> [--json] [-u <login>]
 #   gh pr-review --doctor
 #
 # Options:
@@ -12,9 +13,16 @@
 #   --skip-approach Skip the maintainer's approach pass; run the code review only
 #   --instructions <text>  Extra guidance for both passes (a file: "$(cat notes.md)")
 #   --decision <d>  comment | approve | request-changes (default: from "Ready to merge?")
-#   -y, --yes       Skip confirmation prompt before posting
+#   -y, --yes       Skip confirmation prompts (a loop-check stop then exits 3, no new commits exits 5)
+#   --check         Run only the loop check: print it and exit 0 (run), 3 (stop) or 5 (no new commits)
+#   --json          With --check, print the decision as JSON
+#   --force-round   Run a round even when the loop check stops it or nothing changed
+#                   (in a terminal, without -y, both ask "Run round K anyway?" instead)
 #   --doctor        Check all prerequisites and exit
 #   -h, --help      Show this help
+#
+# Exit codes: 0 done, 1 error, 3 stopped by the loop check, 5 no new commits since the last round,
+#   6 the rounds changed while the review ran (nothing posted, the session is kept).
 #
 # Examples:
 #   gh pr-review https://github.com/owner/repo/pull/42
@@ -29,6 +37,34 @@
 
 set -euo pipefail
 
+# ── lib ─────────────────────────────────────────────────────────────────────
+# Follow symlinks to the real script (`gh extension install .` links it), then load lib/*.sh.
+SELF="${BASH_SOURCE[0]}"
+while [[ -L "$SELF" ]]; do
+	LINK=$(readlink "$SELF")
+	if [[ "$LINK" == /* ]]; then SELF="$LINK"; else SELF="$(dirname "$SELF")/$LINK"; fi
+done
+LIB_DIR="$(cd "$(dirname "$SELF")" && pwd)/lib"
+for LIB_FILE in "$LIB_DIR"/*.sh; do
+	# shellcheck source=/dev/null
+	source "$LIB_FILE"
+done
+
+# ── subcommands ─────────────────────────────────────────────────────────────
+# A known first word is a subcommand; anything else is a PR to review.
+case "${1:-}" in
+rounds | status | show | shepherd | dash | gc)
+	SUBCOMMAND="$1"
+	shift
+	if declare -F "cmd_${SUBCOMMAND}" >/dev/null; then
+		"cmd_${SUBCOMMAND}" "$@"
+		exit $?
+	fi
+	echo "gh pr-review ${SUBCOMMAND}: not yet available" >&2
+	exit 1
+	;;
+esac
+
 # ── defaults ────────────────────────────────────────────────────────────────
 MODEL="${GH_PR_REVIEW_MODEL:-github-copilot/gpt-5.6-sol}"
 POST_TO_PR=true
@@ -39,6 +75,9 @@ TARGET=""
 SKIP_APPROACH=false
 INSTRUCTIONS=""
 GH_USER="${GH_PR_REVIEW_USER:-}"
+CHECK_ONLY=false
+CHECK_JSON=false
+FORCE_ROUND=false
 
 # ── arg parsing ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -69,6 +108,18 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--skip-approach)
 		SKIP_APPROACH=true
+		shift
+		;;
+	--check)
+		CHECK_ONLY=true
+		shift
+		;;
+	--json)
+		CHECK_JSON=true
+		shift
+		;;
+	--force-round)
+		FORCE_ROUND=true
 		shift
 		;;
 	--no-post)
@@ -111,26 +162,19 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$DOCTOR" == "false" && -z "$TARGET" ]]; then
-	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [--skip-approach] [-y] [--doctor]" >&2
+	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [--skip-approach] [-y] [--check [--json]] [--force-round] [--doctor]" >&2
 	exit 1
 fi
+if [[ "$CHECK_JSON" == "true" && "$CHECK_ONLY" == "false" ]]; then
+	echo "Error: --json only goes with --check" >&2
+	exit 1
+fi
+# With --check --json, stdout carries the JSON only: everything else goes to stderr, the JSON to fd 3.
+exec 3>&1
+[[ "$CHECK_JSON" == "true" ]] && exec 1>&2
 
 # ── per-run gh account (env token only; never runs `gh auth switch`) ─────────
-if [[ -n "$GH_USER" ]]; then
-	GH_TOKEN=$(gh auth token --user "$GH_USER") || {
-		echo "Error: no gh login for '${GH_USER}' — see: gh auth status" >&2
-		exit 1
-	}
-	export GH_TOKEN GITHUB_TOKEN="$GH_TOKEN"
-fi
-
-# ── verdicts ───────────────────────────────────────────────────────────────────────
-# Lowercased value of the last "<label>:" or "<label>?" line (markdown marks allowed around the label).
-# The delimiter must follow the label, so prose such as "Approach notes: …" never matches.
-last_verdict() {
-	{ grep -iE "^[[:space:]*_>-]*$1[*_]*[?:]" <<<"$2" || true; } | tail -n1 |
-		sed 's/^[^?:]*[?:]//; s/[*_`.]//g; s/^ *//; s/ *$//' | tr '[:upper:]' '[:lower:]'
-}
+use_gh_user "$GH_USER"
 
 # ── pr context ─────────────────────────────────────────────────────────────────────
 # The author's description and the discussion, as files both passes read after forming their own view.
@@ -142,6 +186,7 @@ write_pr_context() {
 		echo "Error: could not fetch the PR discussion (check gh auth and network)." >&2
 		exit 1
 	}
+	printf '%s\n' "$json" >"$dir/discussion.json"
 	# shortcut: the first 100 comments per thread only; page them if real threads run longer.
 	# shellcheck disable=SC2016 # $owner etc. are GraphQL variables, not shell ones
 	threads=$(gh api graphql --hostname "$GH_HOST_NAME" --paginate \
@@ -254,6 +299,9 @@ run_preflight() {
 		pf_fail "gh not authenticated" "run: gh auth login"
 	fi
 
+	# --check reads GitHub only: it needs no model.
+	[[ "$CHECK_ONLY" == "true" ]] && return 0
+
 	if command -v pi &>/dev/null; then
 		pf_ok "pi installed"
 	else
@@ -290,25 +338,7 @@ if [[ "$PREFLIGHT_FAILURES" -gt 0 ]]; then
 fi
 
 # ── resolve owner/repo/PR number ─────────────────────────────────────────────
-if [[ "$TARGET" =~ ^[0-9]+$ ]]; then
-	REPO_JSON=$(gh repo view --json owner,name,url 2>/dev/null) || {
-		echo "Error: a bare PR number only works inside a repo clone." >&2
-		echo "cd into the repository, or pass the full PR URL." >&2
-		exit 1
-	}
-	OWNER=$(echo "$REPO_JSON" | jq -r '.owner.login')
-	REPO=$(echo "$REPO_JSON" | jq -r '.name')
-	PR_NUM="$TARGET"
-	GH_HOST_NAME=$(echo "$REPO_JSON" | jq -r '.url | split("/")[2]')
-elif [[ "$TARGET" =~ ^https?://([^/]+)/([^/]+)/([^/]+)/pull/([0-9]+) ]]; then
-	GH_HOST_NAME="${BASH_REMATCH[1]}"
-	OWNER="${BASH_REMATCH[2]}"
-	REPO="${BASH_REMATCH[3]}"
-	PR_NUM="${BASH_REMATCH[4]}"
-else
-	echo "Error: expected a GitHub PR URL or PR number, got: $TARGET" >&2
-	exit 1
-fi
+resolve_target "$TARGET"
 
 # ── fetch PR metadata ────────────────────────────────────────────────────────
 echo "🔍  PR #${PR_NUM} — ${OWNER}/${REPO}"
@@ -316,7 +346,7 @@ echo "    model: ${MODEL}"
 echo ""
 
 PR_JSON=$(gh pr view "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" \
-	--json title,body,headRefName,baseRefName,author,additions,deletions,changedFiles 2>&1) ||
+	--json title,body,headRefName,headRefOid,baseRefName,author,additions,deletions,changedFiles 2>&1) ||
 	{
 		echo "Error fetching PR (check gh auth): $PR_JSON" >&2
 		exit 1
@@ -332,6 +362,94 @@ N_FILES=$(echo "$PR_JSON" | jq -r '.changedFiles')
 
 echo "    ${PR_TITLE}"
 echo "    @${PR_AUTHOR}  ·  +${ADDITIONS} -${DELETIONS}  ·  ${N_FILES} files changed"
+echo ""
+
+# ── loop check ─────────────────────────────────────────────────────────────────────
+# Earlier gh-pr-review reviews by trusted authors are earlier rounds. Before any clone or model call, decide whether this
+# round should run: not when nothing changed, and not when the loop has stopped converging (see `gh pr-review rounds`).
+HEAD_OID=$(echo "$PR_JSON" | jq -r '.headRefOid // empty')
+# Only trusted reviews are rounds: by an owner, member or collaborator of the repo, or by this account (ROUNDS_ME, the
+# same login for the final re-read). The others are named once, here. Without this account's login its own rounds
+# would be missed: the run stops here, before any clone or model call.
+ME=$(operator_login "$GH_HOST_NAME") || exit 1
+ROUNDS_ME="$ME"
+IGNORED_FILE=$(mktemp)
+RECORDS=$(fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$ROUNDS_ME" "$IGNORED_FILE") || {
+	rm -f "$IGNORED_FILE"
+	exit 1
+}
+IGNORED_LINE=$(ignored_line "$(cat "$IGNORED_FILE")")
+rm -f "$IGNORED_FILE"
+[[ -z "$IGNORED_LINE" ]] || echo "    $IGNORED_LINE"
+LIFTED=false
+if [[ $(jq 'length' <<<"$RECORDS") -gt 0 ]]; then
+	LIFTED=$(lifted_since "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "$(jq -r 'last.posted_at // ""' <<<"$RECORDS")" "$PR_AUTHOR")
+fi
+PR_SHAPE=$(jq -cn --argjson lines "$((ADDITIONS + DELETIONS))" --argjson files "$N_FILES" '{lines: $lines, files: $files}')
+LOOP=$(loop_decide_json "$RECORDS" "$PR_SHAPE" "$HEAD_OID" "$LIFTED" "{\"skip_approach\": $SKIP_APPROACH}")
+LOOP_DECISION=$(jq -r '.decision' <<<"$LOOP")
+ROUND=$(jq -r '.next_round' <<<"$LOOP")
+PREVIOUS_RECORD=$(jq -c 'last // null' <<<"$RECORDS")
+# The GitHub review ID of each round, in order: the history this round is reviewed on top of.
+ROUND_IDS=$(jq -c 'map(.review_id)' <<<"$RECORDS")
+# New findings are numbered after the highest ID anywhere in the history, so an ID never restarts.
+ID_FLOOR=$(jq -c -L "$LIB_DIR" 'include "records"; id_floor' <<<"$RECORDS")
+
+if [[ "$CHECK_ONLY" == "true" ]]; then
+	if [[ "$CHECK_JSON" == "true" ]]; then echo "$LOOP" >&3; else loop_text "$LOOP"; fi
+	case "$LOOP_DECISION" in
+	stop) exit 3 ;;
+	nothing-new) exit 5 ;;
+	*) exit 0 ;;
+	esac
+fi
+
+FORCED=false
+case "$LOOP_DECISION" in
+nothing-new)
+	if [[ "$FORCE_ROUND" == "true" ]]; then
+		FORCED=true
+		echo "    No new commits since round $((ROUND - 1)); running anyway (--force-round)."
+	elif [[ -t 0 && "$YES" == "false" ]]; then
+		# Someone may want a second opinion on the same commit: ask, as for a stop.
+		echo "No new commits since round $((ROUND - 1)) (${HEAD_OID:0:7})."
+		read -r -p "Run round ${ROUND} anyway? [y/N] " LOOP_ANSWER || LOOP_ANSWER=""
+		[[ "$LOOP_ANSWER" == [Yy]* ]] || {
+			echo "Nothing to review."
+			exit 5
+		}
+		FORCED=true
+	else
+		echo "No new commits since round $((ROUND - 1)) (${HEAD_OID:0:7}): nothing to review. --force-round runs anyway."
+		exit 5
+	fi
+	;;
+stop)
+	loop_text "$LOOP" >&2
+	if [[ "$FORCE_ROUND" == "true" ]]; then
+		FORCED=true
+	elif [[ -t 0 && "$YES" == "false" ]]; then
+		read -r -p "Run round ${ROUND} anyway? [y/N] " LOOP_ANSWER
+		[[ "$LOOP_ANSWER" == [Yy]* ]] || {
+			echo "Stopped by the loop check."
+			exit 3
+		}
+		FORCED=true
+	else
+		echo "Stopped by the loop check (exit 3). --force-round runs anyway." >&2
+		exit 3
+	fi
+	;;
+warn)
+	echo "    Loop: $(jq -r '.label + " (" + .reason + ")"' <<<"$LOOP")"
+	;;
+esac
+# A loop that stopped converging says so at the top of the posted review.
+LOOP_LINE=""
+if jq -e '.label == "nit-loop" or .label == "churning"' <<<"$LOOP" >/dev/null; then
+	LOOP_LINE=$(loop_line "$LOOP")
+fi
+echo "    round: ${ROUND}"
 echo ""
 
 # ── clone + checkout ─────────────────────────────────────────────────────────
@@ -681,12 +799,27 @@ If a section is empty, write: *(none found)*
 
 **Reasoning:** [1-2 sentence honest technical assessment]
 
+## Findings block (for tooling)
+
+After the Assessment, end your reply with one fenced code block tagged `json findings`. It holds a JSON array with
+one object per Critical, Important and Minor finding above, in the same order:
+`{"severity": "critical" | "important" | "minor", "file": "<path>" or null, "line": <number> or null, "title": "<the
+finding in one short sentence>"}`. Write `[]` when there are none. Keep the Markdown findings above exactly as they
+are: the block is extra, read by tooling, and removed before the review is posted. For example:
+
+```json findings
+[{"severity": "important", "file": "src/api.ts", "line": 141, "title": "Webhook payload is trusted without verification"}]
+```
+
 PART4
 	} >"$PROMPT_FILE"
 }
 
 # ── run pi ───────────────────────────────────────────────────────────────────
 REVIEW_FILE="${SESSION_DIR}/review.md"
+REVIEW_BODY_FILE="${SESSION_DIR}/review-body.md"
+FINDINGS_FILE="${SESSION_DIR}/findings.json"
+RECORD_FILE="${SESSION_DIR}/round.json"
 
 echo "    session: ${SESSION_DIR}"
 echo ""
@@ -732,7 +865,9 @@ else
 	echo "⏳  Running code review (this may take a few minutes)..."
 	echo ""
 	run_pi "$PROMPT_FILE" "$REVIEW_FILE"
-	CODE_REVIEW=$(cat "$REVIEW_FILE")
+	# The findings block is for the record only: the posted review is the reply without it.
+	cut_findings_block "$REVIEW_FILE" "$REVIEW_BODY_FILE" "$FINDINGS_FILE"
+	CODE_REVIEW=$(cat "$REVIEW_BODY_FILE")
 	# Only a Rethink may post the approach alone; an empty code review is a failed run.
 	if [[ -z "${CODE_REVIEW//[[:space:]]/}" ]]; then
 		echo "Error: the code review came back empty — pi may have failed or timed out." >&2
@@ -742,7 +877,69 @@ else
 	fi
 fi
 
-REVIEW=$(assemble_review "$APPROACH" "$CODE_REVIEW")
+REVIEW=$(assemble_review "$LOOP_LINE" "$APPROACH" "$CODE_REVIEW")
+
+# ── record ─────────────────────────────────────────────────────────────────────────
+# round.json starts as a preview; the post block turns it into the posted round. A failure here never blocks the post.
+# It runs under `if !`, where errexit is off: every step checks its own status, and the record is checked before use.
+write_round_record() {
+	local findings parsed source=model code_review=true approach ready meta tmp="${RECORD_FILE}.tmp"
+	if [[ "$APPROACH_VERDICT" == rethink ]]; then
+		code_review=false
+		findings='[]'
+	else
+		# The Markdown's findings: the fallback, and the check that the block shows every blocker the review does.
+		# A parse failure leaves a parsed record without findings, as the spec says: it never blocks the post.
+		parsed="${RECORD_FILE}.parsed"
+		parse_findings "$REVIEW_BODY_FILE" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
+		# The block must hold exactly one JSON value, an array: anything else ("[] [ … ]") is read from the Markdown.
+		# So is a block with an open finding of a severity the Markdown says it has none of ("*(none found)*").
+		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" --rawfile md "$REVIEW_BODY_FILE" \
+			'include "records"; length == 1 and (.[0] | findings_block_ok and block_covers_markdown($parsed[0])
+				and block_respects_empty($md | empty_severities))' "$FINDINGS_FILE" >/dev/null 2>&1; then
+			findings=$(jq -cs '.[0]' "$FINDINGS_FILE") || return 1
+		else
+			if [[ -s "$FINDINGS_FILE" ]]; then
+				echo "Note: the findings block does not match the review's findings; the record is read from the Markdown." >&2
+			fi
+			source=parsed
+			findings=$(jq -c . "$parsed") || findings='[]'
+		fi
+		rm -f "$parsed"
+	fi
+	case "$APPROACH_VERDICT" in
+	sound | questionable | rethink) approach="$APPROACH_VERDICT" ;;
+	*) if [[ "$SKIP_APPROACH" == "true" ]]; then approach=skipped; else approach=unknown; fi ;;
+	esac
+	ready=$(normalize_ready "$(last_verdict 'ready to merge' "$CODE_REVIEW")") || return 1
+	meta=$(jq -n --arg source "$source" --arg host "$GH_HOST_NAME" --arg owner "$OWNER" --arg repo "$REPO" \
+		--argjson number "$PR_NUM" --argjson round "$ROUND" --arg reviewer "$ME" --arg model "$MODEL" \
+		--arg base "$BASE_SHA" --arg head "$HEAD_SHA" --argjson previous "$PREVIOUS_RECORD" \
+		--arg approach "$approach" --arg ready "$ready" --argjson code_review "$code_review" \
+		--argjson id_floor "$ID_FLOOR" \
+		'{source: $source, pr: {host: $host, owner: $owner, repo: $repo, number: $number}, round: $round,
+		  mode: "full", reviewer: (if $reviewer == "" then null else $reviewer end), model: $model,
+		  base_sha: $base, head_sha: $head, previous_head_sha: ($previous.head_sha? // null),
+		  approach: $approach, ready: $ready, decision: null, posted_at: null,
+		  code_review: $code_review, preview: true, id_floor: $id_floor}') || return 1
+	if ! build_record "$meta" "$findings" "$PREVIOUS_RECORD" |
+		jq --argjson loop "$LOOP" --argjson forced "$FORCED" \
+			'.loop = ($loop | {label, flags, decision}) | .forced = $forced' >"$tmp"; then
+		rm -f "$tmp"
+		return 1
+	fi
+	if ! jq -e 'type == "object" and (.round | type == "number") and (.counts | type == "object")' \
+		"$tmp" >/dev/null 2>&1; then
+		echo "Warning: the round record came out malformed." >&2
+		rm -f "$tmp"
+		return 1
+	fi
+	mv "$tmp" "$RECORD_FILE"
+}
+if ! write_round_record; then
+	echo "Warning: could not write the round record; the review is posted without it." >&2
+	RECORD_FILE=""
+fi
 
 # ── display ──────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -756,12 +953,58 @@ echo "━━━━━━━━━━━━━━━━━━━━━━━━�
 echo ""
 
 # ── post ─────────────────────────────────────────────────────────────────────
+# The PR's round records now, read again just before posting (one retry). Fails when GitHub can't say.
+rounds_now() {
+	local try
+	for try in 1 2; do
+		fetch_round_records "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM" "${ROUNDS_ME:-}" 2>/dev/null && return 0
+		[[ "$try" == 2 ]] || sleep 1
+	done
+	return 1
+}
+
+# The PR's head commit now, read again just before posting (one retry). Fails when GitHub can't say.
+pr_head_now() {
+	local json try
+	for try in 1 2; do
+		if json=$(gh pr view "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" --json headRefOid 2>/dev/null) &&
+			jq -er '.headRefOid | strings | select(. != "")' <<<"$json" 2>/dev/null; then
+			return 0
+		fi
+		[[ "$try" == 2 ]] || sleep 1
+	done
+	return 1
+}
+
+# After the post request failed: true when the review is on the PR all the same (the request reached GitHub, the
+# answer did not come back). That is exactly one review that was not a round at the final re-read (its ID is not in
+# NOW_IDS), by this user, on the reviewed commit, in the state the event gives, with the body post.json sent (CRLF
+# and trailing whitespace aside). Another review by the same account on the same commit is not this one. One read;
+# anything in doubt (no login, a failed read, no match or several) is false.
+review_landed() {
+	local json
+	[[ -n "${ME:-}" ]] || return 1
+	json=$(gh api --hostname "$GH_HOST_NAME" --paginate "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" 2>/dev/null) ||
+		return 1
+	jq -se --arg me "$ME" --arg commit "$HEAD_SHA" --argjson before "${NOW_IDS:-null}" \
+		--slurpfile post "${SESSION_DIR}/post.json" '
+		def norm: gsub("\r\n"; "\n") | gsub("[ \t]+\n"; "\n") | sub("\\s+$"; "");
+		($post[0].body | norm) as $body
+		| ({APPROVE: "APPROVED", REQUEST_CHANGES: "CHANGES_REQUESTED", COMMENT: "COMMENTED"}[$post[0].event]) as $state
+		| [add // [] | .[] | select(.id as $id | ($id | type == "number") and all($before[]; . != $id))
+			| select(.user.login == $me and .commit_id == $commit and .state == $state
+				and (.body | type == "string") and (.body | norm) == $body)]
+		| length == 1' <<<"$json" >/dev/null 2>&1
+}
+
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	if [[ -z "$DECISION" && "${APPROACH_VERDICT:-}" == rethink ]]; then
 		DECISION=request-changes
 		echo "Approach: rethink → ${DECISION}"
 	fi
+	AUTO_DECISION=false
 	if [[ -z "$DECISION" ]]; then
+		AUTO_DECISION=true
 		VERDICT=$(last_verdict 'ready to merge' "$CODE_REVIEW")
 		# Only a bare "yes" approves; any qualifier ("yes, with fixes") falls through to comment.
 		case "$VERDICT" in
@@ -770,15 +1013,20 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		*) DECISION=comment ;;
 		esac
 		echo "Verdict: ${VERDICT:-not found} → ${DECISION}"
+		# An approval says the findings were checked; without a record nothing can show that, so only comment.
+		if [[ "$DECISION" == approve && -z "${RECORD_FILE:-}" ]]; then
+			DECISION=comment
+			echo "No round record for this review: posting as comment, not approve."
+		fi
 	fi
 
 	if [[ "$YES" == "false" ]]; then
 		read -r -p "Post as review [c]omment, [a]pprove, [r]equest changes, or [N]o? (Enter = ${DECISION}) " confirm
 		case "$confirm" in
 		"") ;;
-		[Cc]*) DECISION=comment ;;
-		[Aa]*) DECISION=approve ;;
-		[Rr]*) DECISION=request-changes ;;
+		[Cc]*) DECISION=comment AUTO_DECISION=false ;;
+		[Aa]*) DECISION=approve AUTO_DECISION=false ;;
+		[Rr]*) DECISION=request-changes AUTO_DECISION=false ;;
 		*)
 			echo "Aborted — review not posted."
 			exit 0
@@ -786,14 +1034,116 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		esac
 	fi
 
-	ME=$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)
+	ME=${ME:-$(gh api --hostname "$GH_HOST_NAME" user --jq .login 2>/dev/null || true)}
 	if [[ "$DECISION" != "comment" && "$ME" == "$PR_AUTHOR" ]]; then
 		echo "Note: GitHub blocks ${DECISION} on your own PR; posting as comment."
 		DECISION=comment
 	fi
 
-	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s' "$REVIEW")
+	# A round posted by someone else while this one ran: this one was reviewed without it, so it is never posted on top
+	# of it. Read the history again first; when that read fails twice, nothing is posted either.
+	if ! NOW_RECORDS=$(rounds_now); then
+		echo "Error: could not read the PR's rounds again, so the history could not be verified; nothing was posted." >&2
+		echo "    Session: ${SESSION_DIR}" >&2
+		exit 1
+	fi
+	# The same rounds, by GitHub review ID and in order: a new round, a round gone or one that is no longer a round (its
+	# generated header edited out) all mean this review was not made on top of the history as it is now.
+	NOW_IDS=$(jq -c 'map(.review_id)' <<<"$NOW_RECORDS")
+	if [[ "$NOW_IDS" != "$ROUND_IDS" ]]; then
+		NEW_ROUNDS=$(jq -r --argjson old "$ROUND_IDS" 'to_entries[]
+			| select(.value.review_id as $id | if $id == null then .key >= ($old | length) else all($old[]; . != $id) end)
+			| .value | "    round \(.round) by \(.reviewer // "unknown") at \(.posted_at // "an unknown time")"' <<<"$NOW_RECORDS")
+		if [[ -n "$NEW_ROUNDS" ]]; then
+			echo "Not posted (exit 6): another round was posted while this review ran ($((ROUND - 1)) rounds then, $(jq length <<<"$NOW_RECORDS") now):" >&2
+			printf '%s\n' "$NEW_ROUNDS" >&2
+		else
+			echo "Not posted (exit 6): the PR's rounds changed while this review ran (a round was removed or is no longer one)." >&2
+		fi
+		echo "    Run the review again to review on top of them. Session: ${SESSION_DIR}" >&2
+		exit 6
+	fi
 
-	gh pr review "$PR_NUM" --repo "$GH_HOST_NAME/$OWNER/$REPO" "--${DECISION}" --body "$COMMENT"
+	# The review covers HEAD_SHA and is posted on it (commit_id). A push while it ran is not reviewed: never approve it.
+	HEAD_NOTE=""
+	if ! NOW_HEAD=$(pr_head_now); then
+		echo "Could not read the PR's head before posting; this review covers ${HEAD_SHA:0:7}."
+		HEAD_NOTE=unknown
+	elif [[ "$NOW_HEAD" != "$HEAD_SHA" ]]; then
+		HEAD_NOTE="The PR moved to ${NOW_HEAD:0:7} during the review; this review covers ${HEAD_SHA:0:7}."
+		echo "$HEAD_NOTE"
+		# Right after the loop line when there is one: that line stays the review's first.
+		if [[ "$REVIEW" == "**Loop:** "* && "$REVIEW" == *$'\n'* ]]; then
+			REVIEW_REST=${REVIEW#*$'\n'}
+			REVIEW=$(printf '%s\n\n**Note:** %s\n\n%s' "${REVIEW%%$'\n'*}" "$HEAD_NOTE" "${REVIEW_REST#$'\n'}")
+		else
+			REVIEW=$(printf '**Note:** %s\n\n%s' "$HEAD_NOTE" "$REVIEW")
+		fi
+	fi
+	if [[ -n "$HEAD_NOTE" && "$DECISION" == approve ]]; then
+		DECISION=comment
+		echo "Posting as comment, not approve: an approval must cover the PR's head."
+	fi
+
+	# The final record: round.json as posted, built and checked here. Only a record that passes is posted: a preview
+	# that went missing, empty or invalid since it was written is no record.
+	POSTED_RECORD=""
+	if [[ -n "${RECORD_FILE:-}" ]]; then
+		if [[ -s "$RECORD_FILE" ]] &&
+			jq --arg decision "$DECISION" --arg at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+				'.decision = $decision | .posted_at = $at | .preview = false' "$RECORD_FILE" >"$RECORD_FILE.posted" 2>/dev/null &&
+			jq -e 'type == "object" and (.round | type == "number") and (.counts | type == "object")' \
+				"$RECORD_FILE.posted" >/dev/null 2>&1; then
+			POSTED_RECORD="$RECORD_FILE.posted"
+		else
+			echo "Warning: could not write the posted round record; the review is posted without it." >&2
+			rm -f "$RECORD_FILE.posted"
+		fi
+	fi
+	# Right before posting: without a posted record, an automatic approve (the verdict's, or its default taken at the
+	# prompt) posts as comment. An approve someone chose stays.
+	if [[ "$DECISION" == approve && "$AUTO_DECISION" == true && -z "$POSTED_RECORD" ]]; then
+		DECISION=comment
+		echo "No round record for this review: posting as comment, not approve."
+	fi
+
+	MARKER=""
+	if [[ -n "$POSTED_RECORD" ]]; then
+		# The marker is sized for the exact body below: header, newline, marker, newline, review.
+		if ! MARKER=$(marker_line "$POSTED_RECORD" "$REVIEW"); then
+			MARKER=""
+			echo "Warning: could not write the round marker; posting the review without it." >&2
+		elif [[ -z "$MARKER" ]]; then
+			echo "Warning: the review leaves no room for its round marker; posting it without one." >&2
+			echo "    round.json keeps the full record: ${RECORD_FILE}" >&2
+		fi
+		[[ -z "$MARKER" ]] || MARKER+=$'\n'
+	fi
+	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s%s' "$MARKER" "$REVIEW")
+
+	case "$DECISION" in
+	approve) EVENT=APPROVE ;;
+	request-changes) EVENT=REQUEST_CHANGES ;;
+	*) EVENT=COMMENT ;;
+	esac
+	# Bound to the reviewed commit, so a push while the review ran is still unreviewed. The body goes through a file.
+	printf '%s' "$COMMENT" | jq -Rs --arg commit "$HEAD_SHA" --arg event "$EVENT" \
+		'{commit_id: $commit, event: $event, body: .}' >"${SESSION_DIR}/post.json"
+	if ! gh api --hostname "$GH_HOST_NAME" --method POST "repos/$OWNER/$REPO/pulls/$PR_NUM/reviews" \
+		--input "${SESSION_DIR}/post.json" >/dev/null; then
+		# An error does not always mean nothing was posted: the answer can be lost after GitHub took the review.
+		if review_landed; then
+			echo "Warning: GitHub answered with an error, but the review is on the PR: it was posted." >&2
+		else
+			echo "Error: could not confirm whether the review was posted; run" \
+				"\`gh pr-review rounds https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}\` before retrying." >&2
+			echo "    Session: ${SESSION_DIR}" >&2
+			exit 1
+		fi
+	fi
+	if [[ -n "$POSTED_RECORD" ]]; then
+		mv "$POSTED_RECORD" "$RECORD_FILE"
+	fi
+	printf '%s\n' "$COMMENT" >"${SESSION_DIR}/posted.md"
 	echo "✓  Posted → https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}"
 fi

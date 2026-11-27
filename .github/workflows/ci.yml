@@ -20,8 +20,8 @@ jobs:
       - name: Install shfmt
         run: sudo apt-get update && sudo apt-get install -y shfmt
       - name: shellcheck
-        run: shellcheck gh-pr-review tests/*.sh
+        run: shellcheck gh-pr-review lib/*.sh tests/*.sh
       - name: shfmt
-        run: shfmt -d gh-pr-review tests/*.sh
+        run: shfmt -d gh-pr-review lib/*.sh tests/*.sh
       - name: tests
         run: for t in tests/*.sh; do bash "$t" || exit 1; done

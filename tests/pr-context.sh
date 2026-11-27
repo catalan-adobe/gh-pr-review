@@ -45,6 +45,7 @@ expect "body title" pr-body.md "# T"
 expect "body text" pr-body.md "B"
 expect "no discussion" pr-discussion.md "(no comments or review summaries)"
 expect "no threads" pr-discussion.md "(no inline review threads)"
+expect "raw discussion kept for the round records" discussion.json '{"comments":[],"reviews":[]}'
 
 run '{"comments":[{"author":{"login":"carol"},"body":"later comment","createdAt":"2026-01-03T00:00:00Z"}],
  "reviews":[{"author":{"login":"bob"},"state":"CHANGES_REQUESTED","body":"first review","submittedAt":"2026-01-01T00:00:00Z"},
