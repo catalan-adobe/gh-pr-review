@@ -104,6 +104,22 @@ expect "rounds: reconciling keeps the rest of the finding" \
 	'[[ $(jq -c "[.records[2].findings[0] | .severity, .status, .title]" <<<"$out") == "[\"important\",\"new\",\"a\"]" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
+# A processing step that fails inside fetch_round_records (here: reconciling a record) fails the whole read: no
+# output, status 1. Callers run it in conditions, where errexit would not stop it.
+real_jq=$(command -v jq)
+mkdir -p "$stub/brokenjq"
+cat >"$stub/brokenjq/jq" <<S
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == *'reconcile_record('* ]] && exit 5; done
+exec "$real_jq" "\$@"
+S
+chmod +x "$stub/brokenjq/jq"
+out=$(PATH="$stub/brokenjq:$stub:$PATH" LIB_DIR="$root/lib" bash -c '
+	for f in "$LIB_DIR"/*.sh; do source "$f"; done
+	if records=$(fetch_round_records h o r 1); then echo "status 0: $records"; else echo "status $?: $records"; fi' 2>/dev/null)
+rc=0
+expect "fetch_round_records: a failing step fails the read, with no output" '[[ $out == "status 1: " ]]'
+
 # A history far past the argument limits (128 KiB per argument on Linux, 1 MiB in all on macOS): 20 rounds of
 # about 60,000 characters each.
 cp "$stub/reviews.json" "$stub/reviews.saved"

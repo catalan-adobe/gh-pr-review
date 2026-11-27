@@ -78,7 +78,7 @@ marker_record() { # <body>
 # heading is a Rethink: no code review.
 backfill_record() { # <review-json> <previous-record-or-null> <round> <pr-json>
 	local body approach ready code_review=true has_approach=false
-	body=$(jq -r '.body // ""' <<<"$1")
+	body=$(jq -r '.body // ""' <<<"$1") || return 1
 	approach=$(last_verdict 'approach' "$body")
 	approach=${approach%%[^a-z]*}
 	if [[ -n "$approach" ]] || grep -qiE '^#{1,6}[[:space:]]+approach[[:space:]]*$' <<<"$body"; then

@@ -63,6 +63,8 @@ if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] &
 	[[ -f "$stub/reviews.after" ]] && cp "$stub/reviews.after" "$stub/rest-reviews.json"
 	# GitHub failing the reads of the history from now on.
 	[[ -f "$stub/reviews.fail.after" ]] && cp "$stub/reviews.fail.after" "$stub/reviews.fail"
+	# The stub jq breaking from now on (bash keeps the path of a command it ran: the stub is there from the start).
+	[[ -f "$stub/jq.fail.after" ]] && touch "$stub/jq.fail"
 	printf '%s' "\${*: -1}" >"$stub/code-prompt.txt"; cat "$stub/review.out"; fi
 S
 	chmod +x "$stub/bin/"*
@@ -480,6 +482,21 @@ expect "final history read fails twice: exit 1, nothing posted, the session kept
 echo 2 >"$stub/reviews.fail.after"
 run_tty "Post as review" ""
 expect "final history read fails twice, in a terminal: exit 1, nothing posted" '[[ $rc == 1 && -z $flag ]]'
+
+# The history is read again, but rebuilding a round from it fails (the reconciling jq): that is a failed read too.
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+rounds_with 2 >"$stub/rest-reviews.json"
+cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+if [[ -f "$stub/jq.fail" ]]; then for a in "\$@"; do [[ "\$a" == *'reconcile_record('* ]] && exit 5; done; fi
+exec "$(command -v jq)" "\$@"
+S
+chmod +x "$stub/bin/jq"
+touch "$stub/jq.fail.after"
+run
+expect "final history read cannot rebuild a round: exit 1, nothing posted" \
+	'[[ $rc == 1 && -z $flag && $(jq -r .preview <<<"$record") == true ]] &&
+		grep -q "history could not be verified; nothing was posted" "$stub/out.log"'
 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 run
