@@ -167,12 +167,15 @@ ROUND  DATE         COMMIT   +COMMITS  APPROACH      READY  CRIT  IMP  MINOR  LA
 next round: stop · churning · approach-stuck too-big · Settle the approach before the next round: …
 ```
 
-The Markdown is read only as a fallback: for a findings block that can't be
-used, and for a review without a usable marker. The reader follows the format
-the tool asks the model for (the `### Issues` section with severity headings,
-findings as list items, the folded Fixed and Later lists, each `<details>` tag
-on its own line), and is best effort for other Markdown: fences nested in longer
-fences, HTML before `</details>` on the same line, headings nested in list items.
+The Markdown is the cross-check for the model's findings block: it is parsed
+before the block is accepted, and a block that leaves out a blocker the Markdown
+shows, or has one where it says none, is rejected. It is also the source when
+the block is rejected, and for a review without a usable marker. The reader
+follows the format the tool asks the model for (the `### Issues` section with
+severity headings, findings as list items, the folded Fixed and Later lists,
+each `<details>` tag on its own line), and is best effort for other Markdown:
+fences nested in longer fences, HTML before `</details>` on the same line,
+headings nested in list items.
 
 `+COMMITS` counts the PR's commits whose commit date falls between the
 previous round's review and this one's. It is a date window, not the commits

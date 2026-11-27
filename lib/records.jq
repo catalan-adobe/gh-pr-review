@@ -71,11 +71,11 @@ def code_review_part:
 	| if $f == null then $l else $l[:$f] end
 	| join("\n");
 
-# The Markdown is read only as a fallback: for a findings block that cannot be used, or a review without a usable
-# marker. The reader follows the format gh-pr-review asks the model for (the "### Issues" section with severity
-# headings, list-item findings, the folded <details> Fixed and Later lists, each tag on its own line), and is best
-# effort for other Markdown: fences nested in longer fences, HTML before </details> on one line, headings nested in
-# list items.
+# The Markdown is the cross-check for the model's findings block (parsed before the block is accepted), and the source
+# when the block is rejected or a review has no usable marker. The reader follows the format gh-pr-review asks the
+# model for (the "### Issues" section with severity headings, list-item findings, the folded <details> Fixed and Later
+# lists, each tag on its own line), and is best effort for other Markdown: fences nested in longer fences, HTML before
+# </details> on one line, headings nested in list items.
 # A review's Markdown as lines, each with the severity section it is in (s, null outside any), and whether it is a
 # heading (h) or in fenced code (code). A heading (0–3 spaces, then 1–6 "#") that names a severity starts that
 # section, up to the next heading. Severity headings count only in the code review's Issues section, from a heading

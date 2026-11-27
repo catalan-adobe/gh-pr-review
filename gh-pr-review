@@ -893,7 +893,8 @@ write_round_record() {
 	else
 		# The Markdown is the code review alone (review-body.md), never the approach or the footer: the reader of the
 		# posted review reads the same text, after its boundary line (code_review_part in lib/records.jq).
-		# The Markdown's findings: the fallback, and the check that the block shows every blocker the review does.
+		# The Markdown's findings: the check that the block shows every blocker the review does, and the source when
+		# the block is rejected.
 		# A parse failure leaves a parsed record without findings, as the spec says: it never blocks the post.
 		parsed="${RECORD_FILE}.parsed"
 		parse_findings "$REVIEW_BODY_FILE" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
