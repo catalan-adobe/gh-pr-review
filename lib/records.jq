@@ -330,6 +330,14 @@ def marker_line($body):
 def is_generated_review:
 	type == "string" and ((split("\n")[0] // "" | sub("\\s+$"; "")) == generated_header);
 
+# True when a generated review (a GitHub REST review object) counts as a round: its author is an owner, member or
+# collaborator of the repo (author_association), or is $me, the account running the tool ("" when unknown: then the
+# association alone decides). Anyone can post a review that starts with the generated header.
+def trusted_review($me):
+	(.author_association // "") as $a
+	| $a == "OWNER" or $a == "MEMBER" or $a == "COLLABORATOR"
+		or ($me != "" and (.user.login? // null) == $me);
+
 def _opt($t): . == null or type == $t;
 
 # A marker record as gh-pr-review writes it: schema 1, a round number, and the optional fields typed.

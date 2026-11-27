@@ -35,7 +35,8 @@ case "\$*" in
 	# reviews.fail: how many reads of the reviews fail from now on.
 	n=\$(cat "$stub/reviews.fail" 2>/dev/null || echo 0)
 	[[ "\$n" -gt 0 ]] && { echo "\$((n - 1))" >"$stub/reviews.fail"; exit 1; }
-	cat "$stub/rest-reviews.json" ;;
+	# Reviews by members unless a fixture says otherwise.
+	jq 'map(.author_association //= "MEMBER")' "$stub/rest-reviews.json" ;;
 *issues/1/comments*) cat "$stub/rest-comments.json" ;;
 *pulls/1/comments*) echo '[]' ;;
 *"auth status"*) exit 0 ;;
@@ -512,6 +513,30 @@ jq -c '.[0].body |= sub("^<!-- gh-pr-review generated -->\n"; "")' "$stub/rest-r
 run
 expect "overlap, a round that is no longer one: nothing posted, exit 6" \
 	'[[ $rc == 6 && -z $flag ]] && grep -q "rounds changed while this review ran" "$stub/out.log"'
+
+# Only trusted reviews are rounds: an owner's, member's or collaborator's, or this account's.
+untrusted() { # login association commit -> one generated review
+	jq -n --arg login "$1" --arg assoc "$2" --arg commit "$3" '[{id: 7, user: {login: $login, type: "User"},
+		author_association: $assoc, state: "COMMENTED", commit_id: $commit, submitted_at: "2026-01-05T00:00:00Z",
+		body: "<!-- gh-pr-review generated -->\n**Ready to merge?** No"}]'
+}
+setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
+untrusted eve CONTRIBUTOR head1 >"$stub/rest-reviews.json"
+run --check
+expect "trust: an outsider's generated review on this head is not a round: --check runs, and names it" \
+	'[[ $rc == 0 ]] && grep -q "Loop check for round 1: run" "$stub/out.log" &&
+		[[ $(grep -c "ignored: 1 generated review by @eve (not a member or collaborator of the repo)" "$stub/out.log") == 1 ]]'
+run
+expect "trust: an outsider's generated review on this head: the review runs as round 1 and is posted" \
+	'[[ $rc == 0 && $calls == 2 && $flag == --approve && $(jq -r .round <<<"$record") == 1 ]] &&
+		[[ $(grep -c "ignored: 1 generated review by @eve" "$stub/out.log") == 1 ]]'
+untrusted me CONTRIBUTOR head1 >"$stub/rest-reviews.json"
+run
+expect "trust: this account's review counts where it is only a contributor: nothing new" '[[ $rc == 5 && $calls == 0 ]]'
+untrusted eve NONE head1 | jq '.[0].user.login = "eve2"' >"$stub/reviews.after"
+echo '[]' >"$stub/rest-reviews.json"
+run
+expect "trust: an outsider's generated review during the review is no overlap: posted" '[[ $rc == 0 && $flag == --approve ]]'
 
 # The history can't be read again before posting: one retry, then nothing is posted.
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
