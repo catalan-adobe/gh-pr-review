@@ -144,7 +144,9 @@ next round: stop · churning · approach-stuck too-big · Settle the approach be
 
 The label says whether the loop converges: `early` (fewer than 3 rounds),
 `converging`, `ready`, `nit-loop` (a few Important findings that keep coming
-back) or `churning`. `--json` prints the records and the decision; `-u <login>`
+back) or `churning`; `unknown` when a round's record has no blocking count and
+neither its findings nor its Markdown can rebuild one (never read as 0, so
+never `ready`). `--json` prints the records and the decision; `-u <login>`
 picks the gh account, as for a review.
 
 ## Loop check

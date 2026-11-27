@@ -120,6 +120,32 @@ expect "rounds: after it, round 3 numbers from F3" \
 	'[[ $(jq -c -L "$root/lib" "include \"records\"; .records | id_floor.F + 1" <<<"$out") == 3 ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
+# A code-review marker without counts: never 0. The counts come from its findings when they show the Markdown's
+# blockers, else from the Markdown; when neither can say, the round's blocking is unknown, and it is never ready.
+cp "$stub/reviews.json" "$stub/reviews.saved"
+nocounts() { # findings-json review-markdown -> a generated review whose marker has no counts
+	jq -n --argjson f "$1" --arg md "$2" '{schema: 1, round: 1, code_review: true, approach: "sound",
+		ready: "yes-with-fixes", findings: $f} | {commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"},
+		body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\n" + $md)}'
+}
+crit_md="#### 🚨 Critical (Must Fix Before Merge)${nl}- **\`a.js:1\` — boom.**${nl}${nl}### Assessment${nl}**Ready to merge?** Yes, with fixes"
+f1='[{"id":"F1","severity":"critical","status":"new","file":"a.js","line":1,"title":"boom"}]'
+jq -s . <(nocounts "$f1" "$crit_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no counts in a code-review marker: rebuilt from its findings, not ready" \
+	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.critical]" <<<"$out") == "[[1],\"early\",1]" ]]'
+jq -s . <(nocounts '[]' "$crit_md") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no counts, findings missing the Markdown's Critical: counted from the Markdown" \
+	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label]" <<<"$out") == "[[1],\"early\"]" ]]'
+jq -s . <(nocounts '[]' "Looks fine.${nl}${nl}**Ready to merge?** Yes, with fixes") >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "no counts, no findings and no severity heading: blocking unknown, not ready" \
+	'[[ $rc == 0 && $(jq -c "[.decision.series, .decision.label, .records[0].counts.open_blocking]" <<<"$out") == "[[null],\"unknown\",null]" ]]'
+out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
+expect "no counts: the table shows dashes and the unknown label" '[[ $rc == 0 && $(row 1) == *" – – – unknown –" ]]'
+cp "$stub/reviews.saved" "$stub/reviews.json"
+
 # A processing step that fails inside fetch_round_records (here: reconciling a record) fails the whole read: no
 # output, status 1. Callers run it in conditions, where errexit would not stop it.
 real_jq=$(command -v jq)

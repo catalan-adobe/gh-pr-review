@@ -34,6 +34,10 @@ fetch_round_records() { # <host> <owner> <repo> <N>
 			if [[ "$dropped" == true ]]; then
 				minimal="$record"
 				record=""
+			else
+				# A code-review marker without its blocking count: rebuilt, or unknown, never 0 (with_counts).
+				record=$(printf '%s\n%s\n' "$record" "$review" | jq -cs -L "${LIB_DIR:?}" \
+					'include "records"; .[1].body as $body | .[0] | with_counts($body)') || return 1
 			fi
 		fi
 		if [[ -z "$record" ]]; then

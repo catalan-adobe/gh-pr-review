@@ -241,6 +241,41 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 		code_review: $code_review
 	}; (if $code_review then $body | parse_findings else [] end); $prev);
 
+# Counts from a record's findings list: the open findings (not fixed or declined, not later) per severity, and the
+# findings per status (no status is new).
+def _findings_counts:
+	map(objects) as $all
+	| [$all[] | select(.later != true) | select((.status // "new") | . != "fixed" and . != "declined")] as $open
+	| def sev($s): [$open[] | select((.severity | strings | ascii_downcase) == $s)] | length;
+	def st($s): [$all[] | select((.status // "new") == $s)] | length;
+	{open_blocking: (sev("critical") + sev("important")), critical: sev("critical"), important: sev("important"),
+		minor: sev("minor"), new: st("new"), fixed: st("fixed"), declined: st("declined"), regressed: st("regressed")};
+
+# Counts from a review's Markdown, as a backfill counts them; null when it has no severity heading at all: then the
+# Markdown does not say how many blockers there are.
+def markdown_counts:
+	if (_sections | length) == 0 then null
+	else parse_findings
+		| def sev($s): map(select(.severity == $s)) | length;
+		{open_blocking: (sev("critical") + sev("important")), critical: sev("critical"), important: sev("important"),
+			minor: sev("minor"), new: length, fixed: 0, declined: 0, regressed: 0}
+	end;
+
+# A marker record of a code-review round (not a Rethink) without a numeric counts.open_blocking: the counts are rebuilt
+# from its findings, when it has some and they show every blocker its review's Markdown ($body) does
+# (block_covers_markdown, block_respects_empty); else from the Markdown. When neither can say, every count is null:
+# the round's blocking is unknown, never 0, and the loop never calls it ready. Other records are left as they are.
+def with_counts($body):
+	if .code_review != false and (.counts.open_blocking? | type) != "number" then
+		($body | parse_findings) as $parsed
+		| (if (.findings | type == "array" and length > 0) and .findings_dropped != true
+			and (.findings | block_covers_markdown($parsed) and block_respects_empty($body | empty_severities))
+			then .findings | _findings_counts
+			else $body | markdown_counts end) as $c
+		| .counts = ($c // {open_blocking: null, critical: null, important: null, minor: null, new: null,
+			fixed: null, declined: null, regressed: null})
+	else . end;
+
 # The first line of every body gh-pr-review posts.
 def generated_header: "<!-- gh-pr-review generated -->";
 
