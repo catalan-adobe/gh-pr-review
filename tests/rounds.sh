@@ -61,6 +61,12 @@ expect() { # name condition
 	fi
 }
 
+# The ID the next round gives its first new finding, as the writer numbers it: after the history's ID floor and the
+# last record (build_record).
+next_id() { jq -r -L "$root/lib" 'include "records"; .records as $r
+	| build_record({round: ($r | length + 1), id_floor: ($r | id_floor)}; [{severity: "minor", title: "x"}]; $r[-1])
+	| .findings[0].id' <<<"$out"; }
+
 out=$(rounds https://h/o/r/pull/1) && rc=0 || rc=$?
 row() { grep -E "^$1 " <<<"$out" | tr -s ' '; }
 expect "rounds: runs" '[[ $rc == 0 ]]'
@@ -205,7 +211,8 @@ expect "a minimal Rethink marker keeps a counts object, all null, as any Rethink
 	'[[ $rc == 0 && $(jq -c "[.records[0] | .code_review, (.counts | type), .counts.open_blocking] + [.decision.labels[0]]" <<<"$out") == "[false,\"object\",null,\"rethink\"]" ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
-# This PR's round 5, as posted (tests/fixtures/reviews/pr8-round5.md), after rounds 1–4 with 8, 6, 4 and 4 blockers.
+# This PR's round 5, as posted (tests/fixtures/reviews/pr8-round5.md), after rounds 1–4 with 8, 6, 4 and 4 blockers
+# and IDs up to F8, F14, F20 and F27.
 # pr8 <filter> changes its marker with a jq filter. Read back, its findings keep the statuses it stored: F21 and F22
 # stay fixed, never open, so the round keeps its 3 blockers, 5 fixed and its label, nit-loop.
 cp "$stub/reviews.json" "$stub/reviews.saved"
@@ -213,9 +220,10 @@ pr8() { # jq filter on round 5's marker [posted body] -> reviews.json: rounds 1�
 	local posted="${2:-$root/tests/fixtures/reviews/pr8-round5.md}" marker
 	marker=$(sed -n 2p "$posted" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' | jq -c "$1" | sed 's/--/-\\u002d/g')
 	jq -n --rawfile b "$posted" --arg m "<!-- gh-pr-review:round ${marker} -->" '
-		[[8, 0], [6, 1], [4, 0], [4, 0]] as $c
+		[[8, 0, 8], [6, 1, 14], [4, 0, 20], [4, 0, 27]] as $c
 		| [range(4) as $i | {schema: 1, round: ($i + 1), code_review: true, approach: "sound", ready: "no",
-			counts: {open_blocking: $c[$i][0], critical: $c[$i][1], important: ($c[$i][0] - $c[$i][1]), minor: 0}}
+			counts: {open_blocking: $c[$i][0], critical: $c[$i][1], important: ($c[$i][0] - $c[$i][1]), minor: 0},
+			last_ids: {F: $c[$i][2], L: 0}}
 			| {body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + tojson + " -->\nx"),
 				commit_id: "c\($i + 1)", submitted_at: "2026-11-2\($i + 1)T00:00:00Z", user: {login: "me"}}]
 		+ [{body: ($b | split("\n") | .[1] = $m | join("\n")), commit_id: "c5", submitted_at: "2026-11-27T11:57:47Z",
@@ -228,9 +236,10 @@ expect "PR 8 round 5 as posted: 3 blockers, 5 fixed, nit-loop" \
 	'[[ $rc == 0 && $(round5) == "[3,5,\"fixed fixed\",\"nit-loop\"]" ]]'
 # The same round with its counts damaged: read from its Markdown, with no findings list, so no fixed or open statuses
 # and fixed 0. It never shows fewer blockers than its Markdown (3 Important), never counts F21 or F22 (fixed) as
-# open (its folded Fixed list is no section), and never lowers the ID floor below round 5's F30, even with last_ids
-# gone. Each line: the marker filter, "~", then [open_blocking, fixed, the statuses of F21 and F22 when the list is
-# kept, the label, the ID floor].
+# open (its folded Fixed list is no section), and keeps round 5's last_ids, F30, as its floor. With last_ids gone,
+# every finding the Markdown shows takes a new ID after round 4's F27: F32, more than needed, never fewer. Each line:
+# the marker filter, "~", then [open_blocking, fixed, the statuses of F21 and F22 when the list is kept, the label,
+# the ID floor].
 while IFS='~' read -r filter want; do
 	pr8 "$filter"
 	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
@@ -242,12 +251,13 @@ del(.counts.open_blocking)~[3,0,"","nit-loop",30]
 del(.counts.minor)~[3,0,"","nit-loop",30]
 .counts = {critical: 0, important: 0}~[3,0,"","nit-loop",30]
 .counts.open_blocking = 2~[3,0,"","nit-loop",30]
-del(.last_ids) | .counts = {critical: 0, important: 5}~[3,0,"","nit-loop",30]
-del(.last_ids, .counts) | .findings |= map(if .id == "F28" then .status = "fixed" else . end)~[3,0,"","nit-loop",30]
+del(.last_ids) | .counts = {critical: 0, important: 5}~[3,0,"","nit-loop",32]
+del(.last_ids, .counts) | .findings |= map(if .id == "F28" then .status = "fixed" else . end)~[3,0,"","nit-loop",32]
 T
 # The same round under every marker shape marker_line emits, each the largest that fits as the review grows: full,
 # without titles, without locations, without the Later list, without findings, minimal. Each reads back with the full
-# marker's counts, ID floor and next decision; the minimal marker's counts come from the Markdown, and match.
+# marker's counts, ID floor (F30) and next decision, and the next round's first new finding is F31; the minimal
+# marker's counts come from the Markdown, and match.
 sed -n 2p "$root/tests/fixtures/reviews/pr8-round5.md" | sed 's/^<!-- gh-pr-review:round //; s/ -->$//' |
 	jq '.findings[].title = "Round 5"' >"$stub/r5.json"
 sed 1,2d "$root/tests/fixtures/reviews/pr8-round5.md" >"$stub/review5.md"
@@ -277,6 +287,7 @@ while IFS='~' read -r shape filter; do
 	else
 		expect "marker shape $shape: the full marker's counts, ID floor and decision" '[[ $rc == 0 && $got == "$full" ]]'
 	fi
+	expect "marker shape $shape: the next finding is F31" '[[ $(next_id) == F31 ]]'
 done <<'T'
 full~.
 without titles~del(.findings[].title)
@@ -285,6 +296,16 @@ without the Later list~del(.findings[] | .title, .file, .line, .first_round, .in
 without findings~del(.later, .findings) | .findings_dropped = true
 minimal~{schema: 1, round, findings_dropped: true, last_ids}
 T
+# Two runs both post round 5 with F28–F30: the second, posted later with the minimal marker, is round 6. Its marker's
+# floor is not its own: each of its 5 bullets takes an ID after the first run's F30, so the next finding is F36.
+pr8 .
+jq --rawfile b "$stub/posted5.md" '. + [{body: $b, commit_id: "c5", submitted_at: "2026-11-27T12:30:00Z",
+	user: {login: "me"}}]' "$stub/reviews.json" >"$stub/r.json"
+mv "$stub/r.json" "$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "round 5 posted twice, the second with the minimal marker: round 6 reserves F31–F35, the next finding is F36" \
+	'[[ $rc == 0 && $(jq -c "[.records[4].last_ids.F, .records[5].round, .records[5].last_ids.F]" <<<"$out") == "[30,6,35]" &&
+		$(next_id) == F36 ]]'
 cp "$stub/reviews.saved" "$stub/reviews.json"
 
 # Only trusted reviews are rounds. eve, a contributor, posts a generated review on the PR's head: not a round, so the

@@ -51,11 +51,19 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 			record=$(backfill_record "$review" "$previous" "$round" "$pr") || return 1
 			if [[ -n "$marker" ]]; then
 				# Counts from the Markdown (source backfill), the marker's other facts, no findings list
-				# (findings_dropped), and the IDs the marker held kept as the ID floor.
-				record=$(printf '%s\n%s\n' "$record" "$marker" | jq -cs -L "${LIB_DIR:?}" 'include "records";
-					{F: (map(_last_number("F")) | max), L: (map(_last_number("L")) | max)} as $ids
-					| .[0] + (.[1] | del(.source, .findings, .later, .counts)) + {findings_dropped: true, last_ids: $ids}
-					| del(.findings)') || return 1
+				# (findings_dropped), and the IDs the marker held kept as the ID floor. A marker with last_ids that
+				# claims its own position wrote that floor itself: it is the round's (never below the history's), and
+				# counts.new is the marker's. Otherwise every finding the Markdown shows takes a new ID
+				# (backfill_record), and reconcile_record numbers a round two runs claimed after the floor.
+				record=$(printf '%s\n%s\n%s\n' "$records" "$record" "$marker" |
+					jq -cs -L "${LIB_DIR:?}" --argjson round "$round" 'include "records";
+						.[0] as $earlier | .[2] as $m
+						| ($m.round == $round and ($m.last_ids.F? | type) == "number") as $own
+						| (if $own then [$m, $earlier[]] else .[1:] end) as $from
+						| {F: ($from | map(_last_number("F")) | max), L: (.[1:] | map(_last_number("L")) | max)} as $ids
+						| .[1] + ($m | del(.source, .findings, .later, .counts)) + {findings_dropped: true, last_ids: $ids}
+						| del(.findings)
+						| if $own then .counts.new = (($m.counts.new? | numbers) // null) else . end') || return 1
 			fi
 		fi
 		facts=$(jq -c '({posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}
