@@ -818,6 +818,30 @@ expect "only fixed before: the comeback keeps its ID, regressed and blocking" '[
 run --full
 expect "only fixed before, --full: still watches them" '[[ $(jq -r .mode <<<"$record") == full ]] && grep -q "Check whether an earlier finding came back" "$stub/code-prompt.txt"'
 
+# Round 3 shows an Important for d.js in its Later list only, and its block marks it Later; d.js is in the delta, so
+# the record keeps it as a finding. The empty Important section does not reject the block: the Later list shows it.
+# The record has 1 blocker, and the Yes posts as comment. A Later item that does not show the entry (another file or
+# line) rejects the block: the Markdown leaves the Later list out of its count, so the count is unknown: comment too.
+later_promoted() { # <the Later item's location>
+	local md=$'### Issues\n#### 🚨 Critical (Must Fix Before Merge)\n*(none found)*\n#### ⚠️ Important (Should Fix)\n*(none found)*\n'
+	md+=$'#### 💡 Minor (Nice to Have)\n*(none found)*\n\n<details><summary>Later (1)</summary>\n\n'
+	md+="- **\`$1\`** — retry loop has no bound."$'\n\n</details>\n\n**Ready to merge?** Yes\n\n```json findings\n'
+	md+=$'[{"id":null,"status":"new","severity":"important","file":"d.js","line":2,"title":"retry loop has no bound","in_delta":false,"later":true}]\n```'
+	setup $'**Approach:** Sound' "$md"
+	fixed_only
+	run
+}
+later_promoted d.js:2
+expect "a Later entry in a touched file, shown in the Later list only: the block is used, 1 blocker, comment" \
+	'[[ $rc == 0 && $flag == --comment && $(session_file delta-files.txt) == d.js &&
+		$(jq -c "[.source, .counts.open_blocking, .counts.important, (.later | length), (.findings[] | select(.file == \"d.js\") | .status)]" <<<"$record") == "[\"model\",1,1,0,\"new\"]" ]]'
+for elsewhere in e.js:2 d.js:40; do
+	later_promoted "$elsewhere"
+	expect "a Later entry in a touched file, the Later list shows $elsewhere: parsed, unknown count, comment" \
+		'[[ $rc == 0 && $flag == --comment && $(jq -c "[.source, .counts.open_blocking]" <<<"$record") == "[\"parsed\",null]" ]] &&
+			grep -q "blockers are unknown: posting as comment" "$stub/out.log"'
+done
+
 # A marker cut to fit the size cap: the counts survive, the findings do not. Nothing can be re-checked by ID, so the
 # round reviews the whole PR, as a first code review.
 for capped in '"findings_dropped":true' '"findings_dropped":false'; do

@@ -170,8 +170,12 @@ next round: stop · churning · approach-stuck too-big · Settle the approach be
 
 The Markdown is the cross-check for the model's findings block: it is parsed
 before the block is accepted, and a block that leaves out a blocker the Markdown
-shows, or has one where it says none, is rejected. It is also the source when
-the block is rejected, and for a review without a usable marker. The reader
+shows, or has one where it says none, is rejected. A Later item that can't be
+Later (it is in what changed) is kept as a finding: the Markdown showing it in
+its Later list instead of its severity section is no contradiction. The
+Markdown is also the source when the block is rejected, and for a review
+without a usable marker; when the rejected block had such an item, the
+Markdown can't count it, so the round's blocker count is unknown. The reader
 follows the format the tool asks the model for (the `### Issues` section with
 severity headings, findings as list items, the folded Fixed and Later lists,
 each `<details>` tag on its own line), and is best effort for other Markdown:

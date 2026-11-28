@@ -489,7 +489,7 @@ check "parse_findings: an indented Issues heading and an indented closing headin
 check "parse_findings: 4 spaces are no heading" \
 	"$(printf '### Issues\n#### Minor\n- a\n    ### Notes\n- b\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a","b"]'
 respects() { # round 1 block -> block_respects_empty, judged as stored
-	jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"]; null; null)'
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"]; []; null; null)'
 }
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
 check "block_respects_empty: round 1 fixed, declined and later Criticals are stored as new: open" \
@@ -500,7 +500,7 @@ check "block_respects_empty: other severities are fine" "$(respects '[{"severity
 # entries are judged open.
 fixed_crit='[{"severity":"critical","status":"fixed","file":"a.go","line":10},{"severity":"critical","status":"declined"}]'
 check "block_*: fixed and declined entries from the model's block are judged open" \
-	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | [block_respects_empty(["critical"]; null; null), block_covers_markdown([{severity: "critical", file: "a.go", line: 10}]; null; null)]')" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | [block_respects_empty(["critical"]; []; null; null), block_covers_markdown([{severity: "critical", file: "a.go", line: 10}]; null; null)]')" \
 	'[false,true]'
 stored=$(build_record '{"round":1,"code_review":true}' '[{"severity":"critical","status":"fixed","later":true,"title":"x"}]' null)
 check "build_record: stores a fixed, later entry as the checks judge it: new and open" \
@@ -510,9 +510,31 @@ check "build_record: stores a fixed, later entry as the checks judge it: new and
 for st in '"status":"fixed"' '"status":"declined","reason":"by design"'; do
 	check "block checks: round 3, F1 {$st} is not open" \
 		"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" --argjson b "[{\"id\":\"F1\",$st}]" 'include "records";
-			$b | [block_covers_markdown([{severity: "critical"}]; $base; null), block_respects_empty(["critical"]; $base; null)]')" \
+			$b | [block_covers_markdown([{severity: "critical"}]; $base; null), block_respects_empty(["critical"]; []; $base; null)]')" \
 		'[false,true]'
 done
+
+# Round 3 on prev2, delta t.ts: an Important marked Later in t.ts is promoted to a finding. Under an empty Important
+# section, the Later list showing it (same file, the same line or a range holding it, or no line on either side) is
+# no contradiction; one that shows another file or line is.
+promoted='[{"severity":"important","title":"x","file":"t.ts","line":7,"later":true}]'
+later_md() { printf '### Issues\n#### Important\n*(none found)*\n\n<details><summary>Later (1)</summary>\n\n- **`%s`** — x.\n\n</details>\n' "$1"; }
+respects_later() { # <Later item> -> block_respects_empty for the promoted entry
+	later_md "$1" | jq -c -Rs -L "$LIB_DIR" --argjson b "$promoted" --argjson base "$prev2" --argjson meta "$meta2" 'include "records";
+		. as $md | $b | block_respects_empty($md | empty_severities; $md | later_items; $base; later_files($meta.mode; $meta.delta_files))'
+}
+check "later_items: the Later list's items, with a range's end" \
+	"$(later_md 't.ts:5–9' | jq -c -Rs -L "$LIB_DIR" 'include "records"; later_items')" '[{"file":"t.ts","line":5,"line_end":9}]'
+check "block_respects_empty: a promoted entry the Later list shows (t.ts:7, t.ts:5–9, t.ts) is no contradiction" \
+	"$(respects_later t.ts:7),$(respects_later 't.ts:5–9'),$(respects_later t.ts)" true,true,true
+check "block_respects_empty: a promoted entry the Later list does not show (t.ts:8, u.ts:7) is one" \
+	"$(respects_later t.ts:8),$(respects_later u.ts:7)" false,false
+check "block_promotes: a Later entry in a touched file, not one outside it, nor a status-only earlier ID" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" --argjson meta "$meta2" 'include "records";
+		later_files($meta.mode; $meta.delta_files) as $l
+		| [([{severity: "important", title: "x", file: "t.ts", later: true}] | block_promotes($base; $l)),
+			([{severity: "important", title: "x", file: "z.ts", later: true}] | block_promotes($base; $l)),
+			([{id: "F1", status: "open", later: true}] | block_promotes($base; $l))]')" '[true,false,false]'
 
 # ── entry_outcome: one decision for the record builder and the block checks ────────────────────────────────
 # Round 3 on prev2 (F1 Critical open, a.ts:1), incremental, delta t.ts: stored_findings says what build_record stores.
@@ -734,7 +756,7 @@ check "progress: full without a reason" "$(progress_line "$(jq -c '.mode_reason 
 check "progress: no previous record, nothing" "$(progress_line "$rec" null "$dec")" ""
 # A later round parsed from a Markdown with no severity section: its counts are null, so the line says unknown, and
 # the reader takes no blocker count from it.
-rec=$(build_record "$(jq -c '.no_sections = true' <<<"$meta2")" '[]' "$prev2")
+rec=$(build_record "$(jq -c '.unknown_counts = true' <<<"$meta2")" '[]' "$prev2")
 unknown_line=$(progress_line "$rec" "$prev2" '{"label":"unknown"}')
 check "progress: no severity section, open blocking unknown, never 0" \
 	"$(tail -n 1 <<<"$unknown_line")" "3 not re-checked · open blocking: unknown (was 3) · loop: unknown"

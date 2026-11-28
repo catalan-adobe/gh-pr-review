@@ -314,17 +314,44 @@ def entry_outcome($known; $later_files):
 		{status: "later", severity, file, line, title}
 	else {status: "new", severity, file, line, title} end;
 
+# stored_findings, each entry the model marked Later but entry_outcome stores as a finding (a Later that does not
+# apply: a file the delta touched, a Critical, no file, a full round) with promoted: true.
+def _stored($base; $later_files):
+	_known_findings($base) as $known
+	| [_block_entries[] | .later as $later | entry_outcome($known; $later_files)
+		| select(. != null and .status != "later")
+		| if $later and .status == "new" then . + {promoted: true} else . end];
+
 # A model's findings block as the record stores it (entry_outcome), for the block checks (block_covers_markdown,
 # block_respects_empty), so they never disagree with the record about which entries are open: its findings, without
 # the Later ones (the record keeps those apart). $base: the last code review (null in round 1: every entry is new).
 # The findings a round carries (left out of the block, unverified) are not part of it.
-def stored_findings($base; $later_files):
-	_known_findings($base) as $known
-	| [_block_entries[] | entry_outcome($known; $later_files) | select(. != null and .status != "later")];
+def stored_findings($base; $later_files): _stored($base; $later_files) | map(del(.promoted));
+
+# True when the model's block ($base, $later_files: as for stored_findings) has an entry it marked Later that the
+# record stores as a finding (promoted, _stored). When such a block is rejected, the Markdown, which shows that
+# finding in its Later list, gives no blocker count: the round's count is unknown.
+def block_promotes($base; $later_files): any(_stored($base; $later_files)[]; .promoted == true);
+
+# The items of a review's folded Later list (_lines), as the reader sees them: {file, line, line_end}.
+def later_items:
+	[_lines[] | select(.f == "later") | .l | select(test("^([-*+]|\\d+\\.)\\s+\\S") and (_none_line | not))
+		| _finding(null) | {file, line, line_end}];
+
+# True for a promoted entry the Markdown shows in its Later list ($items: later_items): an item in the same file, at
+# the same line (or a range holding it) when both have one.
+def _shown_later($items):
+	.file as $f | .line as $l
+	| ($f | type) == "string"
+	and any($items[]; .file == $f and (.line == null or $l == null or .line == $l
+		or (.line_end != null and $l >= .line and $l <= .line_end)));
 
 # False when the model's block ($base, $later_files: as for stored_findings) has an open entry, as stored, of a
-# severity the Markdown says it has none of ($empty: empty_severities): the round is parsed instead.
-def block_respects_empty($empty; $base; $later_files): stored_findings($base; $later_files) | _respects_empty($empty);
+# severity the Markdown says it has none of ($empty: empty_severities): the round is parsed instead. A promoted entry
+# the Markdown shows in its Later list ($later: later_items) is no contradiction: the record keeps it as a finding.
+def block_respects_empty($empty; $later; $base; $later_files):
+	_stored($base; $later_files) | map(select((.promoted == true and _shown_later($later)) | not))
+	| _respects_empty($empty);
 
 # True when the model's block ($base, $later_files: as for stored_findings), as stored, shows every blocker the
 # review's Markdown does ($parsed: parse_findings of the posted body; _covers_markdown). Otherwise the round is parsed
@@ -431,9 +458,8 @@ def reconcile_record($earlier; $position):
 # round.json from the run's facts, the findings (block or parser) and the previous record (or null). Round 1
 # findings carry no id or status: all are new. From round 2, see _track. New findings are numbered after
 # $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record. $meta.delta_files: the paths
-# the delta touched (changed_files), for Later. A code review read from a Markdown with no severity section
-# ($meta.no_sections: true) does not say how many blockers it has: its counts are null, so its blocking is unknown,
-# never 0.
+# the delta touched (changed_files), for Later. A code review whose blocker count is unknown ($meta.unknown_counts:
+# true; one read from a Markdown with no severity section, say) gets null counts, so its blocking is unknown, never 0.
 def build_record($meta; $findings; $prev):
 	($meta.code_review != false) as $code_review
 	| ([($meta.id_floor // {}).F | numbers] + [($prev // {}) | _last_number("F")] | max) as $last
@@ -445,7 +471,7 @@ def build_record($meta; $findings; $prev):
 	| def open: select(.status == "open" or .status == "new" or .status == "regressed");
 	def count($s): [$items[] | open | select(.severity == $s)] | length;
 	def status($s): [$items[] | select(.status == $s)] | length;
-	(if $code_review and $meta.no_sections != true then
+	(if $code_review and $meta.unknown_counts != true then
 		{open_blocking: (count("critical") + count("important")), critical: count("critical"),
 			important: count("important"), minor: count("minor"), new: status("new"), fixed: status("fixed"),
 			declined: status("declined"), regressed: status("regressed"), later: ($t.later | length),
@@ -549,7 +575,7 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 			| .[$review.state | strings] // null),
 		posted_at: $review.submitted_at,
 		code_review: $code_review,
-		no_sections: ($body | code_review_part | _sections | length == 0)
+		unknown_counts: ($body | code_review_part | _sections | length == 0)
 	}; (if $code_review then $body | code_review_part | parse_findings else [] end);
 		# An old review says nothing about which earlier findings were fixed: the previous record only numbers the IDs,
 		# so a backfilled round counts what it found, never carries the round before.
