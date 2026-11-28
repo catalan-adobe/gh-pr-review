@@ -1158,7 +1158,8 @@ else
 	cut_findings_block "$REVIEW_FILE" "$REVIEW_BODY_FILE" "$FINDINGS_FILE"
 	CODE_REVIEW=$(cat "$REVIEW_BODY_FILE")
 	# Only a Rethink may post the approach alone; an empty code review is a failed run.
-	if [[ -z "${CODE_REVIEW//[[:space:]]/}" ]]; then
+	# grep, not ${CODE_REVIEW//[[:space:]]/}: bash 3.2 (macOS /bin/bash) takes minutes on a long review with that.
+	if ! grep -q '[^[:space:]]' "$REVIEW_BODY_FILE"; then
 		echo "Error: the code review came back empty — pi may have failed or timed out." >&2
 		echo "    Nothing was posted. Session: ${SESSION_DIR}" >&2
 		echo "    Try another model: --model github-copilot/gpt-5.5" >&2
