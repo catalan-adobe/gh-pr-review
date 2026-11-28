@@ -299,6 +299,12 @@ expect "records: text only in the findings block is not posted" \
 	'[[ $rc == 0 && $body == *"gh-pr-review:round"* && $body != *SECRET* && $body != *secret/plan.md* ]]'
 expect "records: round.json keeps it" '[[ $(jq -r ".source, .findings[0].title" <<<"$record" | paste -sd, -) == "model,SECRET note from the instructions" ]]'
 
+# A code review of only whitespace is a failed run: nothing posted.
+setup $'**Approach:** Sound' $'  \n\t\n   '
+run
+expect "an empty code review: exit 1, nothing posted" \
+	'[[ $rc == 1 && -z $flag ]] && grep -q "the code review came back empty" "$stub/out.log"'
+
 setup $'**Approach:** Sound' "$(head -c 59990 /dev/zero | tr '\0' x)"$'\n\n**Ready to merge?** No'
 run
 expect "records: no room for the marker posts the header only, with a warning" \
