@@ -7,8 +7,9 @@ state_root() {
 	echo "${GH_PR_REVIEW_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/gh-pr-review}"
 }
 
-# Prints the PR's folder: <state_root>/<host>/<owner>/<repo>/<N>. A part that is empty, `.`, `..` or holds a `/`
-# is an error: the folder never leaves the state folder.
+# Prints the PR's folder: <state_root>/<host>/<owner>/<repo>/<N>. GitHub names are case-insensitive, so host, owner
+# and repo are lowercased. A part that is empty, `.`, `..` or holds a `/` is an error: the folder never leaves the
+# state folder.
 pr_state_dir() { # <host> <owner> <repo> <N>
 	local part
 	for part in "$1" "$2" "$3" "$4"; do
@@ -17,7 +18,7 @@ pr_state_dir() { # <host> <owner> <repo> <N>
 			return 1
 		fi
 	done
-	echo "$(state_root)/$1/$2/$3/$4"
+	echo "$(state_root)/$(tr '[:upper:]' '[:lower:]' <<<"$1/$2/$3")/$4"
 }
 
 # Takes the PR's lock: the folder <PR_STATE_DIR>/lock with this process's PID in lock/pid, released on exit. While

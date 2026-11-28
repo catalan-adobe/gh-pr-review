@@ -55,6 +55,9 @@ eq "state_root: XDG_STATE_HOME" "$(XDG_STATE_HOME=/x/state state_root)" "/x/stat
 eq "state_root: GH_PR_REVIEW_STATE wins" "$(XDG_STATE_HOME=/x/state GH_PR_REVIEW_STATE=/y/prs state_root)" "/y/prs"
 eq "pr_state_dir" "$(pr_state_dir github.com o r 42)" "$HOME/.local/state/gh-pr-review/github.com/o/r/42"
 eq "pr_state_dir: with GH_PR_REVIEW_STATE" "$(GH_PR_REVIEW_STATE=/y/prs pr_state_dir h o r 1)" "/y/prs/h/o/r/1"
+eq "pr_state_dir: host, owner and repo lowercased" "$(pr_state_dir GitHub.com Owner Repo 7)" \
+	"$(pr_state_dir github.com owner repo 7)"
+eq "pr_state_dir: lowercase" "$(GH_PR_REVIEW_STATE=/y pr_state_dir H.X MyOrg My-Repo 7)" "/y/h.x/myorg/my-repo/7"
 for bad in .. . '' a/b; do
 	pr_state_dir github.com "$bad" r 1 >/dev/null 2>&1 && rc=0 || rc=$?
 	eq "pr_state_dir: refuses the owner '$bad'" "$rc" 1
