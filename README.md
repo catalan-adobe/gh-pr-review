@@ -109,8 +109,17 @@ point; this PR branches inside the JSON exporter instead ...
 
 ## Artifacts
 
-Each run writes its files to `./pr-review-sessions/pr-review-XXXXX/` in
-your current directory, so you can inspect or re-post later:
+Each PR has one state folder, `<state>/<host>/<owner>/<repo>/<N>/`, where `<state>` is `$GH_PR_REVIEW_STATE`,
+else `${XDG_STATE_HOME:-~/.local/state}/gh-pr-review`:
+
+- `round-<K>/`: the files of the run that posted round K; `preview-<time>/`: a `--no-post` run; `run-<time>/`: a
+  run that is still working, or that ended without posting (an error, exit 6). The run prints its folder.
+- `loop-check.md`: the last loop diagnosis that stopped a run (or `--check`)
+- `lock/`: held while a review of the PR runs, so a second one on this machine is refused; a lock left by a killed
+  run is taken over
+- `pr.json`: facts about the PR kept between runs
+
+A run folder holds:
 
 - `owner-prompt.md` and `approach.md`: the approach pass
 - `prompt.md` and `review.md`: the code review (absent after a Rethink); `review-body.md` is the reply
@@ -119,7 +128,8 @@ your current directory, so you can inspect or re-post later:
 - `context/`: the PR description, the discussion and the inline review threads both passes read
 - `repo/`: the checkout
 
-Add `pr-review-sessions/` to `.gitignore` if you run it inside a repo.
+Earlier versions wrote to `./pr-review-sessions/`; those folders are left alone. The optional config file is
+`${XDG_CONFIG_HOME:-~/.config}/gh-pr-review/config.json`.
 
 ## Round history
 
@@ -131,7 +141,7 @@ the approach and "Ready to merge?" verdicts, and the findings (severity,
 record is saved as `round.json`. The record on GitHub holds only what the
 review already says: a title or path the posted review does not show is left
 out of the marker, and the `--instructions` text and the prompts are never in
-it. `round.json` in the session folder is not filtered: it keeps everything the
+it. `round.json` in the run folder is not filtered: it keeps everything the
 model returned, so inspect it before sharing it.
 
 Not every review that looks generated is a round. Anyone who can comment on
@@ -288,7 +298,7 @@ Rounds are numbered in the order GitHub received them. Just before posting,
 the tool reads the rounds again and compares them, by GitHub review ID, with
 the rounds it started from: if someone posted one while this review ran (or a
 round was deleted, or edited so it is no longer one), it says who, posts
-nothing, keeps the session folder, and exits with code 6, in a terminal too:
+nothing, keeps its `run-<time>` folder, and exits with code 6, in a terminal too:
 run the review again to review on top of the rounds as they are now. If
 the rounds can't be read again (one retry), it posts nothing either, keeps
 the session, and exits with code 1. Two runs that post at the very same

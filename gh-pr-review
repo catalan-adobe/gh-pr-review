@@ -34,6 +34,7 @@
 #   GH_PR_REVIEW_MODEL          Default model override (same as --model)
 #   GH_PR_REVIEW_PI_EXTENSION   Path to a pi extension to load during the review
 #   GH_PR_REVIEW_USER           Default gh account (same as --user)
+#   GH_PR_REVIEW_STATE          State folder (default: ${XDG_STATE_HOME:-~/.local/state}/gh-pr-review)
 #   GITHUB_TOKEN                For private repos (gh auth is usually sufficient)
 
 set -euo pipefail
@@ -348,6 +349,8 @@ fi
 
 # ── resolve owner/repo/PR number ─────────────────────────────────────────────
 resolve_target "$TARGET"
+# The PR's state folder: its runs, its lock, pr.json and the last loop check (lib/state.sh).
+PR_STATE_DIR=$(pr_state_dir "$GH_HOST_NAME" "$OWNER" "$REPO" "$PR_NUM") || exit 1
 
 # ── fetch PR metadata ────────────────────────────────────────────────────────
 echo "🔍  PR #${PR_NUM} — ${OWNER}/${REPO}"
@@ -406,6 +409,7 @@ ID_FLOOR=$(jq -c -L "$LIB_DIR" 'include "records"; id_floor' <<<"$RECORDS")
 
 if [[ "$CHECK_ONLY" == "true" ]]; then
 	if [[ "$CHECK_JSON" == "true" ]]; then echo "$LOOP" >&3; else loop_text "$LOOP"; fi
+	[[ "$LOOP_DECISION" != stop ]] || loop_check_save "$LOOP"
 	case "$LOOP_DECISION" in
 	stop) exit 3 ;;
 	nothing-new) exit 5 ;;
@@ -440,11 +444,13 @@ stop)
 	elif [[ -t 0 && "$YES" == "false" ]]; then
 		read -r -p "Run round ${ROUND} anyway? [y/N] " LOOP_ANSWER
 		[[ "$LOOP_ANSWER" == [Yy]* ]] || {
+			loop_check_save "$LOOP"
 			echo "Stopped by the loop check."
 			exit 3
 		}
 		FORCED=true
 	else
+		loop_check_save "$LOOP"
 		echo "Stopped by the loop check (exit 3). --force-round runs anyway." >&2
 		exit 3
 	fi
@@ -462,9 +468,9 @@ echo "    round: ${ROUND}"
 echo ""
 
 # ── clone + checkout ─────────────────────────────────────────────────────────
-SESSIONS_DIR="$(pwd)/pr-review-sessions"
-mkdir -p "$SESSIONS_DIR"
-SESSION_DIR=$(mktemp -d "${SESSIONS_DIR}/pr-review-XXXXX")
+# One run per PR at a time on this machine; the run works in <PR_STATE_DIR>/run-<time>, renamed when it ends.
+pr_lock || exit 1
+SESSION_DIR=$(run_dir_new) || exit 1
 REVIEW_DIR="${SESSION_DIR}/repo"
 PROMPT_FILE="${SESSION_DIR}/prompt.md"
 OWNER_PROMPT_FILE="${SESSION_DIR}/owner-prompt.md"
@@ -1384,6 +1390,7 @@ posted_record() {
 	fi
 }
 
+POSTED=false
 if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	if [[ -z "$DECISION" && "${APPROACH_VERDICT:-}" == rethink ]]; then
 		DECISION=request-changes
@@ -1538,4 +1545,17 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	fi
 	printf '%s\n' "$COMMENT" >"${SESSION_DIR}/posted.md"
 	echo "✓  Posted → https://${GH_HOST_NAME}/${OWNER}/${REPO}/pull/${PR_NUM}"
+	POSTED=true
 fi
+
+# ── run folder ───────────────────────────────────────────────────────────────
+# Its final name: round-<K> after a post, K the posted record's round; preview-<time> for --no-post. Any other run
+# keeps run-<time>.
+cd "$PR_STATE_DIR"
+if [[ "$POSTED" == true ]]; then
+	K=$(jq -er '.round | numbers' "${RECORD_FILE:-}" 2>/dev/null) || K=$ROUND
+	SESSION_DIR=$(run_dir_finish "$SESSION_DIR" "$K")
+elif [[ "$POST_TO_PR" == false ]]; then
+	SESSION_DIR=$(run_dir_finish "$SESSION_DIR" preview)
+fi
+echo "    Session: ${SESSION_DIR}"

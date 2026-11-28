@@ -9,6 +9,8 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 finished=false
 trap '[[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
+# The state folder is $stub/home/.local/state/gh-pr-review (HOME is $stub/home in every run): never the real one.
+unset XDG_STATE_HOME XDG_CONFIG_HOME GH_PR_REVIEW_STATE
 
 setup() { # approach-output code-review-output [discussion-exit-code] [failing-pass: owner|code]
 	stub=$(mktemp -d)
@@ -54,7 +56,7 @@ case "\$*" in
 *"pr view"*)
 	# record.vanish: the preview round.json, once written, is emptied (the head check right before the post).
 	if [[ -f "$stub/record.vanish" ]]; then
-		for f in "$stub"/work/pr-review-sessions/pr-review-*/round.json; do [[ -f "\$f" ]] && : >"\$f"; done
+		for f in "$stub"/home/.local/state/gh-pr-review/github.com/o/r/1/run-*/round.json; do [[ -f "\$f" ]] && : >"\$f"; done
 	fi
 	n=\$((\$(cat "$stub/heads.n" 2>/dev/null || echo 0) + 1))
 	echo "\$n" >"$stub/heads.n"
@@ -170,8 +172,18 @@ run_tty() { # prompt answer [prompt answer]...: the interactive path, on a termi
 
 fresh() { # each run starts with no model calls, nothing posted and no session
 	: >"$stub/pi.calls"
-	rm -rf "$stub/posted.json" "$stub/heads.n" "$stub/work/pr-review-sessions"
+	rm -rf "$stub/posted.json" "$stub/heads.n" "$stub/home/.local/state"
+	# lock.pid: a run of this PR holds the lock with that PID.
+	if [[ -f "$stub/lock.pid" ]]; then
+		mkdir -p "$(prdir)/lock"
+		cp "$stub/lock.pid" "$(prdir)/lock/pid"
+	fi
 }
+
+# The PR's state folder, and its run folders.
+prdir() { echo "$stub/home/.local/state/gh-pr-review/github.com/o/r/1"; }
+runs() { (cd "$(prdir)" 2>/dev/null && ls -d run-* round-* preview-* 2>/dev/null) | paste -sd' ' -; }
+no_session() { [[ -z $(runs) && ! -e "$stub/work/pr-review-sessions" ]]; }
 
 collect() {
 	calls=$(wc -l <"$stub/pi.calls" | tr -d ' ')
@@ -180,7 +192,7 @@ collect() {
 	flag=$(jq -r '{APPROVE: "--approve", COMMENT: "--comment", REQUEST_CHANGES: "--request-changes"}[.event] // "?"' \
 		"$stub/posted.json" 2>/dev/null || true)
 	commit=$(jq -r '.commit_id' "$stub/posted.json" 2>/dev/null || true)
-	record=$(cat "$stub"/work/pr-review-sessions/pr-review-*/round.json 2>/dev/null || true)
+	record=$(cat "$(prdir)"/*/round.json 2>/dev/null || true)
 }
 
 expect() { # name condition
@@ -222,7 +234,7 @@ setup $'**Approach:** Sound' $' \n'
 run
 expect "empty code review: fails" '[[ $rc != 0 ]]'
 expect "empty code review: nothing posted" '[[ -z $flag ]]'
-expect "empty code review: names the session" 'grep -q "pr-review-sessions/pr-review-" "$stub/out.log"'
+expect "empty code review: names the session" 'grep -q "gh-pr-review/github.com/o/r/1/run-" "$stub/out.log"'
 
 setup 'unused' $'**Ready to merge?** No' 5
 run --skip-approach
@@ -244,7 +256,7 @@ setup $'**Approach:** Sound' "$clean" 0 code
 run
 expect "code review fails: run fails" '[[ $rc != 0 ]]'
 expect "code review fails: nothing posted" '[[ -z $flag ]]'
-expect "code review fails: names the session" 'grep -q "pr-review-sessions/pr-review-" "$stub/out.log"'
+expect "code review fails: names the session" 'grep -q "gh-pr-review/github.com/o/r/1/run-" "$stub/out.log"'
 setup $'**Approach:** Sound' "$clean"
 run --instructions 'Focus on db/ and $(skip) nits'
 expect "instructions: owner prompt gets them" 'grep -qF "Focus on db/ and \$(skip) nits" "$stub/owner-prompt.txt"'
@@ -289,7 +301,24 @@ expect "records: the findings block is not posted" '[[ $rc == 0 && $body != *"js
 expect "records: one round marker is posted" '[[ $(grep -c "gh-pr-review:round" <<<"$body") == 1 ]]'
 expect "records: the marker follows the generated marker" '[[ $body == "<!-- gh-pr-review generated -->"$'"'"'\n'"'"'"<!-- gh-pr-review:round "* ]]'
 expect "records: round.json has the model findings" '[[ $(jq -r ".source, .round, .findings[0].id, .findings[0].file, .preview, .decision" <<<"$record" | paste -sd, -) == "model,1,F1,a.js,false,comment" ]]'
-expect "records: posted.md is the posted body" '[[ -f $(ls -d "$stub"/work/pr-review-sessions/pr-review-*)/posted.md ]]'
+expect "records: posted.md is the posted body" '[[ -f $(prdir)/round-1/posted.md ]]'
+expect "state: a posted run ends in round-1/, the path printed, the lock released" \
+	'[[ $(runs) == round-1 && ! -e $(prdir)/lock ]] && grep -qF "Session: $(prdir)/round-1" "$stub/out.log"'
+sleep 60 &
+live=$!
+echo "$live" >"$stub/lock.pid"
+run
+expect "state: a live lock refuses a second run" \
+	'[[ $rc == 1 && $calls == 0 && -z $flag && $(cat "$(prdir)/lock/pid") == "$live" ]] && no_session &&
+		grep -qF "another review of this PR is running (pid $live)" "$stub/out.log"'
+run --check
+expect "state: --check takes no lock" '[[ $rc == 0 && $(cat "$(prdir)/lock/pid") == "$live" ]]'
+kill "$live"
+wait "$live" 2>/dev/null || true
+run
+expect "state: a stale lock is taken over" \
+	'[[ $rc == 0 && -n $flag && $(runs) == round-1 && ! -e $(prdir)/lock ]] && grep -q "taking over the lock" "$stub/out.log"'
+rm -f "$stub/lock.pid"
 
 # The bullet has no location: a located one must match a block entry's location (block_covers_markdown).
 block=$'```json findings\n[{"severity":"important","file":"secret/plan.md","line":3,"title":"SECRET note from the instructions"}]\n```'
@@ -391,6 +420,8 @@ expect "records: the marker keeps last_ids" '[[ $body == *"\"last_ids\":{\"F\":8
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes\n\n```json findings\n[]\n```'
 run --no-post
 expect "records: --no-post keeps a preview record and posts nothing" '[[ -z $flag && $(jq -r ".preview, .decision" <<<"$record" | paste -sd, -) == "true,null" ]]'
+expect "state: a --no-post run ends in preview-<time>/, the path printed" \
+	'[[ $(runs) =~ ^preview-[0-9]{8}T[0-9]{6}$ ]] && grep -qF "Session: $(prdir)/$(runs)" "$stub/out.log"'
 
 # A jq that breaks the record: it fails, or prints a non-record, when asked to build one; or (posted) it fails the
 # final build of the posted record. Other calls pass through.
@@ -455,7 +486,6 @@ rounds_with() { # blocking per earlier round... -> REST reviews whose markers ca
 comment_by() { # login type -> one issue comment after the last round
 	jq -n --arg login "$1" --arg type "$2" '[{user: {login: $login, type: $type}, created_at: "2026-02-01T00:00:00Z", body: "a reply"}]'
 }
-no_session() { [[ ! -d "$stub/work/pr-review-sessions" ]]; }
 
 setup $'**Approach:** Sound' "$clean"
 rounds_with 9 12 8 10 >"$stub/rest-reviews.json"
@@ -463,6 +493,7 @@ run
 expect "loop stop: exit 3 with -y" '[[ $rc == 3 && $calls == 0 && -z $flag ]]'
 expect "loop stop: no clone" 'no_session'
 expect "loop stop: the diagnosis" 'grep -q "Loop check for round 5: stop" "$stub/out.log"'
+expect "loop stop: the diagnosis in loop-check.md" '[[ $(head -1 "$(prdir)/loop-check.md") == "Loop check for round 5: stop" ]]'
 run_no_y
 expect "loop stop: no terminal, no prompt, exit 3" '[[ $rc == 3 && $calls == 0 ]] && ! grep -q "anyway? \[y/N\]" "$stub/out.log"'
 run --force-round
@@ -491,6 +522,7 @@ expect "loop stop: unreadable comments keep the stop, with a warning" '[[ $rc ==
 echo '[]' >"$stub/rest-comments.json"
 run --check
 expect "--check: stop exits 3 without clone or pi" '[[ $rc == 3 && $calls == 0 ]] && no_session && grep -q "Loop check for round 5: stop" "$stub/out.log"'
+expect "--check: a stop writes loop-check.md" '[[ $(head -1 "$(prdir)/loop-check.md") == "Loop check for round 5: stop" ]]'
 (cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
 	bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --check --json >"$stub/check.json" 2>/dev/null) && rc=0 || rc=$?
 expect "--check --json: stdout is the decision JSON only" '[[ $rc == 3 && $(jq -r ".decision, .label, .next_round" "$stub/check.json" | paste -sd, -) == "stop,churning,5" ]]'
@@ -502,7 +534,7 @@ expect "loop warn: the round runs" '[[ $rc == 0 && $calls == 2 ]]'
 expect "loop warn: the progress line comes right after the markers" '[[ $(sed -n 3p <<<"$body") == "### Round 4 · since round 3" && $body != *"**Loop:**"* ]]'
 expect "loop warn: the decision still comes from Ready to merge" '[[ $flag == --approve ]]'
 run --check
-expect "--check: warn exits 0, no model call" '[[ $rc == 0 && $calls == 0 ]]'
+expect "--check: warn exits 0, no model call, no loop-check.md" '[[ $rc == 0 && $calls == 0 && ! -e $(prdir)/loop-check.md ]]'
 
 setup $'**Approach:** Sound' "$clean"
 rounds_with 2 >"$stub/rest-reviews.json"
@@ -546,6 +578,8 @@ overlap
 run
 expect "overlap, -y: nothing posted, exit 6, session kept" \
 	'[[ $rc == 6 && -z $flag && $(jq -r .preview <<<"$record") == true ]] && grep -q "round 2 by ann" "$stub/out.log"'
+expect "overlap, -y: the run keeps its run-<time>/ folder, and releases the lock" \
+	'[[ $(runs) =~ ^run-[0-9]{8}T[0-9]{6}$ && ! -e $(prdir)/lock ]] && grep -qF "Session: $(prdir)/$(runs)" "$stub/out.log"'
 overlap
 run_tty "Post as review" ""
 expect "overlap, in a terminal: no prompt, nothing posted, exit 6" \
@@ -663,7 +697,7 @@ add_round() { # <record-json> <markdown> -> one more posted round, in the REST r
 		body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + $rec + " -->\n" + $md)}]' \
 		"$stub/discussion.json" >"$stub/d.tmp" && mv "$stub/d.tmp" "$stub/discussion.json"
 }
-session_file() { cat "$stub"/work/pr-review-sessions/pr-review-*/context/"$1" 2>/dev/null; }
+session_file() { cat "$(prdir)"/*/context/"$1" 2>/dev/null; }
 two_rounds() { # round 1 (F1, F2) and round 2 (F1 open, F2 fixed, F3 new), both Sound
 	add_round '{"schema":1,"source":"model","round":1,"head_sha":"'"$H1"'","base_sha":"'"$B1"'","approach":"sound","ready":"no","code_review":true,"findings":[{"id":"F1","severity":"important","status":"new","first_round":1,"file":"a.js","line":3,"title":"thing breaks"},{"id":"F2","severity":"minor","status":"new","first_round":1,"file":"b.js","line":1,"title":"nit"}],"counts":{"open_blocking":1,"critical":0,"important":1,"minor":1}}' \
 		$'### Approach\n\n**Approach:** Sound\n\n### Issues\n- round one'
