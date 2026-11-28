@@ -3,7 +3,7 @@
 # A bare repo plays GitHub: `https://h/o/r.git` points at it through GIT_CONFIG_COUNT, so nothing uses the network.
 # HOME, XDG_CONFIG_HOME, the global and the system git config are isolated from the user's.
 # Conditions are single-quoted on purpose: expect() evals them after each case sets out (and files).
-# SC2034: GIT_AUTH is read by the sourced pick_delta. SC2329: has runs inside expect's eval.
+# SC2034: GIT_AUTH is read by the sourced pick_delta. SC2329: has and patch_text run inside expect's eval.
 # SC2030/SC2031: the cases that break the remote URL do it in a subshell on purpose.
 # shellcheck disable=SC2016,SC2030,SC2031,SC2034,SC2329
 set -euo pipefail
@@ -69,6 +69,8 @@ checkout() { # <depth>: the review checkout, as gh-pr-review clones it. Prints i
 }
 
 has() { git -C "$1" cat-file -e "${2}^{commit}" 2>/dev/null; } # <repo> <sha>
+# One file's patch between two commits, without its index line and its hunk line numbers.
+patch_text() { git -C "$1" diff --no-color "$2" "$3" -- "$4" | sed -e '/^index /d' -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@ @@/'; } # <repo> <from> <to> <path>
 
 ten=$(printf 'line %s\n' 1 2 3 4 5 6 7 8 9 10)
 ten_changed=${ten/line 8/LINE 8}
@@ -199,7 +201,8 @@ commit f1 "a.txt=$ten_changed"
 commit f2 b.txt=old g.txt=dropped-later
 publish
 prev_head=$(src rev-parse HEAD) prev_base=$(src rev-parse main)
-# The base moves: lines above the PR's change in a.txt (new hunk line numbers, same patch), and c.txt.
+# The base moves: lines above the PR's change in a.txt (new hunk line numbers, same patch), and c.txt. c.txt is not
+# the PR's; a.txt is listed all the same: a file the base changed too counts as touched.
 src checkout --quiet main
 commit m2 "a.txt=top"$'\n'"$ten" c.txt=c2
 # The author redoes the PR on the new base: same a.txt change, b.txt changed, d.txt new, g.txt gone.
@@ -218,8 +221,8 @@ expect "rebased: range-diff of the two ranges" \
 	'[[ $(jq -c .commands <<<"$out") == "[\"git range-diff $prev_base..$prev_head $base..$head\"]" ]]'
 expect "rebased: the old head was fetched" 'has "$repo" "$prev_head"'
 files=$(changed_files "$repo" "$out")
-expect "rebased: changed_files, the changed, new and dropped files only" \
-	'[[ $files == "b.txt"$'"'\n'"'"d.txt"$'"'\n'"'"g.txt" ]]'
+expect "rebased: changed_files, the changed, new and dropped files, and a.txt, which the base changed too" \
+	'[[ $files == "a.txt"$'"'\n'"'"b.txt"$'"'\n'"'"d.txt"$'"'\n'"'"g.txt" ]]'
 out=$(pick_delta "$repo" "$prev_head" "" "$head" "$base")
 expect "rebased: no previous base is full" \
 	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,the previous round'"'"'s base is unknown" ]]'
@@ -294,9 +297,31 @@ head=$(git -C "$repo" rev-parse pr-branch)
 base=$(git -C "$repo" merge-base pr-branch origin/main)
 out=$(pick_delta "$repo" "$prev_head" "$prev_base" "$head" "$base")
 expect "moved edit: setup, rebased, and the patches differ only in their line numbers" \
-	'[[ $(jq -r .mode <<<"$out") == rebased && "$(delta_file_patch "$repo" "$prev_base" "$prev_head" x.txt)" == "$(delta_file_patch "$repo" "$base" "$head" x.txt)" ]]'
+	'[[ $(jq -r .mode <<<"$out") == rebased && "$(patch_text "$repo" "$prev_base" "$prev_head" x.txt)" == "$(patch_text "$repo" "$base" "$head" x.txt)" ]]'
 files=$(changed_files "$repo" "$out")
 expect "moved edit: changed_files lists the file" '[[ $files == x.txt ]]'
+
+# The same moved edit, with an unrelated line the base added at the end of x.txt: the base changed the file, so it is
+# listed whatever its two patches look like.
+world
+commit m1 "x.txt=$(blocks 0)"
+src checkout --quiet -b feature
+commit f1 "x.txt=$(blocks 2)"
+publish
+prev_head=$(src rev-parse HEAD) prev_base=$(src rev-parse main)
+src checkout --quiet main
+commit m2 "x.txt=$(blocks 0)"$'\n'"upstream line"
+src checkout --quiet -B feature main
+commit f1 "x.txt=$(blocks 3)"$'\n'"upstream line"
+publish
+repo=$(checkout 50)
+head=$(git -C "$repo" rev-parse pr-branch)
+base=$(git -C "$repo" merge-base pr-branch origin/main)
+out=$(pick_delta "$repo" "$prev_head" "$prev_base" "$head" "$base")
+expect "moved edit, the base changed the file: setup, rebased, the patches differ only in their line numbers" \
+	'[[ $(jq -r .mode <<<"$out") == rebased && "$(patch_text "$repo" "$prev_base" "$prev_head" x.txt)" == "$(patch_text "$repo" "$base" "$head" x.txt)" ]]'
+files=$(changed_files "$repo" "$out")
+expect "moved edit, the base changed the file: changed_files lists the file" '[[ $files == x.txt ]]'
 
 # ── changed_files: git failing is an error, not an empty list ────────────────
 cat >"$tmp/bin/git" <<S

@@ -102,8 +102,9 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 #   incremental  the files changed between the previous head (or `from`) and the head.
 #   rebased      the files whose change in the PR differs between the old and the new version, plus the files the
 #                PR newly touches or no longer touches. A file the base did not change compares its old and new
-#                content. One the base changed compares the two patches, index lines and hunk line numbers ignored,
-#                so the base moving under an unchanged patch does not count (a binary file compares its blob IDs).
+#                content. A file the base changed between the previous base and the new one is always listed: the
+#                PR's edit can move inside it in ways no comparison of the two patches can tell from the base's own
+#                changes, so it counts as touched.
 #   full         nothing.
 # Fails when git cannot list or compare the files: an unknown scope is not an empty one.
 changed_files() { # <repo-dir> <delta-json>
@@ -134,9 +135,6 @@ changed_files() { # <repo-dir> <delta-json>
 				# The base did not touch the file: the two versions of the PR's file say it all, where a moved hunk counts.
 				old=$(delta_blob "$repo" "$prev_head" "$path") || return 1
 				new=$(delta_blob "$repo" "$head" "$path") || return 1
-			else
-				old=$(delta_file_patch "$repo" "$prev_base" "$prev_head" "$path") || return 1
-				new=$(delta_file_patch "$repo" "$base" "$head" "$path") || return 1
 			fi
 			[[ "$old" == "$new" ]] || printf '%s\n' "$path"
 		done <<<"$names"
@@ -206,19 +204,4 @@ delta_blob() { # <repo-dir> <commit> <path>
 		set -o pipefail
 		git --literal-pathspecs -C "$1" ls-tree -z --full-tree "$2" -- "$3" | tr '\0' '\n' | awk -F '\t' 'NR == 1 { print $1 }'
 	)
-}
-
-# One file's patch between two commits, without what moves when the base moves: the `index` line (blob SHAs) and
-# the line numbers of the `@@` hunk headers. A binary file's patch is one "Binary files … differ" line whatever the
-# content, so it gets its `git diff --raw` line instead (modes and full blob IDs). Literal pathspec: a path is a
-# name, never a glob. Fails when git does.
-delta_file_patch() { # <repo-dir> <from> <to> <path>
-	local patch
-	patch=$(git --literal-pathspecs -C "$1" diff --no-color --no-ext-diff --no-textconv --no-renames "$2" "$3" -- "$4") ||
-		return 1
-	if grep -q '^Binary files ' <<<"$patch"; then
-		git --literal-pathspecs -C "$1" diff --raw --no-abbrev --no-renames "$2" "$3" -- "$4"
-	else
-		sed -e '/^index /d' -e 's/^@@ -[0-9,]* +[0-9,]* @@/@@ @@/' <<<"$patch"
-	fi
 }
