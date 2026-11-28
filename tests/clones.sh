@@ -95,7 +95,7 @@ check "config: a shallow entry is skipped" "$(pick h o r)" "scan $HOME/repos/for
 check "config: the skip names the reason" "$(grep -c "skipping the configured clone $HOME/repos/shallow: shallow clone" "$t/notes")" 1
 echo '{' >"$XDG_CONFIG_HOME/gh-pr-review/config.json"
 check "config: an invalid file is an error" "$(pick h o r)" error
-check "config: the error names the file" "$(grep -c "invalid config file (not one JSON value): $XDG_CONFIG_HOME/gh-pr-review/config.json" "$t/notes")" 1
+check "config: the error names the file" "$(grep -c "invalid config file (not one JSON object): $XDG_CONFIG_HOME/gh-pr-review/config.json" "$t/notes")" 1
 
 clone "$t/old-partial"
 git -C "$t/old-partial" config extensions.partialClone origin
