@@ -64,6 +64,8 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--json` | off | With `--check`: print the decision as JSON on stdout |
 | `--force-round` | off | Run a round even when the loop check stops it or nothing changed |
 | `--full` | off | Review the whole PR again, as in round 1. Earlier findings are still re-checked by ID |
+| `--clone <path>` | looked up | Review in a worktree of this local clone (see Artifacts) |
+| `--fresh` | off | Review in a throwaway depth-50 clone in the run folder, as earlier versions did |
 | `--doctor` | — | Check prerequisites and exit |
 
 Environment variables: `GH_PR_REVIEW_MODEL` (default model),
@@ -117,7 +119,16 @@ else `${XDG_STATE_HOME:-~/.local/state}/gh-pr-review`:
 - `loop-check.md`: the last loop diagnosis that stopped a run (or `--check`)
 - `lock/`: held while a review of the PR runs, so a second one on this machine is refused; a lock left by a killed
   run is taken over
-- `pr.json`: facts about the PR kept between runs
+- `pr.json`: facts about the PR kept between runs: its clone, its review worktree, its head branch
+
+The review runs in a worktree of a local clone of the repository, at `<clone>.reviews/<head-branch>/<N>`, reused
+from round to round. The clone is `--clone <path>`, else the config's `clones` map (`{"clones": {"<host>/<owner>/<repo>":
+"<path>"}}`), else the newest-fetched clone with a matching remote under the config's `roots` (default
+`["~/repos"]`), else a cache clone in `~/.cache/gh-pr-review/clones/`. Shallow and partial clones are skipped, with
+a note. The run fetches the PR into `refs/pr-review/<N>/head` and `…/base`, and keeps each posted round's commits as
+`refs/pr-review/<N>/round-<K>`, so a force-push leaves the next round incremental. It changes nothing else in the
+clone: not its branches, remote-tracking refs, `HEAD`, index, stash, config or files. `--fresh` reviews in a
+throwaway clone instead. The run prints the clone it picked.
 
 A run folder holds:
 
@@ -126,7 +137,7 @@ A run folder holds:
   without its findings block, and `findings.json` the block itself
 - `round.json`: the round record (see below); `posted.md`: the exact body posted
 - `context/`: the PR description, the discussion and the inline review threads both passes read
-- `repo/`: the checkout
+- `repo/`: the checkout, with `--fresh` only
 
 Earlier versions wrote to `./pr-review-sessions/`; those folders are left alone. The optional config file is
 `${XDG_CONFIG_HOME:-~/.config}/gh-pr-review/config.json`.

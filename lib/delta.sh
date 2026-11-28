@@ -171,8 +171,9 @@ delta_find() { # <repo-dir> <sha>
 	# --depth only in a shallow clone: in a full one it would cut the history short.
 	if delta_shallow "$1"; then depth=(--depth 50); fi
 	# Same credentials as the clone (GIT_AUTH, when the script set it), no hooks, quiet; errors only mean "missing".
-	git -C "$1" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} -c core.hooksPath=/dev/null \
-		fetch --quiet --no-tags ${depth[@]+"${depth[@]}"} --end-of-options origin "$2" >/dev/null 2>&1 || true
+	# From DELTA_REMOTE, the PR's repository (in a local clone, origin may be a fork), and no FETCH_HEAD in the clone.
+	git -C "$1" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} -c core.hooksPath=/dev/null fetch --quiet --no-tags \
+		--no-write-fetch-head ${depth[@]+"${depth[@]}"} --end-of-options "${DELTA_REMOTE:-origin}" "$2" >/dev/null 2>&1 || true
 	delta_resolve "$1" "$2"
 }
 
@@ -182,8 +183,8 @@ delta_find() { # <repo-dir> <sha>
 delta_connect() { # <repo-dir> <prev-head> <head>
 	delta_shallow "$1" || return 0
 	git -C "$1" merge-base "$2" "$3" >/dev/null 2>&1 && return 0
-	git -C "$1" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} -c core.hooksPath=/dev/null \
-		fetch --quiet --no-tags --deepen 50 --end-of-options origin "$3" >/dev/null 2>&1 || true
+	git -C "$1" ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} -c core.hooksPath=/dev/null fetch --quiet --no-tags \
+		--no-write-fetch-head --deepen 50 --end-of-options "${DELTA_REMOTE:-origin}" "$3" >/dev/null 2>&1 || true
 }
 
 # The paths changed between two commits, one per line. Fails when git does.
