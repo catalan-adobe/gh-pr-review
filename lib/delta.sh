@@ -7,8 +7,10 @@
 #                author merged the base branch in since, the diff starts from the previous head merged onto the new
 #                base (a tree, in the extra field `from`), so what the base brought is left out.
 #   rebased      the previous head is not an ancestor (rebase or force-push): a `git range-diff` of the two ranges.
-#   full         anything else, with a short human reason: a base merge with conflicts, or a base that is not a
-#                descendant of the previous base (the PR was retargeted). The round then reviews the whole PR.
+#   full         anything else, with a short human reason: a base merge with conflicts, a base that is not a
+#                descendant of the previous base (the PR was retargeted), or a previous base that is unknown (a round
+#                read back from its Markdown has none): what the last round reviewed can't be established, so a
+#                retarget can't be ruled out. The round then reviews the whole PR.
 # The previous head and base come from a marker on the PR, which anyone can edit: they count only as full object IDs
 # (40 or 64 hex digits), checked before git sees them. A name (HEAD, main), a short SHA or an option is `full`.
 # The four SHA fields are full SHAs when the checkout has the commit, else as given ("" when unknown); changed_files
@@ -23,7 +25,11 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 		delta_json full "previous head is not a full commit ID" "$prev_head" "$prev_base" "$head" "$base"
 		return 0
 	fi
-	if [[ -n "$prev_base" ]] && ! delta_object_id "$prev_base"; then
+	if [[ -z "$prev_base" ]]; then
+		delta_json full "the previous round's base is unknown" "$prev_head" "$prev_base" "$head" "$base"
+		return 0
+	fi
+	if ! delta_object_id "$prev_base"; then
 		delta_json full "previous base is not a full commit ID" "$prev_head" "$prev_base" "$head" "$base"
 		return 0
 	fi
@@ -39,20 +45,18 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 
 	# The PR's base moved backward or sideways (it was retargeted, say from a parent branch to main): commits that were
 	# base last round are in the PR now, and no diff of the PR's own commits shows them. Only the whole PR does.
-	if [[ -n "$prev_base" ]]; then
-		if sha=$(delta_find "$repo" "$prev_base"); then prev_base=$sha; else
-			delta_json full "previous base ${prev_base:0:12} not found after fetch" "$prev_head" "$prev_base" "$head" "$base"
-			return 0
-		fi
-		if sha=$(delta_resolve "$repo" "$base"); then base=$sha; else
-			delta_json full "base ${base:0:12} not in the checkout" "$prev_head" "$prev_base" "$head" "$base"
-			return 0
-		fi
-		delta_connect "$repo" "$prev_base" "$base"
-		if ! git -C "$repo" merge-base --is-ancestor "$prev_base" "$base" >/dev/null 2>&1; then
-			delta_json full "the PR's base changed" "$prev_head" "$prev_base" "$head" "$base"
-			return 0
-		fi
+	if sha=$(delta_find "$repo" "$prev_base"); then prev_base=$sha; else
+		delta_json full "previous base ${prev_base:0:12} not found after fetch" "$prev_head" "$prev_base" "$head" "$base"
+		return 0
+	fi
+	if sha=$(delta_resolve "$repo" "$base"); then base=$sha; else
+		delta_json full "base ${base:0:12} not in the checkout" "$prev_head" "$prev_base" "$head" "$base"
+		return 0
+	fi
+	delta_connect "$repo" "$prev_base" "$base"
+	if ! git -C "$repo" merge-base --is-ancestor "$prev_base" "$base" >/dev/null 2>&1; then
+		delta_json full "the PR's base changed" "$prev_head" "$prev_base" "$head" "$base"
+		return 0
 	fi
 
 	if git -C "$repo" merge-base --is-ancestor "$prev_head" "$head" >/dev/null 2>&1; then
@@ -81,10 +85,6 @@ pick_delta() { # <repo-dir> <prev-head> <prev-base> <head> <base>
 	fi
 
 	# Rebase or force-push: a plain diff would mix in what the base branch did, so compare the two ranges instead.
-	if [[ -z "$prev_base" ]]; then
-		delta_json full "previous base unknown" "$prev_head" "$prev_base" "$head" "$base"
-		return 0
-	fi
 	old="${prev_base}..${prev_head}"
 	new="${base}..${head}"
 	# Try it before handing it to the reviewer: a range it cannot walk (shallow history, odd ranges) fails here.

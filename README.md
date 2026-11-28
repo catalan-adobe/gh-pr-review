@@ -237,8 +237,9 @@ its number reserved.
 
 When the comparison is not safe, the round is a full review, and it says why:
 the previous head is gone (a force-push), the base branch was merged in with
-conflicts, git cannot list the changed files, or the last round's record lost
-its findings to GitHub's size cap. `--full` asks for one, for example after a
+conflicts, the PR's base changed (a retarget), the last round's base is unknown
+(a review read back from its Markdown), git cannot list the changed files, or
+the last round's record lost its findings to GitHub's size cap. `--full` asks for one, for example after a
 rewrite.
 
 ## Loop check

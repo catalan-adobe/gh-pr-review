@@ -183,6 +183,13 @@ expect "retargeted: full, and it says why" \
 # Retargeted back to parent: the base moved forward from main's m1 to parent's p1, which is fine.
 out=$(pick_delta "$repo" "$prev_head" "$base" "$head" "$prev_base")
 expect "retargeted: a base that moved forward stays incremental" '[[ $(jq -r .mode <<<"$out") == incremental ]]'
+# The same retarget after a round with no known base (a review read back from its Markdown): nothing shows what
+# that round reviewed, so the whole PR is in scope, parent.txt included, not an incremental diff of child.txt.
+out=$(pick_delta "$repo" "$prev_head" "" "$head" "$base")
+expect "previous base unknown: full, and it says why" \
+	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,the previous round'"'"'s base is unknown" && $(jq -c .commands <<<"$out") == "[]" ]]'
+files=$(changed_files "$repo" "$out")
+expect "previous base unknown: no delta files, the whole PR is reviewed" '[[ -z $files ]]'
 
 # ── rebased: onto a moved base, with a changed patch ─────────────────────────
 world
@@ -215,7 +222,7 @@ expect "rebased: changed_files, the changed, new and dropped files only" \
 	'[[ $files == "b.txt"$'"'\n'"'"d.txt"$'"'\n'"'"g.txt" ]]'
 out=$(pick_delta "$repo" "$prev_head" "" "$head" "$base")
 expect "rebased: no previous base is full" \
-	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,previous base unknown" ]]'
+	'[[ $(jq -r .mode,.reason <<<"$out" | paste -sd, -) == "full,the previous round'"'"'s base is unknown" ]]'
 # A git that fails on range-diff only: the round falls back to full and says why.
 real_git=$(command -v git)
 mkdir -p "$tmp/bin"
