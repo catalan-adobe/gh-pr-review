@@ -19,6 +19,8 @@
 #   --force-round   Run a round even when the loop check stops it or nothing changed
 #                   (in a terminal, without -y, both ask "Run round K anyway?" instead)
 #   --full          Review the whole PR again (round 2 and later still re-check the earlier findings)
+#   --clone <path>  Review in a worktree of this local clone (default: found under the config's roots, ~/repos)
+#   --fresh         Review in a throwaway depth-50 clone in the run folder instead of a local clone
 #   --doctor        Check all prerequisites and exit
 #   -h, --help      Show this help
 #
@@ -81,6 +83,8 @@ CHECK_ONLY=false
 CHECK_JSON=false
 FORCE_ROUND=false
 FULL_ROUND=false
+FRESH=false
+CLONE_OVERRIDE=""
 
 # ── arg parsing ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -129,6 +133,18 @@ while [[ $# -gt 0 ]]; do
 		FULL_ROUND=true
 		shift
 		;;
+	--clone)
+		[[ $# -ge 2 && -n "$2" ]] || {
+			echo "Error: --clone requires the path of a local clone" >&2
+			exit 1
+		}
+		CLONE_OVERRIDE="$2"
+		shift 2
+		;;
+	--fresh)
+		FRESH=true
+		shift
+		;;
 	--no-post)
 		POST_TO_PR=false
 		shift
@@ -169,7 +185,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$DOCTOR" == "false" && -z "$TARGET" ]]; then
-	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [--skip-approach] [-y] [--check [--json]] [--force-round] [--full] [--doctor]" >&2
+	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [--skip-approach] [-y] [--check [--json]] [--force-round] [--full] [--clone <path> | --fresh] [--doctor]" >&2
+	exit 1
+fi
+if [[ "$FRESH" == "true" && -n "$CLONE_OVERRIDE" ]]; then
+	echo "Error: --clone and --fresh don't go together" >&2
 	exit 1
 fi
 if [[ "$CHECK_JSON" == "true" && "$CHECK_ONLY" == "false" ]]; then
@@ -368,6 +388,7 @@ PR_TITLE=$(echo "$PR_JSON" | jq -r '.title')
 PR_BODY=$(echo "$PR_JSON" | jq -r '.body // "(no description provided)"')
 PR_AUTHOR=$(echo "$PR_JSON" | jq -r '.author.login')
 BASE_BRANCH=$(echo "$PR_JSON" | jq -r '.baseRefName')
+HEAD_BRANCH=$(echo "$PR_JSON" | jq -r '.headRefName // ""')
 ADDITIONS=$(echo "$PR_JSON" | jq -r '.additions')
 DELETIONS=$(echo "$PR_JSON" | jq -r '.deletions')
 N_FILES=$(echo "$PR_JSON" | jq -r '.changedFiles')
@@ -467,38 +488,54 @@ fi
 echo "    round: ${ROUND}"
 echo ""
 
-# ── clone + checkout ─────────────────────────────────────────────────────────
+# ── review checkout ──────────────────────────────────────────────────────────
 # One run per PR at a time on this machine; the run works in <PR_STATE_DIR>/run-<time>, renamed when it ends.
 pr_lock || exit 1
 SESSION_DIR=$(run_dir_new) || exit 1
-REVIEW_DIR="${SESSION_DIR}/repo"
 PROMPT_FILE="${SESSION_DIR}/prompt.md"
 OWNER_PROMPT_FILE="${SESSION_DIR}/owner-prompt.md"
 APPROACH_FILE="${SESSION_DIR}/approach.md"
 
-echo "⏳  Cloning ${OWNER}/${REPO}..."
-
-# Per-command credential helper: the token never lands in the checkout's .git/config.
+# Per-command credential helper: the token never lands in a clone's .git/config. GIT_AUTH and DELTA_REMOTE are read
+# by lib/clones.sh and lib/delta.sh.
+# shellcheck disable=SC2034
 GIT_AUTH=(-c credential.helper= -c "credential.helper=!gh auth git-credential")
 CLONE_URL="https://${GH_HOST_NAME}/${OWNER}/${REPO}.git"
+# A previous head that is missing is fetched by SHA from the PR's repository (lib/delta.sh), not from a remote name.
+# shellcheck disable=SC2034
+DELTA_REMOTE="$CLONE_URL"
 
-git "${GIT_AUTH[@]}" clone --depth 50 --quiet "$CLONE_URL" "$REVIEW_DIR"
+# The review runs in REVIEW_DIR. CLONE_DIR is the repository it belongs to: a local clone (lib/clones.sh), whose PR
+# refs are refs/pr-review/<N>/* and whose review worktree is <clone>.reviews/<branch>/<N> (lib/worktree.sh); or, with
+# --fresh, a throwaway depth-50 clone in the run folder, which is also REVIEW_DIR. Nothing else in a local clone
+# changes: its branches, remote-tracking refs, HEAD, index, stash, config and working tree stay as they are.
+if [[ "$FRESH" == "true" ]]; then
+	echo "⏳  Cloning ${OWNER}/${REPO}..."
+	CLONE_DIR="${SESSION_DIR}/repo"
+	fresh_checkout "$CLONE_DIR" "$CLONE_URL" "$PR_NUM" "$BASE_BRANCH" || exit 1
+	REVIEW_DIR="$CLONE_DIR"
+	echo "    clone: ${CLONE_DIR} (fresh)"
+else
+	find_clone "$GH_HOST_NAME" "$OWNER" "$REPO" || exit 1
+	echo "    clone: ${CLONE_DIR} (${CLONE_KIND})"
+	echo "⏳  Fetching PR #${PR_NUM} and ${BASE_BRANCH}..."
+	fetch_pr "$CLONE_DIR" "$CLONE_URL" "$PR_NUM" "$BASE_BRANCH" || exit 1
+	HEAD_SHA=$(rgit -C "$CLONE_DIR" rev-parse --verify --quiet "refs/pr-review/${PR_NUM}/head^{commit}") || exit 1
+	review_worktree "$CLONE_DIR" "$PR_NUM" "$HEAD_BRANCH" "$HEAD_SHA" || exit 1
+	REVIEW_DIR="$WORKTREE_DIR"
+	echo "    worktree: ${REVIEW_DIR}"
+fi
 
 cd "$REVIEW_DIR"
-git "${GIT_AUTH[@]}" fetch origin "pull/${PR_NUM}/head:pr-branch" --depth 50 --quiet
-git "${GIT_AUTH[@]}" fetch origin "${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}" --depth 50 --quiet
-git checkout pr-branch --quiet
-
-HEAD_SHA=$(git rev-parse HEAD)
-# A PR branched off more than 50 commits back has no merge-base in the shallow clone: deepen both histories once.
-# One fetch per ref: in a single fetch, git can leave one of them as shallow as it was.
-if ! BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}" 2>/dev/null); then
-	git "${GIT_AUTH[@]}" fetch --quiet --no-tags --deepen 200 origin "pull/${PR_NUM}/head" || true
-	git "${GIT_AUTH[@]}" fetch --quiet --no-tags --deepen 200 origin \
-		"${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}" || true
-	BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}") || {
-		echo "Error: no merge-base between PR head and origin/${BASE_BRANCH} within the" >&2
-		echo "shallow clone (depth 50, deepened by 200). Refusing to review a partial diff." >&2
+HEAD_SHA=$(rgit rev-parse HEAD)
+if ! BASE_SHA=$(review_base "$REVIEW_DIR" "$PR_NUM" 2>/dev/null); then
+	# A local clone has its full history: no merge-base is final. The shallow --fresh clone deepens once first.
+	[[ "$FRESH" == "true" ]] && fresh_deepen "$REVIEW_DIR" "$CLONE_URL" "$PR_NUM" "$BASE_BRANCH"
+	BASE_SHA=$(review_base "$REVIEW_DIR" "$PR_NUM") || {
+		echo "Error: no merge-base between the PR head and ${BASE_BRANCH}." >&2
+		if [[ "$FRESH" == "true" ]]; then
+			echo "Within the shallow clone (depth 50, deepened by 200). Refusing to review a partial diff." >&2
+		fi
 		exit 1
 	}
 fi
@@ -534,8 +571,13 @@ elif [[ "$FINDINGS_KNOWN" != true ]]; then
 elif [[ "$FULL_ROUND" == "true" ]]; then
 	DELTA='{"mode":"full","reason":"--full","commands":[]}'
 else
-	DELTA=$(pick_delta "$REVIEW_DIR" "$(jq -r '.head_sha // ""' <<<"$FINDINGS_BASE")" \
-		"$(jq -r '.base_sha // ""' <<<"$FINDINGS_BASE")" "$HEAD_SHA" "$BASE_SHA") ||
+	# The previous head and base: refs/pr-review/<N>/round-<K> and …-base first (they survive a force-push), then the
+	# record. A --fresh clone has no round refs. pick_delta fetches a missing one by SHA (a round posted before
+	# review worktrees, or from another machine).
+	PREV_SHAS=$(jq -r '.head_sha // "", .base_sha // ""' <<<"$FINDINGS_BASE")
+	[[ "$FRESH" == "true" ]] || PREV_SHAS=$(round_shas "$REVIEW_DIR" "$PR_NUM" "$BASE_ROUND" \
+		"$(sed -n 1p <<<"$PREV_SHAS")" "$(sed -n 2p <<<"$PREV_SHAS")")
+	DELTA=$(pick_delta "$REVIEW_DIR" "$(sed -n 1p <<<"$PREV_SHAS")" "$(sed -n 2p <<<"$PREV_SHAS")" "$HEAD_SHA" "$BASE_SHA") ||
 		DELTA='{"mode":"full","reason":"could not compare with the last round","commands":[]}'
 fi
 # delta-files.txt: the files the changes touched, for rule 3. A list git could not give is no proof that the other
@@ -1554,6 +1596,10 @@ fi
 cd "$PR_STATE_DIR"
 if [[ "$POSTED" == true ]]; then
 	K=$(jq -er '.round | numbers' "${RECORD_FILE:-}" 2>/dev/null) || K=$ROUND
+	# The reviewed commits, kept in the clone as round K: the next round compares with them after a force-push too.
+	if [[ "$FRESH" == false ]] && ! mark_round "$CLONE_DIR" "$PR_NUM" "$K" "$HEAD_SHA" "$BASE_SHA"; then
+		echo "Warning: could not set refs/pr-review/${PR_NUM}/round-${K} in ${CLONE_DIR}" >&2
+	fi
 	SESSION_DIR=$(run_dir_finish "$SESSION_DIR" "$K")
 elif [[ "$POST_TO_PR" == false ]]; then
 	SESSION_DIR=$(run_dir_finish "$SESSION_DIR" preview)

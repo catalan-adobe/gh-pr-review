@@ -101,6 +101,7 @@ S
 	cat >"$stub/bin/pi" <<S
 #!/usr/bin/env bash
 echo call >>"$stub/pi.calls"
+pwd >"$stub/pi.pwd"
 if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] && exit 7
 	printf '%s' "\${*: -1}" >"$stub/owner-prompt.txt"; cat "$stub/approach.out"; else
 	[[ "${4:-}" == code ]] && exit 7
@@ -115,17 +116,18 @@ S
 	chmod +x "$stub/bin/"*
 }
 
+# Every run is --fresh, a clone in the run folder, so the stub git stays simple; run_local reviews in a local clone.
 run() { # extra args... (always -y; run_no_y for the interactive path, with no terminal on stdin)
 	fresh
 	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
-		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 -y "$@" >"$stub/out.log" 2>&1) && rc=0 || rc=$?
+		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --fresh -y "$@" >"$stub/out.log" 2>&1) && rc=0 || rc=$?
 	collect
 }
 
 run_no_y() { # no extra args: the interactive path, with no terminal on stdin
 	fresh
 	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
-		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 </dev/null >"$stub/out.log" 2>&1) && rc=0 || rc=$?
+		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --fresh </dev/null >"$stub/out.log" 2>&1) && rc=0 || rc=$?
 	collect
 }
 
@@ -163,7 +165,7 @@ run_tty() { # prompt answer [prompt answer]...: the interactive path, on a termi
 		cd "$stub/work" || exit 1
 		code=0
 		HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
-			in_tty bash "$root/gh-pr-review" https://github.com/o/r/pull/1 >"$stub/out.log" 2>&1 || code=$?
+			in_tty bash "$root/gh-pr-review" https://github.com/o/r/pull/1 --fresh >"$stub/out.log" 2>&1 || code=$?
 		touch "$stub/tty.done"
 		exit "$code"
 	) && rc=0 || rc=$?
@@ -285,7 +287,7 @@ expect "blank instructions: fails before any model call" '[[ $rc != 0 && $calls 
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 touch "$stub/git.far-base"
 run
-expect "merge-base past the depth: deepens the PR and the base once, then reviews" '[[ $rc == 0 && $calls == 2 && $(grep -c -- "--deepen 200" "$stub/git.deepened") == 2 ]] && grep -q "pull/1/head" "$stub/git.deepened" && grep -q "main:refs/remotes/origin/main" "$stub/git.deepened"'
+expect "merge-base past the depth: deepens the PR and the base once, then reviews" '[[ $rc == 0 && $calls == 2 && $(grep -c -- "--deepen 200" "$stub/git.deepened") == 2 ]] && grep -q "+refs/pull/1/head:refs/pr-review/1/head" "$stub/git.deepened" && grep -q "+refs/heads/main:refs/pr-review/1/base" "$stub/git.deepened"'
 expect "merge-base past the depth: the deepen uses the credential helper" '[[ $(grep -c "credential.helper=!gh auth git-credential" "$stub/git.deepened") == 2 ]]'
 setup $'**Approach:** Sound' $'**Ready to merge?** Yes'
 echo never >"$stub/git.far-base"
@@ -1436,6 +1438,66 @@ expect "record failed in round 3: round 4 has no previous-round rules and no pre
 		[[ -z $(session_file previous-findings.md) ]]'
 expect "record failed in round 3: round 4, a clean full review, approves" \
 	'[[ $flag == --approve && $(jq -c "[.counts.open_blocking, .decision]" <<<"$record") == "[0,\"approve\"]" ]]'
+
+# ── a local clone, with real git ──
+# The stub git goes: https://github.com/o/r.git is a local bare repo (insteadOf), and ~/repos/r its clone.
+run_local() { # [extra args...]: a run without --fresh
+	fresh
+	(cd "$stub/work" && HOME="$stub/home" PATH="$stub/bin:$PATH" GH_PR_REVIEW_USER='' \
+		bash "$root/gh-pr-review" https://github.com/o/r/pull/1 -y "$@" >"$stub/out.log" 2>&1) && rc=0 || rc=$?
+	collect
+}
+setup $'**Approach:** Sound' "$r1"
+rm "$stub/bin/git"
+export GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.file://$stub/remote.git.insteadOf" GIT_CONFIG_VALUE_0=https://github.com/o/r.git
+seed() { git -C "$stub/seed" "$@"; }
+git init -q -b main "$stub/seed"
+echo one >"$stub/seed/a.js"
+seed add a.js
+seed commit -q -m one
+seed checkout -q -b h
+echo two >>"$stub/seed/a.js"
+seed commit -q -am two
+git init -q --bare -b main "$stub/remote.git"
+seed push -q "$stub/remote.git" main h h:refs/pull/1/head
+clone="$stub/home/repos/r"
+git clone -q https://github.com/o/r.git "$clone"
+mine() { # my clone's branches, HEAD, remote-tracking refs and status
+	git -C "$clone" for-each-ref --format='%(refname) %(objectname)' | grep -v '^refs/pr-review/' || true
+	git -C "$clone" symbolic-ref HEAD
+	git -C "$clone" status --porcelain
+}
+before=$(mine)
+LH1=$(seed rev-parse h) LB1=$(seed rev-parse main)
+echo "$LH1" >"$stub/heads"
+wt="$stub/home/repos/r.reviews/h/1"
+run_local
+expect "local clone: found by the scan" '[[ $rc == 0 ]] && grep -qF "clone: $clone (scan)" "$stub/out.log"'
+expect "local clone: pi runs in the review worktree, at the PR head" \
+	'[[ $(cat "$stub/pi.pwd") == "$wt" && $(git -C "$wt" rev-parse HEAD) == "$LH1" && $commit == "$LH1" ]]'
+expect "local clone: a posted round sets refs/pr-review/1/round-1 and its base" \
+	'[[ $(git -C "$clone" rev-parse refs/pr-review/1/round-1 refs/pr-review/1/round-1-base | paste -sd, -) == "$LH1,$LB1" ]]'
+expect "local clone: my branches, HEAD, origin refs and status are unchanged" '[[ $(mine) == "$before" ]]'
+post_back "$LH1" 2026-06-01T10:00:00Z
+# The author rebases onto a new main commit and force-pushes.
+seed checkout -q main
+echo base >"$stub/seed/b.js"
+seed add b.js
+seed commit -q -m base
+seed checkout -q h
+seed rebase -q main
+seed push -q -f "$stub/remote.git" main h h:refs/pull/1/head
+LH2=$(seed rev-parse h)
+echo "$LH2" >"$stub/heads"
+printf '%s' "$r2" >"$stub/review.out"
+run_local --clone "$clone/"
+expect "local clone: round 2 after a force-push is rebased, in the same worktree" \
+	'grep -qF "clone: $clone (override)" "$stub/out.log" && [[ $rc == 0 && $(jq -r ".round, .mode" <<<"$record" | paste -sd, -) == "2,rebased" && $(cat "$stub/pi.pwd") == "$wt" ]] &&
+		grep -qF "git range-diff $LB1..$LH1" "$stub/code-prompt.txt"'
+expect "local clone: round-1 keeps the old head, round-2 the new one" \
+	'[[ $(git -C "$clone" rev-parse refs/pr-review/1/round-1 refs/pr-review/1/round-2 | paste -sd, -) == "$LH1,$LH2" ]]'
+expect "local clone: still unchanged after two rounds" '[[ $(mine) == "$before" ]]'
 
 finished=true
 exit "$fail"

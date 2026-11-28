@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# Checks fetch_pr, branch_slug, review_worktree, mark_round and fresh_checkout with real git. No network:
+# Checks fetch_pr, branch_slug, review_worktree, mark_round, round_shas and fresh_checkout with real git. No network:
 # https://h/o/r.git points at a local bare repo through url.<path>.insteadOf.
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
-for lib in config state clones worktree; do
+for lib in config state clones worktree delta; do
 	# shellcheck source=/dev/null
 	source "$root/lib/$lib.sh"
 done
@@ -13,11 +13,10 @@ t=$(cd "$t" && pwd -P)
 export HOME="$t/home" XDG_STATE_HOME="$t/state" XDG_CONFIG_HOME="$t/config"
 export GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
 export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.file://$t/remote.git.insteadOf" GIT_CONFIG_VALUE_0=https://h/o/r.git
-unset GH_PR_REVIEW_STATE GIT_DIR GIT_WORK_TREE GH_USER
+unset GH_PR_REVIEW_STATE GIT_DIR GIT_WORK_TREE GH_USER DELTA_REMOTE
 mkdir -p "$HOME"
 url=https://h/o/r.git
 fail=0
-RUN_WARNINGS=()
 
 check() { # name got want
 	if [[ "$2" == "$3" ]]; then echo "ok   $1"; else
@@ -83,12 +82,14 @@ wt="$t/repos/r.reviews/feat-x/7"
 check "round 1: the worktree path" "$WORKTREE_DIR" "$wt"
 check "round 1: detached at the PR head" "$(git -C "$wt" rev-parse HEAD) $(git -C "$wt" symbolic-ref -q HEAD || echo detached)" "$head1 detached"
 check "round 1: the files are there" "$(cat "$wt/f")" $'one\ntwo'
-check "round 1: no warning" "${#RUN_WARNINGS[@]}" 0
+check "round 1: no warning" "$(cat "$t/err")" ""
 check "round 1: my clone is unchanged" "$(snapshot)" "$before"
 check "round 1: pr.json" "$(jq -c '[.clone, .worktree, .head_branch, .user]' "$PR_STATE_DIR/pr.json")" \
 	"$(jq -nc --arg c "$clone" --arg w "$wt" '[$c, $w, "feat/x", ""]')"
 check "review_base" "$(review_base "$wt" 7)" "$base1"
 mark_round "$clone" 7 1 "$head1"
+check "mark_round: refuses a name for a commit" "$(mark_round "$clone" 7 2 HEAD 2>&1 >/dev/null | grep -c 'not a PR number')" 1
+check "mark_round: refuses a round that is not a number" "$(mark_round "$clone" 7 '../x' "$head1" 2>/dev/null || echo refused)" refused
 check "mark_round: round-1" "$(git -C "$clone" rev-parse refs/pr-review/7/round-1)" "$head1"
 check "mark_round: round-1-base" "$(git -C "$clone" rev-parse refs/pr-review/7/round-1-base)" "$base1"
 
@@ -106,13 +107,19 @@ git -C "$clone" -c gc.reflogExpire=now -c gc.reflogExpireUnreachable=now gc -q -
 check "force-push: head moved" "$(git -C "$clone" rev-parse refs/pr-review/7/head)" "$head2"
 check "force-push: round-1 keeps the old head" "$(git -C "$clone" rev-parse 'refs/pr-review/7/round-1^{commit}')" "$head1"
 check "force-push: round-1-base keeps the old base" "$(git -C "$clone" rev-parse 'refs/pr-review/7/round-1-base^{commit}')" "$base1"
-# pick_delta (PR 2) says `rebased` when both previous SHAs exist and the old head is not an ancestor of the new one.
-check "force-push: the delta is rebased, not full" \
-	"$(git -C "$clone" merge-base --is-ancestor "$head1" "$head2" && echo incremental || echo rebased)" rebased
 review_worktree "$clone" 7 feat/x "$head2" 2>"$t/err"
 check "round 2: the same folder" "$WORKTREE_DIR" "$wt"
 check "round 2: moved to the new head" "$(git -C "$wt" rev-parse HEAD)" "$head2"
-check "round 2: no warning" "${#RUN_WARNINGS[@]}" 0
+check "round 2: no warning" "$(cat "$t/err")" ""
+# A record without a base (read back from its Markdown) is full under #9's rule; the round refs make it rebased.
+check "force-push: without the refs, no base is full" "$(pick_delta "$wt" "$head1" "" "$head2" "$base2" | jq -r .mode)" full
+prev=$(round_shas "$wt" 7 1 "$head1" "")
+check "round_shas: the refs, the base from round-1-base" "$prev" "$head1"$'\n'"$base1"
+check "round_shas: no ref, the record" "$(round_shas "$wt" 7 5 "$head2" x)" "$head2"$'\nx'
+check "round_shas: a ref that disagrees with the record, the record" "$(round_shas "$wt" 7 1 "$head2" x)" "$head2"$'\nx'
+check "round_shas: a round that is not a number, the record" "$(round_shas "$wt" 7 '1/../1' "" y)" $'\ny'
+delta=$(DELTA_REMOTE=$url pick_delta "$wt" "$(sed -n 1p <<<"$prev")" "$(sed -n 2p <<<"$prev")" "$head2" "$(review_base "$wt" 7)")
+check "force-push: pick_delta is rebased, not full" "$(jq -r .mode <<<"$delta")" rebased
 
 # ── a dirty worktree, and a renamed branch ──
 echo junk >>"$wt/f"
@@ -121,11 +128,9 @@ echo x >"$wt/new/untracked"
 review_worktree "$clone" 7 feat/renamed "$head2" 2>"$t/err"
 check "dirty: reset" "$(git -C "$wt" status --porcelain)" ""
 check "dirty: untracked files removed" "$([[ -e "$wt/new" ]] && echo there || echo gone)" gone
-check "dirty: a run warning" "${RUN_WARNINGS[*]}" "worktree was dirty"
-check "dirty: said on stderr" "$(grep -c 'worktree was dirty' "$t/err")" 1
+check "dirty: a warning that names the folder" "$(grep -c "review worktree was dirty; resetting it: $wt" "$t/err")" 1
 check "renamed branch: the worktree from pr.json" "$WORKTREE_DIR" "$wt"
 check "renamed branch: pr.json head_branch" "$(PR_STATE_DIR="$PR_STATE_DIR" pr_json_get head_branch)" feat/renamed
-RUN_WARNINGS=()
 
 # ── my own PR: its branch is checked out in my clone ──
 git -C "$clone" -c core.hooksPath=/dev/null checkout -q -b feat/x origin/feat/x
@@ -141,6 +146,13 @@ check "own PR: my clone is unchanged" "$(snapshot)" "$before"
 PR_STATE_DIR="$t/state/h/o/r/10"
 review_worktree "$clone" 10 main "$head1" 2>"$t/err"
 check "fork main: path" "$WORKTREE_DIR" "$t/repos/r.reviews/main/10"
+
+# ── a 200-character head branch with spaces and unicode ──
+PR_STATE_DIR="$t/state/h/o/r/11"
+review_worktree "$clone" 11 "$long/ünï cödé" "$head1" 2>"$t/err"
+check "long unicode branch: path" "$WORKTREE_DIR" "$t/repos/r.reviews/${long:0:60}/11"
+check "long unicode branch: pr.json keeps the name" "$(pr_json_get head_branch)" "$long/ünï cödé"
+check "a name is not a commit ID" "$(review_worktree "$clone" 11 x HEAD 2>&1 | grep -c 'not a commit ID')" 1
 
 # ── a folder in the way ──
 PR_STATE_DIR="$t/state/h/o/r/9"
@@ -177,6 +189,8 @@ check "fetch: a ref lock is retried" "$rc:$(git -C "$clone" rev-parse refs/pr-re
 fetch_pr "$clone" "$url" 99 main 2>"$t/err" && rc=0 || rc=$?
 check "fetch: a missing PR fails" "$rc" 1
 check "fetch: the error names the PR" "$(grep -c 'could not fetch PR #99' "$t/err")" 1
+
+check "my clone is unchanged after every step" "$(snapshot)" "$before"
 
 # ── --fresh ──
 fresh_checkout "$t/fresh" "$url" 7 main
