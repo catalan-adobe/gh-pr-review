@@ -90,9 +90,25 @@ eq "lock: taken over after the PID is gone" "$(sed -n 1p <<<"$got")" \
 [[ "$(sed -n 2p <<<"$got")" =~ ^held\ by\ ([0-9]+)\ =\ ([0-9]+)$ && ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]] &&
 	ok=yes || ok=no
 eq "lock: the new run holds it" "$ok $(sed -n 3p <<<"$got")" "yes rc=0"
+got=$(lock_in 'ls "$PR_STATE_DIR/lock"')
+eq "lock: the pid file alone, no temp file left" "$got" "pid
+rc=0"
+# A lock folder whose pid file is still being written: the run waits for it, then is refused.
+mkdir -p "$PR_STATE_DIR/lock"
+lock_in 'echo ran' >"$tmp/bg" &
+bg=$!
+sleep 0.5
+echo "$$" >"$PR_STATE_DIR/lock/pid"
+wait "$bg"
+eq "lock: one whose pid file comes within the wait is not taken over" "$(tail -1 "$tmp/bg") $(cat "$PR_STATE_DIR/lock/pid")" \
+	"rc=1 $$"
+rm -rf "$PR_STATE_DIR/lock"
+# A lock folder that stays without a pid file past the wait: taken over.
 mkdir -p "$PR_STATE_DIR/lock"
 got=$(lock_in 'echo ran')
-eq "lock: one without a PID is taken over" "$(sed -n 2,3p <<<"$got")" "ran
+eq "lock: one that stays without a PID is taken over" "$got" \
+	"Note: taking over the lock of a run that is gone (pid unknown): $PR_STATE_DIR/lock
+ran
 rc=0"
 mkdir -p "$PR_STATE_DIR/lock"
 echo "$$" >"$PR_STATE_DIR/lock/pid"

@@ -22,12 +22,18 @@ pr_state_dir() { # <host> <owner> <repo> <N>
 }
 
 # Takes the PR's lock: the folder <PR_STATE_DIR>/lock with this process's PID in lock/pid, released on exit. While
-# the PID in a lock is alive, another run is refused. A lock whose PID is gone (a killed run) is taken over.
+# the PID in a lock is alive, another run is refused. A lock whose PID is gone (a killed run) is taken over. A lock
+# without a pid file may be one another run is still writing: it is taken over only when it stays so for ~2 s.
 pr_lock() {
-	local lock="${PR_STATE_DIR:?}/lock" pid
+	local lock="${PR_STATE_DIR:?}/lock" pid n=0
 	mkdir -p "$PR_STATE_DIR" || return 1
 	if ! mkdir "$lock" 2>/dev/null; then
 		pid=$(cat "$lock/pid" 2>/dev/null || true)
+		while [[ -z "$pid" && -d "$lock" && $n -lt 20 ]]; do
+			sleep 0.1
+			n=$((n + 1))
+			pid=$(cat "$lock/pid" 2>/dev/null || true)
+		done
 		if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
 			echo "Error: another review of this PR is running (pid $pid). Lock: $lock" >&2
 			return 1
@@ -39,7 +45,12 @@ pr_lock() {
 			return 1
 		}
 	fi
-	echo "$$" >"$lock/pid"
+	# Written whole, then moved in: a reader never sees a partial pid file.
+	if ! { echo "$$" >"$lock/pid.$$" && mv "$lock/pid.$$" "$lock/pid"; }; then
+		rm -rf "$lock"
+		echo "Error: could not write the lock: $lock" >&2
+		return 1
+	fi
 	trap pr_unlock EXIT
 }
 
