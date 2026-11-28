@@ -1115,6 +1115,37 @@ expect "only the pre-post blocker-count check fails: event, marker and round.jso
 		$(jq -c "[.decision, .preview]" <<<"$record") == "[\"comment\",false]" ]] &&
 		grep -q "blockers are unknown: posting as comment" "$stub/out.log"'
 rm "$stub/bin/jq"
+# An automatic approve needs a successful check that the count is 0, not only a number. Round 3 says Yes with F3, a
+# Critical, still open (1 blocker, ready_overridden). The lookup of ready_overridden fails: the count check still
+# comments. When the first count check wrongly passes too, the final one, on the posted record, does. An approve
+# chosen stays.
+yes_open=$'**Ready to merge?** Yes\n\n```json findings\n[{"id":"F3","status":"open","severity":"critical","file":"c.js","line":9,"title":"data loss","in_delta":false,"later":false},{"id":"F1","status":"fixed","in_delta":false,"later":false}]\n```'
+setup $'**Approach:** Sound' "$yes_open"
+two_rounds
+cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == '.ready_overridden == true' ]] && exit 5; done
+exec "$(command -v jq)" "\$@"
+S
+chmod +x "$stub/bin/jq"
+run
+expect "the ready_overridden lookup fails, 1 blocker open: comments, not approve" \
+	'[[ $rc == 0 && $flag == --comment && $(jq -c "[.source, .counts.open_blocking, .decision]" <<<"$record") == "[\"model\",1,\"comment\"]" ]] &&
+		grep -q "But 1 blocking findings are still open: posting as comment" "$stub/out.log"'
+cat >"$stub/bin/jq" <<S
+#!/usr/bin/env bash
+for a in "\$@"; do [[ "\$a" == '.ready_overridden == true' ]] && exit 5; done
+if [[ "\$*" == *'.counts.open_blocking == 0'* && "\${*: -1}" == *round.json ]]; then exit 0; fi
+exec "$(command -v jq)" "\$@"
+S
+run
+expect "only the pre-post check sees the 1 open blocker: event, marker and round.json all say comment" \
+	'[[ $rc == 0 && $flag == --comment &&
+		$(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" | jq -c "[.decision, .counts.open_blocking]") == "[\"comment\",1]" &&
+		$(jq -c "[.decision, .preview]" <<<"$record") == "[\"comment\",false]" ]]'
+rm "$stub/bin/jq"
+run --decision approve
+expect "1 open blocker, approve chosen: stays an approval" '[[ $rc == 0 && $flag == --approve ]]'
 
 # ── the review is bound to the commit it read
 setup $'**Approach:** Sound' "$clean"
