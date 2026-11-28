@@ -10,7 +10,8 @@ pi_bin() { # <dir>
 }
 
 # Runs a command (pi) in the sandbox: the wrapper in <bin-dir> first on PATH, the real git (the git on PATH now) in
-# GH_PR_REVIEW_REAL_GIT, no credential helper, no hooks, no password prompt and no ssh.
+# GH_PR_REVIEW_REAL_GIT, no credential helper, no hooks, no password prompt, no ssh, and no optional locks: `git status`
+# does not rewrite the index.
 pi_env() { # <bin-dir> <command> [args...]
 	local bin=$1 real
 	shift
@@ -21,13 +22,14 @@ pi_env() { # <bin-dir> <command> [args...]
 	env PATH="$bin:$PATH" GH_PR_REVIEW_REAL_GIT="$real" \
 		GIT_CONFIG_COUNT=2 GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0= \
 		GIT_CONFIG_KEY_1=core.hooksPath GIT_CONFIG_VALUE_1=/dev/null \
-		GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false SSH_ASKPASS=false GIT_SSH_COMMAND=false "$@"
+		GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=false SSH_ASKPASS=false GIT_SSH_COMMAND=false \
+		GIT_OPTIONAL_LOCKS=0 "$@"
 }
 
 # What the reviewer must not change. worktree.txt: the review worktree's HEAD (commit and branch) and status.
 # clone.txt: the clone's refs but refs/pr-review/, its HEAD and its stash. Errors go in the files: they compare too.
 tripwire_snapshot() { # <clone> <worktree> <out-dir>
-	local g=(-c core.hooksPath=/dev/null -c core.fsmonitor=false)
+	local g=(--no-optional-locks -c core.hooksPath=/dev/null -c core.fsmonitor=false)
 	mkdir -p "$3"
 	{
 		echo "HEAD $(git -C "$2" "${g[@]}" rev-parse HEAD 2>&1)"

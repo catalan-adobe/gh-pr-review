@@ -89,6 +89,25 @@ pi_env "$t/bin" bash -c 'cd "$1" && "$GH_PR_REVIEW_REAL_GIT" commit -q --allow-e
 expect "pi_env: a hook does not run" '[[ ! -e "$t/hook.ran" ]]'
 git -C "$t/hooked" commit -q --allow-empty -m h
 expect "pi_env: the hook runs outside it (control)" '[[ -e "$t/hook.ran" ]]'
+# An index whose stat info is stale: `git status` refreshes it and writes it back, unless optional locks are off.
+stale() { # <repo> <n>: a different mtime each time, so the index is stale again even after a rewrite
+	touch -t "20000101000$2" "$1/f"
+	cksum <"$1/.git/index"
+}
+idx="$t/idx"
+git init -q "$idx"
+echo 1 >"$idx/f"
+git -C "$idx" add f
+git -C "$idx" commit -qm c
+sum=$(stale "$idx" 1)
+pi_env "$t/bin" bash -c 'cd "$1" && git status >/dev/null' _ "$idx"
+expect "pi_env: git status leaves a stale index unchanged" '[[ "$(cksum <"$idx/.git/index")" == "$sum" ]]'
+sum=$(stale "$idx" 2)
+tripwire_snapshot "$idx" "$idx" "$t/snap-idx"
+expect "tripwire: its snapshot leaves a stale index unchanged" '[[ "$(cksum <"$idx/.git/index")" == "$sum" ]]'
+sum=$(stale "$idx" 3)
+git -C "$idx" status >/dev/null
+expect "pi_env: git status rewrites the stale index outside it (control)" '[[ "$(cksum <"$idx/.git/index")" != "$sum" ]]'
 expect "pi_env: the wrapper is git on PATH" '[[ "$(pi_env "$t/bin" bash -c "command -v git")" == "$t/bin/git" ]]'
 expect "pi_env: real git is the git outside it" '[[ "$(pi_env "$t/bin" printenv GH_PR_REVIEW_REAL_GIT)" == "$real" ]]'
 
