@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+# git for the reviewer: pi finds it as `git` first on its PATH (pi_env in lib/guard.sh). It runs the real git
+# (GH_PR_REVIEW_REAL_GIT) for the commands that only read, and refuses the rest. A guard rail, not a wall: the
+# tripwire around each pi call catches what gets past it.
+set -euo pipefail
+
+real=${GH_PR_REVIEW_REAL_GIT:-}
+if [[ -z "$real" || ! -x "$real" ]]; then
+	echo "git-ro: GH_PR_REVIEW_REAL_GIT does not name a git to run" >&2
+	exit 1
+fi
+
+# The subcommand: the first argument after the global options. Any other option before it is refused.
+i=1 sub=""
+while [[ $i -le $# ]]; do
+	case "${!i}" in
+	-C | -c | --git-dir | --work-tree) i=$((i + 2)) ;;
+	--no-pager | -P | -p | --paginate | --no-optional-locks | --literal-pathspecs | --no-replace-objects | \
+		--git-dir=* | --work-tree=*)
+		i=$((i + 1))
+		;;
+	*)
+		sub=${!i}
+		break
+		;;
+	esac
+done
+
+case "$sub" in
+show | diff | log | blame | grep | ls-files | ls-tree | cat-file | rev-parse | rev-list | merge-base | range-diff | \
+	for-each-ref | describe | shortlog | status | help | version | --version | --help)
+	exec "$real" "$@"
+	;;
+esac
+echo "git ${sub:-(no subcommand)} is not allowed in a read-only review" >&2
+exit 1

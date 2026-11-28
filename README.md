@@ -320,6 +320,13 @@ record a preview, and exits with code 1. Another run's review on the same
 commit, by the same account, does not count. Run
 `gh pr-review rounds <PR>` before retrying, so the round is not posted twice.
 
+The reviewer (pi) works read-only. Its `git` is a wrapper that runs only the
+commands that read (`show`, `diff`, `log`, `range-diff`, `status`, …) and
+refuses the rest, with no credentials and no hooks. A snapshot of the review
+checkout (its HEAD and `git status`) is taken before and after each model call:
+if the reviewer changed it anyway, the run stops before posting, says what
+changed, keeps the session folder, and exits with code 4.
+
 `gh pr-review <PR> --check` runs the check alone and exits 0 (run), 3 (stop)
 or 5 (no new commits); `--check --json` prints the decision as JSON for
 scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
@@ -329,6 +336,7 @@ scripts. `gh pr-review rounds <PR>` shows the same decision under the history.
 | 0 | Done |
 | 1 | Error |
 | 3 | Stopped by the loop check |
+| 4 | The reviewer changed the review checkout (its HEAD or its files); nothing posted, the session is kept |
 | 5 | No new commits since the last round |
 | 6 | History changed while the review ran (someone posted another round, or a round went away); nothing posted, the session is kept |
 

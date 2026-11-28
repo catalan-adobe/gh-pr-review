@@ -22,8 +22,9 @@
 #   --doctor        Check all prerequisites and exit
 #   -h, --help      Show this help
 #
-# Exit codes: 0 done, 1 error, 3 stopped by the loop check, 5 no new commits since the last round,
-#   6 the rounds changed while the review ran (nothing posted, the session is kept).
+# Exit codes: 0 done, 1 error, 3 stopped by the loop check, 4 the reviewer changed the review checkout (nothing
+#   posted, the session is kept), 5 no new commits since the last round, 6 the rounds changed while the review ran
+#   (nothing posted, the session is kept).
 #
 # Examples:
 #   gh pr-review https://github.com/owner/repo/pull/42
@@ -238,9 +239,24 @@ write_pr_context() {
 }
 
 # ── passes ──────────────────────────────────────────────────────────────────────────
-# One headless pi call: prompt file in, model output file out. A failed call stops the run.
-run_pi() {
-	if ! pi "${PI_ARGS[@]}" "$(cat "$1")" >"$2"; then
+# One headless pi call: prompt file in, model output file out. A failed call stops the run. pi runs in the git
+# sandbox (lib/guard.sh), between two snapshots of the review checkout: a reviewer that changed it stops the run with
+# exit 4, before anything is posted.
+run_pi() { # <prompt-file> <output-file>
+	local snap code=0 changed=0
+	snap="${SESSION_DIR}/tripwire/$(basename "$2" .md)"
+	pi_bin "${SESSION_DIR}/bin"
+	tripwire_snapshot "$REVIEW_DIR" "$REVIEW_DIR" "$snap/before"
+	pi_env "${SESSION_DIR}/bin" pi ${PI_ARGS[@]+"${PI_ARGS[@]}"} "$(cat "$1")" >"$2" || code=$?
+	tripwire_snapshot "$REVIEW_DIR" "$REVIEW_DIR" "$snap/after"
+	tripwire_check "$snap/before" "$snap/after" || changed=$?
+	if [[ $changed -ne 0 ]]; then
+		echo "" >&2
+		echo "Not posted (exit 4): the reviewer changed the review checkout, which must stay read-only." >&2
+		echo "    The checkout is left as it is. Session: ${SESSION_DIR}" >&2
+		exit 4
+	fi
+	if [[ $code -ne 0 ]]; then
 		echo "" >&2
 		echo "Error: pi exited with a non-zero status." >&2
 		echo "    Check the session directory for details: ${SESSION_DIR}" >&2

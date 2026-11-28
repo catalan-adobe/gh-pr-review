@@ -99,6 +99,16 @@ S
 	cat >"$stub/bin/pi" <<S
 #!/usr/bin/env bash
 echo call >>"$stub/pi.calls"
+# pi.evil: each pass tries git stash (refused); the code review then tries git checkout -b evil (refused) and runs the
+# real git with the arguments in pi.evil (the tripwire's case).
+if [[ -f "$stub/pi.evil" ]]; then
+	git stash >>"$stub/pi.git" 2>&1 || true
+	if [[ "\${*: -1}" != *"long-time maintainer"* ]]; then
+		git checkout -b evil >>"$stub/pi.git" 2>&1 || true
+		read -ra evil <"$stub/pi.evil"
+		"\$GH_PR_REVIEW_REAL_GIT" -C . "\${evil[@]}" >>"$stub/pi.git" 2>&1
+	fi
+fi
 if [[ "\${*: -1}" == *"long-time maintainer"* ]]; then [[ "${4:-}" == owner ]] && exit 7
 	printf '%s' "\${*: -1}" >"$stub/owner-prompt.txt"; cat "$stub/approach.out"; else
 	[[ "${4:-}" == code ]] && exit 7
@@ -1402,6 +1412,38 @@ expect "record failed in round 3: round 4 has no previous-round rules and no pre
 		[[ -z $(session_file previous-findings.md) ]]'
 expect "record failed in round 3: round 4, a clean full review, approves" \
 	'[[ $flag == --approve && $(jq -c "[.counts.open_blocking, .decision]" <<<"$record") == "[0,\"approve\"]" ]]'
+
+# The reviewer's sandbox, on real git: the clone comes from a local bare repo (url.<path>.insteadOf through
+# GIT_CONFIG_COUNT), never the network. The stub git can't see a change, so this case runs without it.
+setup $'**Approach:** Sound' "$clean"
+rm "$stub/bin/git"
+export GIT_AUTHOR_NAME=a GIT_AUTHOR_EMAIL=a@x GIT_COMMITTER_NAME=a GIT_COMMITTER_EMAIL=a@x
+git init -q --bare "$stub/r.git"
+git -C "$stub/r.git" symbolic-ref HEAD refs/heads/main
+git init -q "$stub/src"
+git -C "$stub/src" commit -q --allow-empty -m base
+git -C "$stub/src" push -q "$stub/r.git" HEAD:refs/heads/main
+echo x >"$stub/src/d.js"
+git -C "$stub/src" add d.js
+git -C "$stub/src" commit -q -m change
+git -C "$stub/src" push -q "$stub/r.git" HEAD:refs/pull/1/head
+git -C "$stub/src" rev-parse HEAD >"$stub/heads"
+export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="url.file://$stub/r.git.insteadOf" GIT_CONFIG_VALUE_0=https://github.com/o/r.git
+echo "commit -q --allow-empty -m x" >"$stub/pi.evil"
+run
+expect "read-only reviewer: both passes get the read-only git" \
+	'[[ $calls == 2 && $(grep -c "^git stash is not allowed in a read-only review$" "$stub/pi.git") == 2 ]] &&
+		grep -q "^git checkout is not allowed in a read-only review$" "$stub/pi.git"'
+expect "read-only reviewer: a commit past the wrapper exits 4, says what changed, posts nothing, keeps the session" \
+	'[[ $rc == 4 && ! -e "$stub/posted.json" ]] && grep -q "Not posted (exit 4)" "$stub/out.log" &&
+		grep -q "^+HEAD" "$stub/out.log" && [[ -s $(echo "$stub"/work/pr-review-sessions/pr-review-*/tripwire/review/after/worktree.txt) ]]'
+rm "$stub/pi.git"
+echo "branch side" >"$stub/pi.evil"
+run
+expect "read-only reviewer: a new branch in the clone only warns, and the review is posted" \
+	'[[ $rc == 0 && -e "$stub/posted.json" ]] && grep -q "^Warning: the clone.s refs" "$stub/out.log" &&
+		grep -q "refs/heads/side" "$stub/out.log"'
+unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
 
 finished=true
 exit "$fail"

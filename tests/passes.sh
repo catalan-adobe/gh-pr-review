@@ -18,9 +18,10 @@ eq() { # name got want
 }
 
 in_lib() { # script (runs with lib sourced and the stub pi on PATH)
-	PATH="$stub:$PATH" bash -c "set -euo pipefail; source '$stub/lib.sh'; SESSION_DIR='$stub' MODEL=m; $1" 2>&1 ||
-		echo "(exit $?)"
+	PATH="$stub:$PATH" bash -c "set -euo pipefail; source '$stub/lib.sh'; source '$root/lib/guard.sh'
+		SESSION_DIR='$stub' REVIEW_DIR='$stub/repo' MODEL=m; $1" 2>&1 || echo "(exit $?)"
 }
+git init -q "$stub/repo"
 
 printf 'PROMPT' >"$stub/p.md"
 # shellcheck disable=SC2016 # the stub must expand $* when it runs, not now
@@ -33,6 +34,13 @@ printf '#!/usr/bin/env bash\nexit 3\n' >"$stub/pi"
 out=$(in_lib "PI_ARGS=(); run_pi '$stub/p.md' '$stub/o.md'; echo SHOULD-NOT-REACH")
 eq "run_pi failure exits" "$([[ "$out" == *"(exit 1)"* && "$out" != *SHOULD-NOT-REACH* ]] && echo y)" y
 eq "run_pi failure names the session" "$([[ "$out" == *"$stub"* ]] && echo y)" y
+
+# A reviewer that writes in the checkout, after its git refused to.
+printf '#!/usr/bin/env bash\ngit stash\ntouch "%s/repo/x"\n' "$stub" >"$stub/pi"
+out=$(in_lib "PI_ARGS=(); run_pi '$stub/p.md' '$stub/o.md'; echo SHOULD-NOT-REACH")
+eq "run_pi: the reviewer's git is read-only" "$([[ "$out" == *"git stash is not allowed"* ]] && echo y)" y
+eq "run_pi: a changed checkout exits 4 and says what changed" \
+	"$([[ "$out" == *"(exit 4)"* && "$out" == *"+?? x"* && "$out" != *SHOULD-NOT-REACH* ]] && echo y)" y
 
 boundary='<!-- gh-pr-review:code-review -->'
 eq "approach, boundary, review, footer" "$(in_lib "assemble_review '' 'APPROACH' 'REVIEW'")" \
