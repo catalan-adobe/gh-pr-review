@@ -7,8 +7,9 @@ state_root() {
 	echo "${GH_PR_REVIEW_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/gh-pr-review}"
 }
 
-# Prints the PR's folder: <state_root>/<host>/<owner>/<repo>/<N>. A part that is empty, `.`, `..` or holds a `/`
-# is an error: the folder never leaves the state folder.
+# Prints the PR's folder: <state_root>/<host>/<owner>/<repo>/<N>. GitHub names are case-insensitive, so host, owner
+# and repo are lowercased. A part that is empty, `.`, `..` or holds a `/` is an error: the folder never leaves the
+# state folder.
 pr_state_dir() { # <host> <owner> <repo> <N>
 	local part
 	for part in "$1" "$2" "$3" "$4"; do
@@ -17,16 +18,22 @@ pr_state_dir() { # <host> <owner> <repo> <N>
 			return 1
 		fi
 	done
-	echo "$(state_root)/$1/$2/$3/$4"
+	echo "$(state_root)/$(tr '[:upper:]' '[:lower:]' <<<"$1/$2/$3")/$4"
 }
 
 # Takes the PR's lock: the folder <PR_STATE_DIR>/lock with this process's PID in lock/pid, released on exit. While
-# the PID in a lock is alive, another run is refused. A lock whose PID is gone (a killed run) is taken over.
+# the PID in a lock is alive, another run is refused. A lock whose PID is gone (a killed run) is taken over. A lock
+# without a pid file may be one another run is still writing: it is taken over only when it stays so for ~2 s.
 pr_lock() {
-	local lock="${PR_STATE_DIR:?}/lock" pid
+	local lock="${PR_STATE_DIR:?}/lock" pid n=0
 	mkdir -p "$PR_STATE_DIR" || return 1
 	if ! mkdir "$lock" 2>/dev/null; then
 		pid=$(cat "$lock/pid" 2>/dev/null || true)
+		while [[ -z "$pid" && -d "$lock" && $n -lt 20 ]]; do
+			sleep 0.1
+			n=$((n + 1))
+			pid=$(cat "$lock/pid" 2>/dev/null || true)
+		done
 		if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
 			echo "Error: another review of this PR is running (pid $pid). Lock: $lock" >&2
 			return 1
@@ -38,7 +45,12 @@ pr_lock() {
 			return 1
 		}
 	fi
-	echo "$$" >"$lock/pid"
+	# Written whole, then moved in: a reader never sees a partial pid file.
+	if ! { echo "$$" >"$lock/pid.$$" && mv "$lock/pid.$$" "$lock/pid"; }; then
+		rm -rf "$lock"
+		echo "Error: could not write the lock: $lock" >&2
+		return 1
+	fi
 	trap pr_unlock EXIT
 }
 
@@ -49,12 +61,12 @@ pr_unlock() {
 	rm -rf "$lock"
 }
 
-# Prints the value of <key> in <PR_STATE_DIR>/pr.json (a string raw), or nothing when it is not there. An invalid
+# Prints the value of <key> in <PR_STATE_DIR>/pr.json (a string raw, anything else as compact JSON), or nothing when it is not there. An invalid
 # file is an error that names it.
 pr_json_get() { # <key>
 	local file="${PR_STATE_DIR:?}/pr.json"
 	[[ -e "$file" ]] || return 0
-	jq -er --arg k "$1" 'if type == "object" then .[$k] | select(. != null) else error end' "$file" 2>/dev/null ||
+	jq -erc --arg k "$1" 'if type == "object" then .[$k] | select(. != null) else error end' "$file" 2>/dev/null ||
 		jq -e 'type == "object"' "$file" >/dev/null 2>&1 || {
 		echo "Error: invalid PR state file: $file" >&2
 		return 1

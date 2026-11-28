@@ -30,23 +30,30 @@ unset XDG_CONFIG_HOME XDG_STATE_HOME GH_PR_REVIEW_STATE
 # ── config ──
 eq "config: no file, the default" "$(config_get '.roots[0]' repos)" repos
 mkdir -p "$HOME/.config/gh-pr-review"
-echo '{"roots": ["src"], "stale_days": 7, "loop": {"min_rounds": 3}, "off": false}' \
+echo '{"roots": ["src"], "stale_days": 7, "loop": {"min_rounds": 3}, "off": false, "editor": ""}' \
 	>"$HOME/.config/gh-pr-review/config.json"
 eq "config: a string" "$(config_get '.roots[0]' repos)" src
 eq "config: a number" "$(config_get '.stale_days' 30)" "7"
 eq "config: an object, compact" "$(config_get '.loop' '{}')" '{"min_rounds":3}'
 eq "config: false is a value" "$(config_get '.off' true)" "false"
 eq "config: a missing key, the default" "$(config_get '.clones' '{}')" "{}"
+eq "config: an empty string, the default" "$(config_get '.editor' vi)" "vi"
 export XDG_CONFIG_HOME="$tmp/xdg-config"
 eq "config: XDG_CONFIG_HOME wins" "$(config_get '.stale_days' 30)" "30"
 mkdir -p "$XDG_CONFIG_HOME/gh-pr-review"
 echo '{"stale_days": ' >"$XDG_CONFIG_HOME/gh-pr-review/config.json"
 got=$(config_get '.stale_days' 30 2>&1) && rc=0 || rc=$?
 eq "config: an invalid file is an error that names it" "$rc $got" \
-	"1 Error: invalid config file (not one JSON value): $XDG_CONFIG_HOME/gh-pr-review/config.json"
+	"1 Error: invalid config file (not one JSON object): $XDG_CONFIG_HOME/gh-pr-review/config.json"
 : >"$XDG_CONFIG_HOME/gh-pr-review/config.json"
 config_get '.stale_days' 30 >/dev/null 2>&1 && rc=0 || rc=$?
 eq "config: an empty file is invalid" "$rc" 1
+for bad in '["src"]' '"src"'; do
+	echo "$bad" >"$XDG_CONFIG_HOME/gh-pr-review/config.json"
+	got=$(config_get '.stale_days' 30 2>&1) && rc=0 || rc=$?
+	eq "config: $bad is an error that names the file" "$rc $got" \
+		"1 Error: invalid config file (not one JSON object): $XDG_CONFIG_HOME/gh-pr-review/config.json"
+done
 unset XDG_CONFIG_HOME
 
 # ── paths ──
@@ -55,6 +62,9 @@ eq "state_root: XDG_STATE_HOME" "$(XDG_STATE_HOME=/x/state state_root)" "/x/stat
 eq "state_root: GH_PR_REVIEW_STATE wins" "$(XDG_STATE_HOME=/x/state GH_PR_REVIEW_STATE=/y/prs state_root)" "/y/prs"
 eq "pr_state_dir" "$(pr_state_dir github.com o r 42)" "$HOME/.local/state/gh-pr-review/github.com/o/r/42"
 eq "pr_state_dir: with GH_PR_REVIEW_STATE" "$(GH_PR_REVIEW_STATE=/y/prs pr_state_dir h o r 1)" "/y/prs/h/o/r/1"
+eq "pr_state_dir: host, owner and repo lowercased" "$(pr_state_dir GitHub.com Owner Repo 7)" \
+	"$(pr_state_dir github.com owner repo 7)"
+eq "pr_state_dir: lowercase" "$(GH_PR_REVIEW_STATE=/y pr_state_dir H.X MyOrg My-Repo 7)" "/y/h.x/myorg/my-repo/7"
 for bad in .. . '' a/b; do
 	pr_state_dir github.com "$bad" r 1 >/dev/null 2>&1 && rc=0 || rc=$?
 	eq "pr_state_dir: refuses the owner '$bad'" "$rc" 1
@@ -87,9 +97,25 @@ eq "lock: taken over after the PID is gone" "$(sed -n 1p <<<"$got")" \
 [[ "$(sed -n 2p <<<"$got")" =~ ^held\ by\ ([0-9]+)\ =\ ([0-9]+)$ && ${BASH_REMATCH[1]} == "${BASH_REMATCH[2]}" ]] &&
 	ok=yes || ok=no
 eq "lock: the new run holds it" "$ok $(sed -n 3p <<<"$got")" "yes rc=0"
+got=$(lock_in 'ls "$PR_STATE_DIR/lock"')
+eq "lock: the pid file alone, no temp file left" "$got" "pid
+rc=0"
+# A lock folder whose pid file is still being written: the run waits for it, then is refused.
+mkdir -p "$PR_STATE_DIR/lock"
+lock_in 'echo ran' >"$tmp/bg" &
+bg=$!
+sleep 0.5
+echo "$$" >"$PR_STATE_DIR/lock/pid"
+wait "$bg"
+eq "lock: one whose pid file comes within the wait is not taken over" "$(tail -1 "$tmp/bg") $(cat "$PR_STATE_DIR/lock/pid")" \
+	"rc=1 $$"
+rm -rf "$PR_STATE_DIR/lock"
+# A lock folder that stays without a pid file past the wait: taken over.
 mkdir -p "$PR_STATE_DIR/lock"
 got=$(lock_in 'echo ran')
-eq "lock: one without a PID is taken over" "$(sed -n 2,3p <<<"$got")" "ran
+eq "lock: one that stays without a PID is taken over" "$got" \
+	"Note: taking over the lock of a run that is gone (pid unknown): $PR_STATE_DIR/lock
+ran
 rc=0"
 mkdir -p "$PR_STATE_DIR/lock"
 echo "$$" >"$PR_STATE_DIR/lock/pid"
@@ -111,6 +137,10 @@ eq "pr_json_get: a value" "$(pr_json_get clone)" "/repos/r2"
 eq "pr_json_get: another value" "$(pr_json_get worktree)" "/repos/r.reviews/h/42"
 eq "pr_json_get: a missing key, nothing" "$(pr_json_get head_branch)" ""
 eq "pr_json_set: one object" "$(jq -c 'keys' "$PR_STATE_DIR/pr.json")" '["clone","worktree"]'
+jq '.loop = {"rounds": [1, 2]} | .draft = false' "$PR_STATE_DIR/pr.json" >"$tmp/pr.json"
+mv "$tmp/pr.json" "$PR_STATE_DIR/pr.json"
+eq "pr_json_get: an object, compact" "$(pr_json_get loop)" '{"rounds":[1,2]}'
+eq "pr_json_get: false is a value" "$(pr_json_get draft)" "false"
 echo 'not json' >"$PR_STATE_DIR/pr.json"
 got=$(pr_json_get clone 2>&1) && rc=0 || rc=$?
 eq "pr_json_get: an invalid file is an error" "$rc $got" "1 Error: invalid PR state file: $PR_STATE_DIR/pr.json"
