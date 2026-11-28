@@ -249,3 +249,42 @@ Expected: all `ok`, no lint output.
   `--fresh` on one large repo. No review text.
 - [ ] **Step 5: Check.**
 - [ ] **Step 6: Commit.** `git commit -m "Document local review worktrees and check them on a real PR"`
+
+---
+
+## Changes after PRs #8, #9 and #10
+
+Written after #8, #9 and #10 merged. Where this section and the tasks above disagree, this section wins.
+
+**Four PRs instead of one.** The tasks above would make one PR well past the loop check's "too big" threshold (800
+lines or 25 files), the flag #8 and #9 carried through 7 and 4 rounds. They ship as four PRs:
+
+| PR | Tasks | Needs |
+|---|---|---|
+| 3a: one state folder per PR, with a lock | 1 | `main` |
+| 3b: a read-only reviewer | 4 | `main` |
+| 3c: local clones, review worktrees and private refs | 2, 3 | 3a |
+| 3d: `gh pr-review gc`, docs and a real run | 5, 6 | 3c |
+
+3a and 3b are independent. 3b guards today's throwaway clone (`tripwire_snapshot <repo> <repo>`); 3c passes the clone
+and the review worktree.
+
+**Task 1 (3a).**
+- Today the run folder is `$(pwd)/pr-review-sessions/pr-review-XXXXX`, under whatever folder the command runs from.
+  Old folders are left alone.
+- After a post, the run folder is renamed `round-<K>`, where K is the `.round` of the record that was posted. That is
+  the number left after the final re-read, not `LOOP.next_round`. A run that exits 6 (a round landed during the
+  review), fails to post, or can't confirm its post keeps `run-…`.
+- The lock is per PR, on this machine. It complements the exit-6 check, which catches rounds from other machines and
+  accounts. `--check` and `rounds` don't take it.
+
+**Task 3 (3c).**
+- `fetch_pr` keeps #9's rules: a SHA is validated with `delta_object_id` before any git call, `--end-of-options` comes
+  before refs, and credentials come from `GIT_AUTH`.
+- `pick_delta` reads the previous head and base from `refs/pr-review/<N>/round-<K-1>` and `…-base` first, then from
+  the record (`head_sha`, `base_sha`). If the base is still unknown, #9's rule applies: the round is `full`.
+- `mark_round` uses the posted record's round.
+- The deepen-by-200 fallback for a missing merge-base stays in `--fresh` only. A local clone has its full history.
+
+**Task 4 (3b).** `git-ro` allows the commands the round-2 prompts ask the reviewer to run (`diff`, `range-diff`,
+`log`, `show`, `diff --stat`). The approach pass runs in the same sandbox.

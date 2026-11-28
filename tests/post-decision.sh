@@ -7,7 +7,7 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 stub=$(mktemp -d)
 {
 	cat "$root"/lib/*.sh
-	sed -n '/^# ── post/,$p' "$root/gh-pr-review"
+	sed -n '/^# ── post/,/^# ── run folder/p' "$root/gh-pr-review"
 } >"$stub/post.sh"
 # The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
 finished=false
