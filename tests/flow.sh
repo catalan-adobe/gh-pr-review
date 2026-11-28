@@ -1371,5 +1371,37 @@ for m in '{"schema":1,"round":2,"findings_dropped":true,"last_ids":{"F":5,"L":1}
 		'[[ $rc == 0 && $(grep "^2 " "$stub/rounds.out" | sed "s/  */ /g") == "$(sed "s/  */ /g; s/ 2 1 early model/ 1 1 early backfill/" <<<"$full_table")" ]]'
 done
 
+# Rounds 1–2 leave two blockers open (F1, F3). Round 3's record can't be built: it posts as comment, its Markdown
+# shows neither blocker, and its minimal marker says it is a later round with an unknown count and no findings list.
+# Read back that way, round 4 does not build on it as an empty baseline: it is a full review of the whole PR, as a
+# first code review (no previous-round rules, no previous-findings.md), and round 3 counts as unknown, not as 0
+# blockers. A full review re-reads the whole PR, so its clean verdict stands: it approves.
+setup $'**Approach:** Sound' "$clean"
+two_rounds
+echo "$H3" >"$stub/heads"
+echo "$B1" >"$stub/git.base"
+break_record fail
+run
+expect "record fails in round 3: posted as comment, with a minimal marker of unknown count" \
+	'[[ $rc == 0 && $flag == --comment && -z $record &&
+		$(sed -n 2p <<<"$body" | sed "s/^<!-- gh-pr-review:round //; s/ -->$//" | jq -c .) == "{\"schema\":1,\"round\":3,\"findings_dropped\":true,\"last_ids\":{\"F\":3,\"L\":0},\"counts\":{\"open_blocking\":null,\"critical\":null,\"important\":null,\"minor\":null}}" ]]'
+rm "$stub/bin/jq"
+post_back "$H3" 2026-01-03T00:00:00Z
+read_rounds --json
+expect "record fails in round 3: read back with unknown counts and no findings list" \
+	'[[ $rc == 0 && $(jq -c ".records[2] | [.round, .counts.open_blocking, .counts.critical, .findings_dropped, has(\"findings\"), .last_ids.F]" "$stub/rounds.out") == "[3,null,null,true,false,3]" &&
+		$(jq -c ".decision.series" "$stub/rounds.out") == "[1,2,null]" ]]'
+H4=$(printf 'c4%.0s' {1..20})
+echo "$H4" >"$stub/heads"
+run
+expect "record failed in round 3: round 4 is a full review, not an increment on an empty baseline" \
+	'[[ $rc == 0 && $(jq -r ".round, .mode, .mode_reason" <<<"$record" | paste -sd, -) == "4,full,the last round has no record of its findings" ]] &&
+		grep -q "mode: full (the last round has no record of its findings)" "$stub/out.log"'
+expect "record failed in round 3: round 4 has no previous-round rules and no previous-findings.md" \
+	'! grep -q -e "## Previous round" -e "Check every earlier finding" -e "Outside what changed" "$stub/code-prompt.txt" &&
+		[[ -z $(session_file previous-findings.md) ]]'
+expect "record failed in round 3: round 4, a clean full review, approves" \
+	'[[ $flag == --approve && $(jq -c "[.counts.open_blocking, .decision]" <<<"$record") == "[0,\"approve\"]" ]]'
+
 finished=true
 exit "$fail"

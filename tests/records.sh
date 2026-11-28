@@ -714,6 +714,17 @@ check "marker cap: no room even for the minimal marker, no marker" "$(marker_lin
 check "marker cap: round.json keeps everything" "$(jq -c '[(.findings | length), (.later | length)]' "$tmp/big.json")" \
 	"[4,1]"
 
+# A record with an unknown blocker count (null counts, as a round whose record could not be built posts) keeps that
+# signal in its minimal marker; one with a known count, or a Rethink, does not.
+jq -c '.counts.open_blocking = null' "$tmp/big.json" >"$tmp/unknown.json"
+pad_to 59780
+check "marker cap: an unknown count stays in the minimal marker" \
+	"$(marker_record "$(generated "$(marker_line "$tmp/unknown.json" "$tmp/body.md")")")" \
+	'{"schema":1,"round":2,"findings_dropped":true,"last_ids":{"F":4,"L":0},"counts":{"open_blocking":null}}'
+check "marker_counts_unknown: an explicit null count only" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; map(marker_counts_unknown)' <<<'[{"counts": {"open_blocking": null}},
+		{"counts": {"open_blocking": 0}}, {"counts": {}}, {}, {"counts": null}]')" '[true,false,false,false,false]'
+
 # A marker is read as it is only with the full counts every marker_line step but the minimal one writes.
 check "complete_marker: a Rethink and full counts; not partial, inconsistent or minimal ones" \
 	"$(jq -c -L "$LIB_DIR" 'include "records"; map(complete_marker)' <<<'[{"code_review": false},

@@ -607,6 +607,11 @@ def _visible: gsub("[*`]"; "") | gsub("\\s+"; " ") | _trim;
 # A string as a regex that matches it literally.
 def _re_literal: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}/-])"; "\\\(.c)");
 
+# True for a marker that says its round's blocker count is unknown: counts holds open_blocking, and it is null. The
+# reader honours it: the round read back has null counts, whatever its Markdown shows (fetch_round_records). A round
+# whose record could not be built posts such a marker (minimal: no findings list either).
+def marker_counts_unknown: (.counts | type) == "object" and (.counts | has("open_blocking")) and .counts.open_blocking == null;
+
 # The marker line for a record, posted right below the generated header and above $body, the exact review text.
 # One HTML comment: every "--" in the JSON is written "-\u002d". The marker never publishes text the review does not
 # show. A file stays only when $body shows that exact path, as a whole path: the whole content of a code span, less
@@ -617,7 +622,8 @@ def _re_literal: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}/-])"; "\\\(.c)");
 # The whole body (header, newline, marker, newline, review) must fit in 60,000 characters, under GitHub's 65,536: it
 # drops titles, then file, line, first_round and in_delta, then later, then findings (findings_dropped: true; counts
 # and last_ids stay). When even that does not fit: a minimal marker, {schema, round, findings_dropped: true} and
-# last_ids if it fits, so a later round knows the baseline is missing. Nothing when even that does not fit.
+# last_ids if it fits, so a later round knows the baseline is missing, with {counts: {open_blocking: null}} for a code
+# review whose blocker count is unknown (marker_counts_unknown). Nothing when even that does not fit.
 def marker_line($body):
 	($body | _visible) as $seen
 	| ($body | [scan("`([^`\n]+)`") | .[0] | sub(":\\d+.*$"; "") | _trim]) as $spans
@@ -642,7 +648,8 @@ def marker_line($body):
 		.later[]?.file, .later[]?.line, .later[]?.first_round, .later[]?.in_delta) end
 	| if fits then . else del(.later) end
 	| if fits then . else del(.findings) | .findings_dropped = true end
-	| if fits then . else {schema: 1, round, findings_dropped: true} + (if .last_ids then {last_ids} else {} end) end
+	| if fits then . else {schema: 1, round, findings_dropped: true} + (if .last_ids then {last_ids} else {} end)
+		+ (if marker_counts_unknown and .code_review != false then {counts: {open_blocking: null}} else {} end) end
 	| if fits then . else del(.last_ids) end
 	| if fits then line else empty end;
 

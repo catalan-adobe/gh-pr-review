@@ -1257,9 +1257,22 @@ write_round_record() {
 	fi
 	rm -f "$tmp"
 }
+# Without a record, round 2 and later still post a minimal marker (FALLBACK_RECORD): this is a later round, its
+# findings list is missing and its blocker count unknown (null), with the history's last IDs. Its Markdown may leave
+# out the blockers it carried, and a reader would otherwise take it for a first review: the next round then builds on
+# an empty baseline. Read back, the round has null counts and no findings list (marker_counts_unknown), so the next
+# round is full.
+FALLBACK_RECORD=""
 if ! write_round_record; then
 	echo "Warning: could not write the round record; the review is posted without it." >&2
 	RECORD_FILE=""
+	if [[ "$ROUND" -gt 1 ]]; then
+		FALLBACK_RECORD="${SESSION_DIR}/round-fallback.json"
+		jq -n --argjson round "$ROUND" --arg ids "$ID_FLOOR" '{schema: 1, round: $round, findings_dropped: true}
+			+ ($ids | fromjson? // null | if type == "object" then {last_ids: .} else {} end)
+			+ {counts: {open_blocking: null, critical: null, important: null, minor: null}}' \
+			>"$FALLBACK_RECORD" 2>/dev/null || FALLBACK_RECORD=""
+	fi
 fi
 
 # Round 2 and later open with a progress line, counted from the record. It replaces the loop line, and carries the
@@ -1493,6 +1506,9 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 			echo "Warning: the review leaves no room for its round marker; posting it without one." >&2
 			echo "    round.json keeps the full record: ${RECORD_FILE}" >&2
 		fi
+		[[ -z "$MARKER" ]] || MARKER+=$'\n'
+	elif [[ -n "${FALLBACK_RECORD:-}" ]]; then
+		MARKER=$(marker_line "$FALLBACK_RECORD" "$REVIEW" 2>/dev/null) || MARKER=""
 		[[ -z "$MARKER" ]] || MARKER+=$'\n'
 	fi
 	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s%s' "$MARKER" "$REVIEW")
