@@ -18,6 +18,7 @@
 #   --json          With --check, print the decision as JSON
 #   --force-round   Run a round even when the loop check stops it or nothing changed
 #                   (in a terminal, without -y, both ask "Run round K anyway?" instead)
+#   --full          Review the whole PR again (round 2 and later still re-check the earlier findings)
 #   --doctor        Check all prerequisites and exit
 #   -h, --help      Show this help
 #
@@ -78,6 +79,7 @@ GH_USER="${GH_PR_REVIEW_USER:-}"
 CHECK_ONLY=false
 CHECK_JSON=false
 FORCE_ROUND=false
+FULL_ROUND=false
 
 # ── arg parsing ──────────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -122,6 +124,10 @@ while [[ $# -gt 0 ]]; do
 		FORCE_ROUND=true
 		shift
 		;;
+	--full)
+		FULL_ROUND=true
+		shift
+		;;
 	--no-post)
 		POST_TO_PR=false
 		shift
@@ -162,7 +168,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$DOCTOR" == "false" && -z "$TARGET" ]]; then
-	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [--skip-approach] [-y] [--check [--json]] [--force-round] [--doctor]" >&2
+	echo "Usage: gh pr-review <PR-URL | PR-number> [--model <id>] [--no-post] [--skip-approach] [-y] [--check [--json]] [--force-round] [--full] [--doctor]" >&2
 	exit 1
 fi
 if [[ "$CHECK_JSON" == "true" && "$CHECK_ONLY" == "false" ]]; then
@@ -252,10 +258,10 @@ instructions_section() {
 	printf 'on the PR.\n\n%s\n\n' "$INSTRUCTIONS"
 }
 
-# The posted body: the loop line, the approach section, then the code review, then one footer. Empty in, empty out.
-# The code review starts with an invisible boundary line (code_review_boundary in lib/records.jq): the reader reads
-# the code review from there, as the writer reads it.
-assemble_review() { # <loop-line> <approach> <code-review>
+# The posted body: the head (the loop line, or a later round's progress lines: assemble_body), the approach section,
+# then the code review, then one footer. Empty in, empty out. The code review starts with an invisible boundary line
+# (code_review_boundary in lib/records.jq): the reader reads the code review from there, as the writer reads it.
+assemble_review() { # <loop/head lines> <approach> <code-review>
 	local parts=() part
 	for part in "$1" "$2"; do [[ -n "$part" ]] && parts+=("$part"); done
 	[[ -n "$3" ]] && parts+=($'<!-- gh-pr-review:code-review -->\n'"$3")
@@ -478,11 +484,18 @@ git "${GIT_AUTH[@]}" fetch origin "${BASE_BRANCH}:refs/remotes/origin/${BASE_BRA
 git checkout pr-branch --quiet
 
 HEAD_SHA=$(git rev-parse HEAD)
-BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}") || {
-	echo "Error: no merge-base between PR head and origin/${BASE_BRANCH} within the" >&2
-	echo "shallow clone (depth 50). Refusing to review a partial diff." >&2
-	exit 1
-}
+# A PR branched off more than 50 commits back has no merge-base in the shallow clone: deepen both histories once.
+# One fetch per ref: in a single fetch, git can leave one of them as shallow as it was.
+if ! BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}" 2>/dev/null); then
+	git "${GIT_AUTH[@]}" fetch --quiet --no-tags --deepen 200 origin "pull/${PR_NUM}/head" || true
+	git "${GIT_AUTH[@]}" fetch --quiet --no-tags --deepen 200 origin \
+		"${BASE_BRANCH}:refs/remotes/origin/${BASE_BRANCH}" || true
+	BASE_SHA=$(git merge-base HEAD "origin/${BASE_BRANCH}") || {
+		echo "Error: no merge-base between PR head and origin/${BASE_BRANCH} within the" >&2
+		echo "shallow clone (depth 50, deepened by 200). Refusing to review a partial diff." >&2
+		exit 1
+	}
+fi
 
 echo "    base: ${BASE_SHA:0:8}  head: ${HEAD_SHA:0:8}"
 echo ""
@@ -490,7 +503,128 @@ echo ""
 CONTEXT_DIR="${SESSION_DIR}/context"
 write_pr_context "$CONTEXT_DIR"
 
+# ── previous round ─────────────────────────────────────────────────────────────────
+# Round 2 and later build on the last round with a code review (a Rethink round has none): its open findings are
+# re-checked by ID, and what changed since its head is reviewed in full. Anything unusable makes a full round, a
+# record without its findings list included: the open findings it had cannot be re-checked, so nothing may be
+# skipped. PREVIOUS_OPEN and PREVIOUS_FIXED count only a list that is there: the open findings to re-check, and the
+# ones that round fixed, to catch a regression.
+FINDINGS_BASE=$(jq -c '[.[] | select(.code_review != false)] | last // null' <<<"$RECORDS")
+BASE_ROUND=$(jq -r '.round // empty' <<<"$FINDINGS_BASE")
+FINDINGS_KNOWN=$(jq -L "$LIB_DIR" 'include "records"; has_findings_list' <<<"$FINDINGS_BASE")
+previous_count() { # <jq status filter>
+	jq -L "$LIB_DIR" "include \"records\"; if has_findings_list then [.findings[] | objects | select($1)] | length
+		else 0 end" <<<"$FINDINGS_BASE"
+}
+PREVIOUS_OPEN=$(previous_count '.status == "open" or .status == "new" or .status == "regressed"')
+PREVIOUS_FIXED=$(previous_count '.status == "fixed"')
+if [[ "$FINDINGS_BASE" == null ]]; then
+	if [[ "$PREVIOUS_RECORD" == null ]]; then DELTA_REASON="no previous round"; else DELTA_REASON="no earlier code review"; fi
+	DELTA=$(jq -cn --arg reason "$DELTA_REASON" '{mode: "full", reason: $reason, commands: []}')
+elif [[ "$FINDINGS_KNOWN" != true ]]; then
+	# A later round read back from its Markdown (no marker) shows only what it re-checked: no list either.
+	DELTA=$(jq -c '{mode: "full", commands: [], reason: (if .source == "backfill" then "the last round has no record of its findings"
+		else "the last record lost its findings to the size cap" end)}' <<<"$FINDINGS_BASE")
+elif [[ "$FULL_ROUND" == "true" ]]; then
+	DELTA='{"mode":"full","reason":"--full","commands":[]}'
+else
+	DELTA=$(pick_delta "$REVIEW_DIR" "$(jq -r '.head_sha // ""' <<<"$FINDINGS_BASE")" \
+		"$(jq -r '.base_sha // ""' <<<"$FINDINGS_BASE")" "$HEAD_SHA" "$BASE_SHA") ||
+		DELTA='{"mode":"full","reason":"could not compare with the last round","commands":[]}'
+fi
+# delta-files.txt: the files the changes touched, for rule 3. A list git could not give is no proof that the other
+# files are untouched: the round is full instead.
+if DELTA_FILES=$(changed_files "$REVIEW_DIR" "$DELTA" 2>/dev/null); then
+	[[ "$(jq -r '.mode' <<<"$DELTA")" == full ]] || printf '%s\n' "$DELTA_FILES" | sed '/^$/d' >"$CONTEXT_DIR/delta-files.txt"
+else
+	DELTA=$(jq -c '.mode = "full" | .reason = "could not list the files the changes touched" | .commands = []
+		| del(.from)' <<<"$DELTA")
+fi
+ROUND_MODE=$(jq -r '.mode' <<<"$DELTA")
+if [[ "$ROUND" -gt 1 ]]; then
+	if [[ "$ROUND_MODE" == full ]]; then
+		echo "    mode: full ($(jq -r '.reason' <<<"$DELTA"))"
+	else
+		echo "    mode: ${ROUND_MODE} since round ${BASE_ROUND} · ${PREVIOUS_OPEN} earlier findings to re-check," \
+			"${PREVIOUS_FIXED} fixed to watch"
+	fi
+	echo ""
+fi
+
+# The n-th gh-pr-review review on the PR, without its marker lines.
+round_body() { # <round>
+	# The same tests as fetch_round_records (the header on the first line, a trusted author: trusted_review), so the
+	# n-th body is round n. An outsider's generated review is no round, and never the previous review.
+	jq -r -L "$LIB_DIR" --argjson n "$1" --arg me "${ROUNDS_ME:-}" 'include "records";
+		[.reviews[] | select(.state != "PENDING" and (.body | is_generated_review)
+			and ({author_association: .authorAssociation, user: {login: .author.login?}} | trusted_review($me)))]
+		| sort_by(.submittedAt) | .[$n - 1].body // ""' "$CONTEXT_DIR/discussion.json" | grep -v '^<!-- gh-pr-review' || true
+}
+
+# previous-review.md and previous-findings.md: the last code review, its open findings and the ones it fixed, for
+# rule 1. Written when either list has one: a fixed finding is listed so that, coming back, it keeps its ID and
+# counts as regressed instead of looking new.
+if [[ "$PREVIOUS_OPEN" -gt 0 || "$PREVIOUS_FIXED" -gt 0 ]]; then
+	round_body "$BASE_ROUND" >"$CONTEXT_DIR/previous-review.md"
+	# A detail the last marker left out (its review did not show it) comes back from an earlier round, by ID.
+	finding_lines() { # <jq status filter>
+		jq -r -L "$LIB_DIR" --argjson base "$FINDINGS_BASE" "include \"records\"; . as \$history | \$base
+			| recover_details(\$history) | .findings[] | objects | select($1)
+			| [.id, .severity, ((.file // \"(no file)\") + (if .line then \":\\(.line)\" else \"\" end)), (.title // \"\")]
+			| join(\" · \")" <<<"$RECORDS"
+	}
+	{
+		if [[ "$PREVIOUS_OPEN" -gt 0 ]]; then
+			finding_lines '.status == "open" or .status == "new" or .status == "regressed"'
+		fi
+		if [[ "$PREVIOUS_FIXED" -gt 0 ]]; then
+			[[ "$PREVIOUS_OPEN" == 0 ]] || echo
+			printf 'Fixed in round %s (report one only if the problem is back, as open):\n' "$BASE_ROUND"
+			finding_lines '.status == "fixed"'
+		fi
+	} >"$CONTEXT_DIR/previous-findings.md"
+fi
+
+# previous-approach.md: the last round's Approach section, carried forward unless it was a Rethink (judge afresh).
+PREVIOUS_APPROACH_ROUND=""
+if [[ "$SKIP_APPROACH" == "false" ]] &&
+	jq -e '.approach == "sound" or .approach == "questionable"' <<<"$PREVIOUS_RECORD" >/dev/null 2>&1; then
+	PREVIOUS_APPROACH_ROUND=$(jq -r '.round' <<<"$PREVIOUS_RECORD")
+	round_body "$PREVIOUS_APPROACH_ROUND" |
+		awk '/^###[[:space:]]+Approach/ { on = 1; print; next } on && /^###[[:space:]]/ { exit } on' \
+			>"$CONTEXT_DIR/previous-approach.md"
+	[[ -s "$CONTEXT_DIR/previous-approach.md" ]] || PREVIOUS_APPROACH_ROUND=""
+fi
+
 # ── build owner (approach) prompt ───────────────────────────────────────────────────────────
+# Round 2 and later: the owner starts from its previous verdict and what changed since.
+# shellcheck disable=SC2016 # Markdown backticks in printf formats, not command substitutions
+previous_verdict_section() {
+	[[ -n "$PREVIOUS_APPROACH_ROUND" ]] || return 0
+	printf '## Your previous verdict (round %s)\n\n' "$PREVIOUS_APPROACH_ROUND"
+	printf 'You judged this PR in round %s: read %s/previous-approach.md. ' "$PREVIOUS_APPROACH_ROUND" "$CONTEXT_DIR"
+	if [[ "$ROUND_MODE" == full ]]; then
+		printf 'What changed since: compare with `git diff --stat %s..%s` (the whole PR).\n\n' "$BASE_SHA" "$HEAD_SHA"
+	else
+		printf 'What changed since:\n\n```bash\n%s\n```\n\n' "$(jq -r '.commands[0]' <<<"$DELTA")"
+	fi
+	printf 'Also read %s/pr-discussion.md for what was said since round %s.\n\n' "$CONTEXT_DIR" "$PREVIOUS_APPROACH_ROUND"
+	cat <<'VERDICT'
+Keep the verdict unless what changed, or the discussion since, changes it. If nothing changes it, skip the steps
+below and reply only this, filled in:
+
+### Approach
+
+VERDICT
+	printf 'Unchanged since round %s: <one sentence: why it still holds>.\n\n' "$PREVIOUS_APPROACH_ROUND"
+	cat <<'VERDICT'
+**Approach:** <the same verdict>
+
+Otherwise, follow the steps below and write the full section.
+
+VERDICT
+}
+
 build_owner_prompt() {
 	{
 		cat <<'OWNER1'
@@ -508,6 +642,7 @@ Your review is read-only. Do not change the working tree, the index, HEAD, or br
 OWNER1
 
 		instructions_section
+		previous_verdict_section
 
 		cat <<OWNER2
 ## Steps, in this order
@@ -613,6 +748,73 @@ OWNER3
 }
 
 # ── build review prompt (temp file — no quoting issues) ──────────────────────
+# Round 2 and later. Rule 1 (re-check the earlier findings) needs open or fixed findings from the last code review;
+# rules 2 and 3 (review what changed in full, only Critical outside it) need an incremental or rebased delta.
+later_round() { [[ "$PREVIOUS_OPEN" -gt 0 || "$PREVIOUS_FIXED" -gt 0 || "$ROUND_MODE" != full ]]; }
+
+# shellcheck disable=SC2016 # Markdown backticks in printf formats, not command substitutions
+previous_round_section() {
+	later_round || return 0
+	local n=0
+	printf '## Previous round\n\n'
+	printf 'This is round %s. Round %s was the last code review of this PR.' "$ROUND" "$BASE_ROUND"
+	if [[ "$ROUND_MODE" == full ]]; then
+		printf ' This round is a full review (%s): review the whole PR as usual.' "$(jq -r '.reason' <<<"$DELTA")"
+	fi
+	printf '\n\n'
+	if [[ "$PREVIOUS_OPEN" -gt 0 ]]; then
+		n=$((n + 1))
+		printf '%s. **Check every earlier finding.** Read %s/previous-findings.md: one line per finding still open ' \
+			"$n" "$CONTEXT_DIR"
+		printf 'after round %s (ID · severity · file:line · title). Their full text is in %s/previous-review.md. ' \
+			"$BASE_ROUND" "$CONTEXT_DIR"
+		cat <<'RULE1'
+Check each one against the current code and give it a status:
+   - `fixed`: the current code no longer has the problem.
+   - `open`: it is still there. A fix attempt that did not work stays open: say what is still wrong.
+   - `declined`: only when the PR discussion gives a reason you accept. Quote it, in `"reason"`: a decline without
+     one stays open.
+
+   Every open ID listed is mandatory: it appears once in the findings block, with its status. Never invent IDs.
+RULE1
+		if [[ "$PREVIOUS_FIXED" -gt 0 ]]; then
+			printf '   The file then lists the findings fixed in round %s. Those are not mandatory: report one only if ' \
+				"$BASE_ROUND"
+			printf 'the problem is back, with its ID, as `open`.\n'
+		fi
+		printf '\n'
+	elif [[ "$PREVIOUS_FIXED" -gt 0 ]]; then
+		n=$((n + 1))
+		printf '%s. **Check whether an earlier finding came back.** Round %s fixed the findings listed in ' \
+			"$n" "$BASE_ROUND"
+		printf '%s/previous-findings.md (ID · severity · file:line · title), and left none open. Its review is in ' \
+			"$CONTEXT_DIR"
+		printf '%s/previous-review.md. If the current code has one of these problems again, report it with its ID, ' \
+			"$CONTEXT_DIR"
+		printf 'as `open`. Leave out the ones that are still fixed. Never invent IDs.\n\n'
+	fi
+	if [[ "$ROUND_MODE" != full ]]; then
+		n=$((n + 1))
+		if [[ "$ROUND_MODE" == rebased ]]; then
+			printf '%s. **Review what changed since round %s in full, at every severity.** The author rebased since ' \
+				"$n" "$BASE_ROUND"
+			printf 'then: this compares the old version of the PR with the new one.\n\n'
+		else
+			printf '%s. **Review what changed since round %s in full, at every severity.** The commits since then:\n\n' \
+				"$n" "$BASE_ROUND"
+		fi
+		printf '   ```bash\n'
+		jq -r '.commands[] | "   " + .' <<<"$DELTA"
+		printf '   ```\n\n'
+		printf '   A problem these changes introduced is a new finding with `"in_delta": true`.\n\n'
+		n=$((n + 1))
+		printf '%s. **Outside what changed, raise only Critical findings.** The files the changes touched are listed ' "$n"
+		printf 'in %s/delta-files.txt. Earlier rounds reviewed the rest: raise a new finding there only if ' "$CONTEXT_DIR"
+		printf 'it is Critical, and say why earlier rounds missed it. Put Important and Minor issues there under '
+		printf 'Later (`"later": true`): they do not block this PR, and can become follow-up issues.\n\n'
+	fi
+}
+
 build_prompt() {
 	{
 		# Part 1: static header (quoted heredoc — zero expansion)
@@ -644,6 +846,8 @@ PART1
 		printf 'settled: raise it again only with new evidence from the current code, and say what '
 		printf 'changed.\n\n'
 
+		previous_round_section
+
 		# Part 3: git range (unquoted heredoc — expands $BASE_SHA/$HEAD_SHA only)
 		cat <<PART3
 ## Git Range to Review
@@ -659,6 +863,9 @@ git diff ${BASE_SHA}..${HEAD_SHA}
 \`\`\`
 
 PART3
+		if [[ "$ROUND_MODE" != full ]]; then
+			printf 'This is the whole PR, for context. The Previous round section above says what to raise where.\n\n'
+		fi
 
 		# Part 4: all review instructions (quoted heredoc — zero expansion)
 		cat <<'PART4'
@@ -770,6 +977,14 @@ cannot see: logic, design intent, operational correctness, and systemic risks.
 describe the concrete failure scenario. A finding with no code reference gets dropped, not
 softened. Vague findings like "improve error handling" are not actionable and should not appear.
 
+PART4
+		if later_round; then output_format_later; else output_format_first; fi
+	} >"$PROMPT_FILE"
+}
+
+# Round 1, and full rounds with nothing to re-check.
+output_format_first() {
+	cat <<'PART5'
 ## Output Format
 
 ### Strengths
@@ -814,8 +1029,79 @@ are: the block is extra, read by tooling, and removed before the review is poste
 [{"severity": "important", "file": "src/api.ts", "line": 141, "title": "Webhook payload is trusted without verification"}]
 ```
 
-PART4
-	} >"$PROMPT_FILE"
+PART5
+}
+
+# Round 2 and later: open findings first, then what was fixed and what can wait, folded.
+output_format_later() {
+	cat <<'PART5'
+## Output Format
+
+### Strengths
+[What is well done? Be specific with file:line references.]
+
+### Issues
+
+The findings that are open now: earlier findings still open or regressed, then new ones, by severity.
+
+#### 🚨 Critical (Must Fix Before Merge)
+
+#### ⚠️ Important (Should Fix)
+
+#### 💡 Minor (Nice to Have)
+
+For each issue:
+- **F3 · [file:line]** — what's wrong (an earlier finding keeps its ID; a new one has none: the tool numbers it)
+  - Why it matters, and for an earlier finding what is still wrong
+  - Suggested fix (code snippet if useful)
+
+If a section is empty, write: *(none found)*
+
+Then, folded, and left out when empty:
+
+<details><summary>Fixed since the last round (n)</summary>
+
+- **F2** — how it was fixed, in one line
+- **F5** — declined: "the quoted reason"
+
+</details>
+
+<details><summary>Later (n)</summary>
+
+- **[file:line]** — what's wrong, and why it can wait
+
+</details>
+
+### Recommendations
+[Cross-cutting improvements for quality, architecture, or process]
+
+### Assessment
+
+**Ready to merge?** [Yes | No | Yes with fixes] (Yes only when no Critical or Important finding is open)
+
+**Reasoning:** [1-2 sentence honest technical assessment]
+
+## Findings block (for tooling)
+
+After the Assessment, end your reply with one fenced code block tagged `json findings`. It holds a JSON array: one
+object per open earlier finding listed in previous-findings.md (every one of them, with its status), one per fixed
+finding that came back (as open), then one per new finding and per Later item:
+`{"id": "F3" or null, "status": "open" | "fixed" | "declined" | "new", "severity": "critical" | "important" |
+"minor", "file": "<path>" or null, "line": <number> or null, "title": "<the finding in one short sentence>",
+"in_delta": true | false, "later": true | false, "reason": "<the quoted reason>" or null}`. An earlier finding keeps
+its ID; a new finding or Later item has `"id": null` and `"status": "new"`. `"reason"` is for a declined finding: the
+quote from the discussion. `"later": true` is only for an Important or Minor finding outside what changed, never in
+a full review. Keep the Markdown above exactly as it is: the block is extra, read by tooling, and removed before the
+review is posted. For example:
+
+```json findings
+[{"id": "F3", "status": "open", "severity": "critical", "file": "src/api.ts", "line": 141, "title": "Webhook payload is trusted without verification", "in_delta": false, "later": false},
+ {"id": "F4", "status": "fixed", "severity": "important", "file": "src/db.ts", "line": 20, "title": "Pool is never closed", "in_delta": false, "later": false},
+ {"id": "F5", "status": "declined", "severity": "minor", "file": "src/log.ts", "line": 7, "title": "Log level is hard-coded", "in_delta": false, "later": false, "reason": "\"We set it per deploy, not per file\" (@alice)"},
+ {"id": null, "status": "new", "severity": "important", "file": "src/retry.ts", "line": 12, "title": "Retry loop has no upper bound", "in_delta": true, "later": false}]
+```
+
+PART5
 }
 
 # ── run pi ───────────────────────────────────────────────────────────────────
@@ -880,13 +1166,17 @@ else
 	fi
 fi
 
-REVIEW=$(assemble_review "$LOOP_LINE" "$APPROACH" "$CODE_REVIEW")
-
 # ── record ─────────────────────────────────────────────────────────────────────────
 # round.json starts as a preview; the post block turns it into the posted round. A failure here never blocks the post.
+# Statuses build on the last code review (FINDINGS_BASE); THIS_LOOP is the loop decision with this round included.
 # It runs under `if !`, where errexit is off: every step checks its own status, and the record is checked before use.
+THIS_LOOP=""
 write_round_record() {
-	local findings parsed source=model code_review=true no_sections=false approach ready meta tmp="${RECORD_FILE}.tmp"
+	local findings parsed source=model code_review=true unknown_counts=false approach ready meta history delta_files
+	local tmp="${RECORD_FILE}.tmp"
+	# The files the delta touched (null in a full round): the record builder and the block checks decide Later with them.
+	delta_files=$(jq -cn --argjson delta "$DELTA" --arg files "$DELTA_FILES" \
+		'if $delta.mode == "full" then null else $files | split("\n") | map(select(. != "")) end') || return 1
 	if [[ "$APPROACH_VERDICT" == rethink ]]; then
 		code_review=false
 		findings='[]'
@@ -898,11 +1188,18 @@ write_round_record() {
 		# A parse failure leaves a parsed record without findings, as the spec says: it never blocks the post.
 		parsed="${RECORD_FILE}.parsed"
 		parse_findings "$REVIEW_BODY_FILE" >"$parsed" 2>/dev/null || echo '[]' >"$parsed"
-		# The block must hold exactly one JSON value, an array: anything else ("[] [ … ]") is read from the Markdown.
-		# So is a block with an open finding of a severity the Markdown says it has none of ("*(none found)*").
+		# Status-only entries are allowed for the last code review's IDs only. The block must hold exactly one JSON
+		# value, an array: anything else ("[] [ … ]") is read from the Markdown. So is a block with an open finding of a
+		# severity the Markdown says it has none of ("*(none found)*"). Its entries are checked as the record will store
+		# them (stored_findings, the builder's own decision): a declined one without a reason, or a Later one that is not
+		# honoured, is open; one stored as fixed, declined or Later is not. A Later one that is not honoured (promoted)
+		# and that the Markdown shows in its Later list is no contradiction: the block keeps it as a finding.
 		if jq -se -L "$LIB_DIR" --slurpfile parsed "$parsed" --rawfile md "$REVIEW_BODY_FILE" \
-			'include "records"; length == 1 and (.[0] | findings_block_ok and block_covers_markdown($parsed[0])
-				and block_respects_empty($md | empty_severities))' "$FINDINGS_FILE" >/dev/null 2>&1; then
+			--argjson base "$FINDINGS_BASE" --argjson delta "$DELTA" --argjson files "$delta_files" \
+			'include "records"; length == 1 and (.[0] | findings_block_ok($base | known_ids)
+				and (later_files($delta.mode; $files) as $later | block_covers_markdown($parsed[0]; $base; $later)
+					and block_respects_empty($md | empty_severities; $md | later_items; $base; $later)))' \
+			"$FINDINGS_FILE" >/dev/null 2>&1; then
 			findings=$(jq -cs '.[0]' "$FINDINGS_FILE") || return 1
 		else
 			if [[ -s "$FINDINGS_FILE" ]]; then
@@ -910,9 +1207,17 @@ write_round_record() {
 			fi
 			source=parsed
 			findings=$(jq -c . "$parsed") || findings='[]'
-			# No severity section in the Markdown: the blockers are unknown (null counts), as when read back.
-			no_sections=$(jq -Rs -L "$LIB_DIR" 'include "records"; _sections | length == 0' "$REVIEW_BODY_FILE") ||
-				no_sections=true
+			# No severity section in the Markdown: the blockers are unknown (null counts), as when read back. So are they
+			# when the rejected block promoted a Later entry to a finding: the parser leaves the Later list out, so the
+			# Markdown's count would miss it.
+			unknown_counts=$(jq -Rs -L "$LIB_DIR" 'include "records"; _sections | length == 0' "$REVIEW_BODY_FILE") ||
+				unknown_counts=true
+			if [[ "$unknown_counts" != true ]] && jq -se -L "$LIB_DIR" --argjson base "$FINDINGS_BASE" \
+				--argjson delta "$DELTA" --argjson files "$delta_files" \
+				'include "records"; length == 1 and (.[0] | block_promotes($base; later_files($delta.mode; $files)))' \
+				"$FINDINGS_FILE" >/dev/null 2>&1; then
+				unknown_counts=true
+			fi
 		fi
 		rm -f "$parsed"
 	fi
@@ -924,31 +1229,69 @@ write_round_record() {
 	meta=$(jq -n --arg source "$source" --arg host "$GH_HOST_NAME" --arg owner "$OWNER" --arg repo "$REPO" \
 		--argjson number "$PR_NUM" --argjson round "$ROUND" --arg reviewer "$ME" --arg model "$MODEL" \
 		--arg base "$BASE_SHA" --arg head "$HEAD_SHA" --argjson previous "$PREVIOUS_RECORD" \
+		--argjson findings_base "$FINDINGS_BASE" --argjson delta "$DELTA" \
 		--arg approach "$approach" --arg ready "$ready" --argjson code_review "$code_review" \
-		--argjson id_floor "$ID_FLOOR" --argjson no_sections "$no_sections" \
+		--argjson id_floor "$ID_FLOOR" --argjson delta_files "$delta_files" --argjson unknown_counts "$unknown_counts" \
 		'{source: $source, pr: {host: $host, owner: $owner, repo: $repo, number: $number}, round: $round,
-		  mode: "full", reviewer: (if $reviewer == "" then null else $reviewer end), model: $model,
-		  base_sha: $base, head_sha: $head, previous_head_sha: ($previous.head_sha? // null),
+		  mode: $delta.mode, mode_reason: ($delta.reason // null), delta_files: $delta_files,
+		  reviewer: (if $reviewer == "" then null else $reviewer end), model: $model,
+		  base_sha: $base, head_sha: $head,
+		  previous_head_sha: ($findings_base.head_sha? // $previous.head_sha? // null),
 		  approach: $approach, ready: $ready, decision: null, posted_at: null,
-		  code_review: $code_review, preview: true, id_floor: $id_floor, no_sections: $no_sections}') || return 1
-	if ! build_record "$meta" "$findings" "$PREVIOUS_RECORD" |
-		jq --argjson loop "$LOOP" --argjson forced "$FORCED" \
-			'.loop = ($loop | {label, flags, decision}) | .forced = $forced' >"$tmp"; then
-		rm -f "$tmp"
-		return 1
-	fi
-	if ! jq -e 'type == "object" and (.round | type == "number") and (.counts | type == "object")' \
-		"$tmp" >/dev/null 2>&1; then
+		  code_review: $code_review, preview: true, id_floor: $id_floor, unknown_counts: $unknown_counts}') || return 1
+	if ! build_record "$meta" "$findings" "$FINDINGS_BASE" >"$tmp" ||
+		! jq -e 'type == "object" and (.round | type == "number") and (.counts | type == "object")' \
+			"$tmp" >/dev/null 2>&1; then
 		echo "Warning: the round record came out malformed." >&2
 		rm -f "$tmp"
 		return 1
 	fi
-	mv "$tmp" "$RECORD_FILE"
+	if ! history=$(jq -c --slurpfile r "$tmp" '. + $r' <<<"$RECORDS") ||
+		! THIS_LOOP=$(loop_decide_json "$history" "$PR_SHAPE" "" false) ||
+		! jq --argjson loop "$LOOP" --argjson this "$THIS_LOOP" --argjson forced "$FORCED" \
+			'.loop = {label: $this.labels[-1], flags: $this.flags, decision: $loop.decision} | .forced = $forced' \
+			"$tmp" >"$RECORD_FILE"; then
+		THIS_LOOP=""
+		rm -f "$tmp"
+		return 1
+	fi
+	rm -f "$tmp"
 }
+# Without a record, round 2 and later still post a minimal marker (FALLBACK_RECORD): this is a later round, its
+# findings list is missing and its blocker count unknown (null), with the history's last IDs. Its Markdown may leave
+# out the blockers it carried, and a reader would otherwise take it for a first review: the next round then builds on
+# an empty baseline. Read back, the round has null counts and no findings list (marker_counts_unknown), so the next
+# round is full.
+FALLBACK_RECORD=""
 if ! write_round_record; then
 	echo "Warning: could not write the round record; the review is posted without it." >&2
 	RECORD_FILE=""
+	if [[ "$ROUND" -gt 1 ]]; then
+		FALLBACK_RECORD="${SESSION_DIR}/round-fallback.json"
+		jq -n --argjson round "$ROUND" --arg ids "$ID_FLOOR" '{schema: 1, round: $round, findings_dropped: true}
+			+ ($ids | fromjson? // null | if type == "object" then {last_ids: .} else {} end)
+			+ {counts: {open_blocking: null, critical: null, important: null, minor: null}}' \
+			>"$FALLBACK_RECORD" 2>/dev/null || FALLBACK_RECORD=""
+	fi
 fi
+
+# Round 2 and later open with a progress line, counted from the record. It replaces the loop line, and carries the
+# loop's suggested move when the loop is not converging.
+assemble_body() {
+	local head_lines="$LOOP_LINE" progress suggestion
+	if [[ -n "$RECORD_FILE" && -n "$THIS_LOOP" ]]; then
+		progress=$(progress_line "$(cat "$RECORD_FILE")" "$FINDINGS_BASE" "$THIS_LOOP" 2>/dev/null || true)
+		if [[ -n "$progress" ]]; then
+			head_lines="$progress"
+			suggestion=$(jq -r 'if (.labels[-1] == "nit-loop" or .labels[-1] == "churning") then .suggestion // "" else "" end' \
+				<<<"$THIS_LOOP")
+			[[ -z "$suggestion" ]] || head_lines+=$'\n'"**Next:** ${suggestion}"
+		fi
+	fi
+	REVIEW_HEAD=$head_lines
+	REVIEW=$(assemble_review "$head_lines" "$APPROACH" "$CODE_REVIEW")
+}
+assemble_body
 
 # ── display ──────────────────────────────────────────────────────────────────
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -1006,11 +1349,22 @@ review_landed() {
 		| length == 1' <<<"$json" >/dev/null 2>&1
 }
 
-# True only when the record file shows how many blockers its round has: a numeric counts.open_blocking. An unknown
-# count (a code review read from its Markdown without a severity section), a missing file or a failed read is false:
-# an automatic approve needs this to succeed.
-known_blockers() { # <record-file>
-	jq -e '(.counts.open_blocking | type) == "number"' "$1" >/dev/null 2>&1
+# True only when a successful read of the record file shows that its round has no open blocker: counts.open_blocking
+# is the number 0. A nonzero count, an unknown one (a code review read from its Markdown without a severity section),
+# a missing file or a failed read is false: an automatic approve needs this to succeed.
+no_blockers() { # <record-file>
+	jq -e '(.counts.open_blocking | type) == "number" and .counts.open_blocking == 0' "$1" >/dev/null 2>&1
+}
+
+# Why an automatic approve became a comment, after no_blockers failed on the record file: its open blockers when it
+# shows a number other than 0, else an unknown count (as when the check itself failed).
+blockers_note() { # <record-file>
+	local n
+	if n=$(jq -er '.counts.open_blocking | numbers | select(. != 0)' "$1" 2>/dev/null); then
+		echo "But ${n} blocking findings are still open: posting as comment, not approve."
+	else
+		echo "The review's blockers are unknown: posting as comment, not approve."
+	fi
 }
 
 # The final record: round.json as posted, with DECISION, built and checked here. Only a record that passes is
@@ -1046,14 +1400,19 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 		*) DECISION=comment ;;
 		esac
 		echo "Verdict: ${VERDICT:-not found} → ${DECISION}"
+		# The record wins over a "Yes" while blocking findings are still open.
+		if [[ "$DECISION" == approve && -n "${RECORD_FILE:-}" ]] &&
+			jq -e '.ready_overridden == true' "$RECORD_FILE" >/dev/null 2>&1; then
+			DECISION=comment
+			echo "    but $(jq -r '.counts.open_blocking' "$RECORD_FILE") blocking findings are still open → ${DECISION}"
 		# An approval says the findings were checked; without a record nothing can show that, so only comment. Nor
-		# can a record whose blocker count is unknown (known_blockers): that round is not ready.
-		if [[ "$DECISION" == approve && -z "${RECORD_FILE:-}" ]]; then
+		# can a record that does not show a blocker count of 0 (no_blockers), whatever the lookup above said.
+		elif [[ "$DECISION" == approve && -z "${RECORD_FILE:-}" ]]; then
 			DECISION=comment
 			echo "No round record for this review: posting as comment, not approve."
-		elif [[ "$DECISION" == approve ]] && ! known_blockers "$RECORD_FILE"; then
+		elif [[ "$DECISION" == approve ]] && ! no_blockers "$RECORD_FILE"; then
 			DECISION=comment
-			echo "The review's blockers are unknown: posting as comment, not approve."
+			blockers_note "$RECORD_FILE"
 		fi
 	fi
 
@@ -1109,10 +1468,9 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 	elif [[ "$NOW_HEAD" != "$HEAD_SHA" ]]; then
 		HEAD_NOTE="The PR moved to ${NOW_HEAD:0:7} during the review; this review covers ${HEAD_SHA:0:7}."
 		echo "$HEAD_NOTE"
-		# Right after the loop line when there is one: that line stays the review's first.
-		if [[ "$REVIEW" == "**Loop:** "* && "$REVIEW" == *$'\n'* ]]; then
-			REVIEW_REST=${REVIEW#*$'\n'}
-			REVIEW=$(printf '%s\n\n**Note:** %s\n\n%s' "${REVIEW%%$'\n'*}" "$HEAD_NOTE" "${REVIEW_REST#$'\n'}")
+		# Right after the review's head (the progress lines, or the loop line) when there is one: it stays first.
+		if [[ -n "${REVIEW_HEAD:-}" && "$REVIEW" == "$REVIEW_HEAD"$'\n\n'* ]]; then
+			REVIEW=$(printf '%s\n\n**Note:** %s\n\n%s' "$REVIEW_HEAD" "$HEAD_NOTE" "${REVIEW:${#REVIEW_HEAD}+2}")
 		else
 			REVIEW=$(printf '**Note:** %s\n\n%s' "$HEAD_NOTE" "$REVIEW")
 		fi
@@ -1124,16 +1482,16 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 
 	posted_record
 	# Right before posting: an automatic approve (the verdict's, or its default taken at the prompt) needs a posted
-	# record that shows its blocker count (known_blockers); otherwise it posts as comment, and the record is built
+	# record that shows a blocker count of 0 (no_blockers); otherwise it posts as comment, and the record is built
 	# again with that decision, so the event, the marker and round.json all say comment. An approve someone chose
 	# stays.
 	if [[ "$DECISION" == approve && "$AUTO_DECISION" == true ]]; then
 		if [[ -z "$POSTED_RECORD" ]]; then
 			DECISION=comment
 			echo "No round record for this review: posting as comment, not approve."
-		elif ! known_blockers "$POSTED_RECORD"; then
+		elif ! no_blockers "$POSTED_RECORD"; then
 			DECISION=comment
-			echo "The review's blockers are unknown: posting as comment, not approve."
+			blockers_note "$POSTED_RECORD"
 			posted_record
 		fi
 	fi
@@ -1148,6 +1506,9 @@ if [[ "$POST_TO_PR" == "true" ]] && [[ -n "$REVIEW" ]]; then
 			echo "Warning: the review leaves no room for its round marker; posting it without one." >&2
 			echo "    round.json keeps the full record: ${RECORD_FILE}" >&2
 		fi
+		[[ -z "$MARKER" ]] || MARKER+=$'\n'
+	elif [[ -n "${FALLBACK_RECORD:-}" ]]; then
+		MARKER=$(marker_line "$FALLBACK_RECORD" "$REVIEW" 2>/dev/null) || MARKER=""
 		[[ -z "$MARKER" ]] || MARKER+=$'\n'
 	fi
 	COMMENT=$(printf '<!-- gh-pr-review generated -->\n%s%s' "$MARKER" "$REVIEW")

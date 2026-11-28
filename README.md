@@ -58,11 +58,12 @@ Inside a repo clone, a bare number works: `gh pr-review 42`.
 | `--no-post` | posting on (with confirm) | Print the review only |
 | `--instructions <text>` | none | Extra guidance for both passes, for example `"Focus on db/; skip style nits"`. For a file: `--instructions "$(cat notes.md)"`. The tool does not post them, and the reviewer is told not to quote them, but the review can still reflect them: use `--no-post` to preview a review shaped by sensitive notes |
 | `--skip-approach` | off | Skip the maintainer's approach pass and run the code review only, for example when the approach is already agreed |
-| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve (comment when the round's blocker count is unknown, as for a code review read from its Markdown with no severity section; a valid empty findings block is a known zero, and approves), anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
+| `--decision <d>` | from verdict | `comment`, `approve`, `request-changes`. Unset: an approach verdict of Rethink → request-changes. Otherwise the last "Ready to merge?" line decides: No → request-changes, a bare Yes → approve only when the round's record shows 0 open blockers (comment when blockers are open, or when the count is unknown, as for a code review read from its Markdown with no severity section; a valid empty findings block is a known zero, and approves), anything else (Yes with fixes, Yes, with fixes, …) → comment. On your own PR it is always comment. `-y` submits the decision without asking |
 | `-y`, `--yes` | off | Skip the confirmations. A loop-check stop then exits with code 3, and no new commits with code 5, instead of asking |
 | `--check` | off | Run only the loop check (see below) and exit 0, 3 or 5. No clone, no model call |
 | `--json` | off | With `--check`: print the decision as JSON on stdout |
 | `--force-round` | off | Run a round even when the loop check stops it or nothing changed |
+| `--full` | off | Review the whole PR again, as in round 1. Earlier findings are still re-checked by ID |
 | `--doctor` | — | Check prerequisites and exit |
 
 Environment variables: `GH_PR_REVIEW_MODEL` (default model),
@@ -169,8 +170,12 @@ next round: stop · churning · approach-stuck too-big · Settle the approach be
 
 The Markdown is the cross-check for the model's findings block: it is parsed
 before the block is accepted, and a block that leaves out a blocker the Markdown
-shows, or has one where it says none, is rejected. It is also the source when
-the block is rejected, and for a review without a usable marker. The reader
+shows, or has one where it says none, is rejected. A Later item that can't be
+Later (it is in what changed) is kept as a finding: the Markdown showing it in
+its Later list instead of its severity section is no contradiction. The
+Markdown is also the source when the block is rejected, and for a review
+without a usable marker; when the rejected block had such an item, the
+Markdown can't count it, so the round's blocker count is unknown. The reader
 follows the format the tool asks the model for (the `### Issues` section with
 severity headings, findings as list items, the folded Fixed and Later lists,
 each `<details>` tag on its own line), and is best effort for other Markdown:
@@ -193,6 +198,56 @@ its Markdown has no severity section to rebuild one from (never read as 0, so
 never `ready`). `--json` prints the records and the decision; `-u <login>`
 picks the gh account, as for a review.
 
+## Round 2 and later
+
+From the second round, the reviewer builds on the last code review instead of
+starting over:
+
+1. **Earlier findings are re-checked by ID.** Each one comes back `fixed`,
+   `open` (a fix attempt that did not work stays open) or `declined` (only with
+   a reason from the PR discussion, quoted; without one it stays open). The
+   findings that round fixed are listed too: one that comes back keeps its ID
+   and is `regressed`. One the reviewer forgets is kept `open` and marked as
+   not re-checked: nothing disappears silently.
+2. **What changed since that round is reviewed in full**, at every severity:
+   `git diff <previous head>..<head>`, or `git range-diff` when the author
+   rebased.
+3. **Outside what changed, only Critical findings are raised.** Important and
+   Minor issues there go to a folded **Later** list. Later items don't block
+   the PR, and can become follow-up issues. A Critical finding, or one in
+   what changed, is never Later.
+
+The owner pass starts from its previous verdict, and keeps it in one line
+unless the changes or the discussion change it. After a Rethink it judges
+afresh.
+
+The posted review opens with a progress line counted from the round record,
+not from the model's text:
+
+```
+### Round 3 · since round 2
+4 fixed · 2 still open · 3 new (1 in the new commits) · open blocking: 5 (was 6) · loop: converging
+```
+
+Fixed findings and the Later list follow the open ones, folded. "Ready to
+merge? Yes" with blocking findings still open posts as a comment: the record
+wins.
+
+A later round read back from its Markdown (no marker, or one without the full
+counts) takes its open blocking count from the progress line: its Markdown
+leaves out the findings it carried without re-checking them. The IDs in its
+Fixed list are never open, and every ID it shows, and every Later item, keeps
+its number reserved.
+
+When the comparison is not safe, the round is a full review, and it says why:
+the previous head is gone (a force-push), the base branch was merged in with
+conflicts, the PR's base changed (a retarget), the last round's base is unknown
+(a review read back from its Markdown), git cannot list the changed files, or
+the last round's record lost its findings to GitHub's size cap or could not be
+built. A later round whose record could not be built still posts a minimal
+marker that says so: read back, its blocker count is unknown, never 0. `--full` asks for one, for example after a
+rewrite.
+
 ## Loop check
 
 Before a round, the tool reads the PR's earlier rounds and decides whether
@@ -202,9 +257,18 @@ Important) of each round:
 - **Converging:** the count drops (to 1 or less, or by 30% over two rounds).
   The round runs.
 - **Nit loop** (3 or fewer, no Critical) or **Churning** (anything else) after
-  the first 3 rounds: a warning. The round runs, and the posted review starts
-  with a line such as
-  `**Loop:** Churning · blocking 9, 12, 8 · Split the PR: each part converges on its own`.
+  the first 3 rounds: a warning. The round runs. Its posted review opens with
+  the progress line (see above), which carries the loop label, and a
+  suggested move under it:
+
+  ```
+  ### Round 4 · since round 3
+  2 fixed · 6 still open · 4 new · open blocking: 10 (was 8) · loop: churning
+  **Next:** Split the PR: each part converges on its own
+  ```
+
+  Without a round record to count from, the review opens with the older
+  one-line form instead: `**Loop:** Churning · blocking 9, 12, 8 · …`.
 - **Two such rounds in a row:** the round stops before any clone or model
   call. In a terminal it asks first; with `-y` (scripts and agents) it exits
   with code 3. The suggested move comes from the history: settle the approach,

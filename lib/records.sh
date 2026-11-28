@@ -50,10 +50,18 @@ normalize_ready() { # <text>
 	esac
 }
 
-# round.json from the run's facts (meta JSON), the findings JSON and the previous record JSON (or null).
+# round.json from the run's facts (meta JSON), the findings JSON and the previous record JSON (or null). The
+# previous record is the last one with a code review. From round 2 the findings carry IDs and statuses.
 build_record() { # <meta-json> <findings-json> <previous-record-json-or-null>
 	jq -L "${LIB_DIR:?}" -n --argjson meta "$1" --argjson findings "${2:-[]}" --argjson prev "${3:-null}" \
 		'include "records"; build_record($meta; $findings; $prev)'
+}
+
+# The two-line progress line that opens a round 2 or later body. Nothing without a previous record. The decision
+# is loop_decide_json over the history including this record.
+progress_line() { # <record-json> <previous-record-json-or-null> <decision-json>
+	jq -r -L "${LIB_DIR:?}" -n --argjson record "$1" --argjson prev "${2:-null}" --argjson decision "${3:-null}" \
+		'include "records"; $record | progress_line($prev; $decision)'
 }
 
 # The hidden marker line for a record file, for the review posted below it: a file, or the text itself. Prints

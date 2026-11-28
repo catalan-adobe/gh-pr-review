@@ -5,6 +5,9 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 stub=$(mktemp -d)
 sed -n '/^# ── pr context/,/^}/p' "$root/gh-pr-review" >"$stub/lib.sh"
 no_threads='{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}'
+# The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
+finished=false
+trap '[[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
 
 run() { # pr-json [threads-json] [graphql-exit-code] -> writes into $stub/ctx, sets out and rc
@@ -93,4 +96,5 @@ if [[ $rc != 0 && "$out" == *"Error: could not fetch"* ]]; then echo "ok   gh fa
 	echo "FAIL gh failure is reported: rc=$rc out=$out"
 	fail=1
 fi
+finished=true
 exit "$fail"

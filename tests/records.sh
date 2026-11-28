@@ -10,7 +10,9 @@ source "$root/lib/verdicts.sh"
 source "$root/lib/records.sh"
 fixtures="$root/tests/fixtures/reviews"
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
+finished=false
+trap 'rm -rf "$tmp"; [[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
 
 check() { # name got want
@@ -100,10 +102,15 @@ meta='{"source":"model","pr":{"host":"github.com","owner":"o","repo":"r","number
 	"reviewer":"me","model":"m","head_sha":"bbb","approach":"sound","ready":"yes-with-fixes","code_review":true}'
 prev=$(jq -n '{head_sha: "aaa", findings: [range(1; 8) | {id: "F\(.)"}]}')
 rec=$(build_record "$meta" "$(parse_findings "$fixtures/bullets.md")" "$prev")
+rec_bullets=$rec
 check "ids continue after F7" "$(jq -r '[.findings[].id] | join(" ")' <<<"$rec")" "F8 F9 F10 F11 F12 F13"
 check "open_blocking" "$(jq '.counts.open_blocking' <<<"$rec")" 4
 check "counts" "$(jq -c '.counts' <<<"$rec")" \
-	'{"open_blocking":4,"critical":1,"important":3,"minor":2,"new":6,"fixed":0,"declined":0,"regressed":0}'
+	'{"open_blocking":4,"critical":1,"important":3,"minor":2,"new":6,"fixed":0,"declined":0,"regressed":0,"later":0,"unverified":0}'
+check "round 1: no unverified key" "$(jq '[.findings[] | has("unverified")] | any' <<<"$rec")" false
+check "round 1: last ids" "$(jq -c '.last_ids' <<<"$rec")" '{"F":13,"L":0}'
+check "round 1: ready kept, not overridden" "$(jq -c '[.ready, .ready_overridden]' <<<"$rec")" '["yes-with-fixes",true]'
+check "mode kept, no reason" "$(jq -c '[.mode, .mode_reason]' <<<"$rec")" '["full",null]'
 check "finding fields" "$(jq -c '.findings[0] | [.status, .first_round, .in_delta]' <<<"$rec")" '["new",2,false]'
 check "schema, later, preview" "$(jq -c '[.schema, .later, .preview]' <<<"$rec")" '[1,[],false]'
 check "missing meta keys are null" "$(jq -c '[.base_sha, .posted_at, .decision]' <<<"$rec")" '[null,null,null]'
@@ -117,9 +124,199 @@ rethink=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <
 	'[{"severity":"critical","title":"t"}]' null)
 check "rethink: no findings" "$(jq -c '.findings' <<<"$rethink")" "[]"
 check "rethink: null counts" "$(jq -c '[.counts[]] | unique' <<<"$rethink")" "[null]"
+check "rethink: count keys" "$(jq -c '.counts | keys' <<<"$rethink")" \
+	'["critical","declined","fixed","important","later","minor","new","open_blocking","regressed","unverified"]'
+check "rethink: not overridden, no later" "$(jq -c '[.ready_overridden, .later]' <<<"$rethink")" '[false,[]]'
+
+# ── build_record with statuses (round 2 and later) ──────────────────────────
+# Round 2: F1 open, F2 fixed, F3 declined, F4 new, F5 regressed, L6 later. F and L number apart, each from its
+# highest.
+meta2=$(jq -c '.round = 3 | .mode = "incremental" | .mode_reason = null | .ready = "no" | .delta_files = ["t.ts"]' <<<"$meta")
+prev2=$(jq -nc '{round: 2, head_sha: "aaa", counts: {open_blocking: 3}, findings: [
+	{id: "F1", severity: "critical", status: "open", first_round: 1, in_delta: false, file: "a.ts", line: 1, title: "one"},
+	{id: "F2", severity: "important", status: "fixed", first_round: 1, in_delta: false, file: "b.ts", line: 2, title: "two"},
+	{id: "F3", severity: "important", status: "declined", first_round: 1, in_delta: false, file: "c.ts", line: 3, title: "three"},
+	{id: "F4", severity: "minor", status: "new", first_round: 2, in_delta: true, file: "d.ts", line: 4, title: "four"},
+	{id: "F5", severity: "important", status: "regressed", first_round: 1, in_delta: false, file: "e.ts", line: 5,
+		title: "five"}],
+	later: [{id: "L6", severity: "minor", file: "f.ts", line: 6, title: "six"}]}')
+r3() { build_record "$meta2" "$1" "$prev2"; }
+one() { jq -c --arg id "$2" '(.findings + .later)[] | select(.id == $id)
+	| [.status, .first_round, .severity, .file, .line, .title, (.unverified // false)]' <<<"$1"; }
+
+rec=$(r3 '[{"id":"F1","status":"fixed"}]')
+check "known id keeps its status" "$(one "$rec" F1)" '["fixed",1,"critical","a.ts",1,"one",false]'
+rec=$(r3 '[{"id":"F1","status":"open","severity":"minor","file":"z.ts","line":9,"title":"new title"}]')
+check "known id: model fields win" "$(one "$rec" F1)" '["open",1,"minor","z.ts",9,"new title",false]'
+rec=$(r3 '[{"id":"F2","status":"open"}]')
+check "fixed then open: regressed" "$(one "$rec" F2)" '["regressed",1,"important","b.ts",2,"two",false]'
+check "regressed counts as blocking" "$(jq -c '.counts | [.regressed, .open_blocking]' <<<"$rec")" '[1,3]'
+rec=$(r3 '[{"id":"F5","status":"open"}]')
+check "regressed then open: open" "$(one "$rec" F5)" '["open",1,"important","e.ts",5,"five",false]'
+rec=$(r3 '[{"severity":"minor","title":"n1"},{"severity":"important","file":"l.ts","title":"l1","later":true},
+	{"severity":"critical","title":"n2","in_delta":true}]')
+check "new ids continue after F5 and L6" "$(jq -c '[.findings[] | select(.status == "new") | .id], [.later[].id]' \
+	<<<"$rec" | tr -d '\n')" '["F6","F7"]["L7"]'
+check "new finding fields" "$(jq -c '.findings[] | select(.id == "F7") | [.status, .first_round, .in_delta]' \
+	<<<"$rec")" '["new",3,true]'
+check "later item fields" "$(jq -c '.later[0]' <<<"$rec")" \
+	'{"id":"L7","severity":"important","file":"l.ts","line":null,"title":"l1"}'
+check "last ids" "$(jq -c '.last_ids' <<<"$rec")" '{"F":7,"L":7}'
+check "later items not blocking" "$(jq -c '.counts | [.later, .important]' <<<"$rec")" '[1,1]'
+check "previous later not carried" "$(jq -c '[.later[].id] | index("L6")' <<<"$rec")" null
+rec=$(r3 '[]')
+check "missing ids carried as unverified open" \
+	"$(jq -c '[.findings[] | [.id, .status, .unverified]]' <<<"$rec")" \
+	'[["F1","open",true],["F4","open",true],["F5","open",true]]'
+check "carried keep first round" "$(one "$rec" F4)" '["open",2,"minor","d.ts",4,"four",true]'
+check "fixed and declined not carried" "$(jq -c '[.findings[].id | select(. == "F2" or . == "F3")]' <<<"$rec")" "[]"
+check "carried: counts" "$(jq -c '.counts' <<<"$rec")" \
+	'{"open_blocking":2,"critical":1,"important":1,"minor":1,"new":0,"fixed":0,"declined":0,"regressed":0,"later":0,"unverified":3}'
+check "numbering survives an empty round" "$(build_record "$meta2" '[{"severity":"minor","title":"x"}]' "$rec" |
+	jq -r '.findings[] | select(.status == "new") | .id')" F6
+rec=$(r3 '[{"id":"F1","status":"fixed"},{"id":"F1","status":"open"}]')
+check "duplicate keeps the first" "$(jq -c '[.findings[] | select(.id == "F1") | .status]' <<<"$rec")" '["fixed"]'
+rec=$(r3 '[{"id":"F99","status":"open","severity":"important","title":"ghost"}]')
+check "unknown id becomes new" "$(jq -c '.findings[0] | [.id, .status, .first_round, .title]' <<<"$rec")" \
+	'["F6","new",3,"ghost"]'
+rec=$(r3 '[{"id":"F1","status":"maybe"}]')
+check "bad status: open, unverified" "$(one "$rec" F1)" '["open",1,"critical","a.ts",1,"one",true]'
+check "bad status: not carried twice" "$(jq '[.findings[] | select(.id == "F1")] | length' <<<"$rec")" 1
+check "in_delta kept as a boolean" "$(r3 '[{"severity":"minor","title":"t","in_delta":"yes"}]' |
+	jq -c '.findings[0].in_delta')" false
+
+rec=$(build_record "$(jq -c '.ready = "yes"' <<<"$meta2")" '[{"id":"F1","status":"open"}]' "$prev2")
+check "ready yes with open blocking: overridden" "$(jq -c '[.ready, .ready_overridden]' <<<"$rec")" '["yes",true]'
+rec=$(build_record "$(jq -c '.ready = "yes"' <<<"$meta2")" \
+	'[{"id":"F1","status":"fixed"},{"id":"F4","status":"open"},{"id":"F5","status":"declined","reason":"out of scope"}]' "$prev2")
+check "ready yes, nothing blocking: not overridden" "$(jq -c '[.ready_overridden, .counts.open_blocking]' \
+	<<<"$rec")" '[false,0]'
+check "ready no: not overridden" "$(r3 '[]' | jq .ready_overridden)" false
+rec=$(build_record "$(jq -c '.mode = "full" | .mode_reason = "the previous head is gone"' <<<"$meta2")" '[]' "$prev2")
+check "mode and mode_reason kept" "$(jq -c '[.mode, .mode_reason]' <<<"$rec")" '["full","the previous head is gone"]'
+rec=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <<<"$meta2")" \
+	'[{"id":"F1","status":"fixed"}]' "$prev2")
+check "rethink after round 2: no findings, null counts" "$(jq -c '[.findings, .later, ([.counts[]] | unique)]' \
+	<<<"$rec")" '[[],[],[null]]'
+
+# Model output that would drop a blocker: a decline needs a reason, Later needs an eligible finding.
+rec=$(r3 '[{"id":"F1","status":"declined"},{"id":"F5","status":"declined","reason":"  "}]')
+check "declined without a reason: open, unverified" "$(one "$rec" F1),$(one "$rec" F5)" \
+	'["open",1,"critical","a.ts",1,"one",true],["open",1,"important","e.ts",5,"five",true]'
+check "declined without a reason: still blocking" "$(jq -c '.counts | [.open_blocking, .declined]' <<<"$rec")" '[2,0]'
+rec=$(r3 '[{"id":"F1","status":"declined","severity":"minor"}]')
+check "declined without a reason: no severity downgrade" "$(one "$rec" F1)" '["open",1,"critical","a.ts",1,"one",true]'
+check "declined without a reason: the Critical still blocks" \
+	"$(jq -c '[.counts.open_blocking, .counts.critical, .counts.minor]' <<<"$rec")" '[2,1,1]'
+rec=$(r3 '[{"id":"F1","status":"declined","reason":"\"not in this PR\" (alice)"}]')
+check "declined with a reason: declined" "$(one "$rec" F1)" '["declined",1,"critical","a.ts",1,"one",false]'
+later_of() { # <meta> <entry> -> where it went: later or the findings, with its status
+	build_record "$1" "[$2]" "$prev2" | jq -r 'if (.later | length) > 0 then "later"
+		else .findings[] | select(.status == "new") | "finding:" + .severity end'
+}
+check "later: an Important outside the delta, incremental" \
+	"$(later_of "$meta2" '{"severity":"important","file":"x.ts","title":"x","later":true}')" later
+check "later: a Minor outside the delta, rebased" \
+	"$(later_of "$(jq -c '.mode = "rebased"' <<<"$meta2")" '{"severity":"minor","file":"x.ts","title":"x","later":true}')" later
+check "later: a Critical stays a finding" \
+	"$(later_of "$meta2" '{"severity":"critical","title":"x","later":true}')" finding:critical
+check "later: one in the delta stays a finding" \
+	"$(later_of "$meta2" '{"severity":"important","file":"x.ts","title":"x","later":true,"in_delta":true}')" finding:important
+check "later: a full round has no Later" \
+	"$(later_of "$(jq -c '.mode = "full"' <<<"$meta2")" '{"severity":"important","file":"x.ts","title":"x","later":true}')" \
+	finding:important
+check "later: no mode, no Later" \
+	"$(later_of "$(jq -c 'del(.mode)' <<<"$meta2")" '{"severity":"minor","file":"x.ts","title":"x","later":true}')" finding:minor
+# The delta's file list decides, not in_delta: a touched file, a missing file or an unknown list keeps the finding.
+check "later: one in a file the delta touched stays a finding" \
+	"$(later_of "$meta2" '{"severity":"important","file":"t.ts","title":"x","later":true,"in_delta":false}')" finding:important
+check "later: a ./ path in a touched file stays a finding" \
+	"$(later_of "$meta2" '{"severity":"minor","file":"./t.ts","title":"x","later":true}')" finding:minor
+check "later: one without a file stays a finding" \
+	"$(later_of "$meta2" '{"severity":"important","title":"x","later":true}')" finding:important
+check "later: no file list, no Later" \
+	"$(later_of "$(jq -c 'del(.delta_files)' <<<"$meta2")" '{"severity":"minor","file":"x.ts","title":"x","later":true}')" \
+	finding:minor
+rec=$(build_record "$(jq -c '.mode = "full" | .ready = "yes"' <<<"$meta2")" \
+	'[{"id":"F1","status":"fixed"},{"id":"F4","status":"fixed"},{"id":"F5","status":"fixed"},
+	{"severity":"critical","title":"x","later":true}]' "$prev2")
+check "later: a Critical marked later in a full round blocks the approval" \
+	"$(jq -c '[.counts.open_blocking, .ready_overridden, (.later | length)]' <<<"$rec")" '[1,true,0]'
+
+# A full round 3 on the round 2 record: every status moves.
+reply='[
+	{"id":"F2","status":"open","in_delta":true},
+	{"id":"F5","status":"fixed"},
+	{"id":"F4","status":"declined","title":"four, declined","reason":"\"Kept on purpose\" (bob)"},
+	{"id":"F2","status":"fixed"},
+	{"id":"F3","status":"open"},
+	{"id":"F77","status":"fixed","severity":"minor","file":"g.ts","line":7,"title":"unknown"},
+	{"severity":"critical","file":"h.ts","line":8,"title":"in delta","in_delta":true},
+	{"severity":"important","file":"i.ts","line":9,"title":"later one","later":true},
+	{"severity":"nit","title":"dropped"}
+]'
+rec=$(r3 "$reply")
+check "round 3: findings" "$(jq -c '[.findings[] | [.id, .status, .first_round, (.unverified // false)]]' <<<"$rec")" \
+	'[["F2","regressed",1,false],["F5","fixed",1,false],["F4","declined",2,false],["F3","open",1,false],["F6","new",3,false],["F7","new",3,false],["F1","open",1,true]]'
+check "round 3: later" "$(jq -c '[.later[] | [.id, .title]]' <<<"$rec")" '[["L7","later one"]]'
+check "round 3: counts" "$(jq -c '.counts' <<<"$rec")" \
+	'{"open_blocking":4,"critical":2,"important":2,"minor":1,"new":2,"fixed":1,"declined":1,"regressed":1,"later":1,"unverified":1}'
+check "round 3: kept the round 2 head" "$(jq -r .previous_head_sha <<<"$rec")" aaa
+
+# A marker cut to fit the size cap: counts and last_ids kept, findings list gone. Nothing to carry, no ID to know.
+capped2=$(jq -c '.last_ids = {F: 5, L: 6}' <<<"$prev2")
+for capped in "$(jq -c 'del(.findings) | .findings_dropped = true' <<<"$capped2")" \
+	"$(jq -c 'del(.findings)' <<<"$capped2")" "$(jq -c '.findings_dropped = true' <<<"$capped2")"; do
+	what=$(jq -r 'if has("findings") then "findings_dropped with a list" elif .findings_dropped then "findings_dropped"
+		else "no findings key" end' <<<"$capped")
+	rec=$(build_record "$meta2" '[]' "$capped")
+	check "capped previous ($what): nothing carried" "$(jq -c '[.findings, .counts.open_blocking, .counts.unverified]' \
+		<<<"$rec")" '[[],0,0]'
+	check "capped previous ($what): no 'was' in the progress line" \
+		"$(progress_line "$rec" "$capped" '{"label":null}' | tail -n 1)" "open blocking: 0"
+	rec=$(build_record "$meta2" '[{"id":"F1","status":"fixed"},{"id":"F2","status":"open","severity":"important","title":"t"}]' \
+		"$capped")
+	check "capped previous ($what): an ID it cannot know is new" "$(jq -c '[.findings[] | [.id, .status]]' <<<"$rec")" \
+		'[["F6","new"]]'
+done
+empty=$(jq -c '.findings = [] | .counts.open_blocking = 0' <<<"$prev2")
+rec=$(build_record "$meta2" '[]' "$empty")
+check "empty previous list: a known zero, kept in the progress line" \
+	"$(progress_line "$rec" "$empty" '{"label":null}' | tail -n 1)" "open blocking: 0 (was 0)"
+
+# The Markdown fallback on a later-round body (no findings block): IDs kept, folded sections not open findings.
+f=$(parse_findings "$fixtures/later-round.md")
+check "later round: open items keep their ID, both bullet forms" \
+	"$(jq -c '[.[] | select(.status == "open") | [.id, .severity, .file, .line]]' <<<"$f")" \
+	'[["F1","critical","a.ts",1],["F5","important","e.ts",5],["F2","important","b.ts",2]]'
+check "later round: the ID is not in the title" "$(item "$f" 0)" \
+	"critical | a.ts | 1 | Still trusts the payload when the header is empty."
+check "later round: a new item has no ID" "$(jq -c '[.[] | select(.id == null) | [.severity, .file, .title]]' <<<"$f")" \
+	'[["important","d.ts","The new retry loop has no upper bound."]]'
+check "later round: Fixed gives fixed and declined, with the quoted reason" \
+	"$(jq -c '[.[] | select(.status == "fixed" or .status == "declined") | [.id, .status, .reason, .severity]]' <<<"$f")" \
+	'[["F4","fixed",null,null],["F3","declined","\"Kept on purpose until the v2 API ships\" (@bob)",null]]'
+check "later round: the Later item and the Strengths are left out" "$(jq -c '[.[] | .file] | index("f.ts"), index("src/api.ts")' \
+	<<<"$f" | paste -sd, -)" "null,null"
+rec=$(r3 "$f")
+check "later round fallback: every ID once, nothing carried twice" \
+	"$(jq -c '[.findings[] | [.id, .status, (.unverified // false)]]' <<<"$rec")" \
+	'[["F1","open",false],["F5","open",false],["F2","regressed",false],["F6","new",false],["F4","fixed",false],["F3","declined",false]]'
+check "later round fallback: counts" "$(jq -c '.counts | [.open_blocking, .unverified, .later, .minor]' <<<"$rec")" \
+	'[4,0,0,0]'
+printf '#### ⚠️ Important\n\n- **F1 · `a.ts:1`** — open.\n\n<details><summary>Fixed (1)</summary>\n\n- **F4** — declined:\n- **F5** — declined: \n\n#### 💡 Minor\n\n- **[m.ts:1]** — after an unclosed details.\n' \
+	>"$tmp/unclosed.md"
+f=$(parse_findings "$tmp/unclosed.md")
+check "later round: a decline without a reason has none" "$(jq -c '[.[] | select(.status == "declined") | .reason]' <<<"$f")" \
+	'[null,null]'
+# A fold runs to its </details> (_lines): a heading inside an unclosed one starts no section.
+check "later round: a heading inside an unclosed <details> starts no section" \
+	"$(jq -c '[.[] | select(.severity == "minor") | .file]' <<<"$f")" '[]'
+check "later round: an unreasoned decline stays open" "$(r3 "$f" | jq -c '[.findings[] | select(.id == "F4" or .id == "F5")
+	| [.id, .status, .unverified]]')" '[["F4","open",true],["F5","open",true]]'
 
 # ── finding IDs never restart ───────────────────────────────────────────────
-check "last_ids: the highest IDs of the round" "$(jq -c '.last_ids' <<<"$rec")" '{"F":13,"L":0}'
+check "last_ids: the highest IDs of the round" "$(jq -c '.last_ids' <<<"$rec_bullets")" '{"F":13,"L":0}'
 one='[{"severity":"minor","title":"t"}]'
 r1=$(build_record "$meta" "$one" null)
 r2=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <<<"$meta")" "$one" "$r1")
@@ -138,17 +335,53 @@ check "id_floor: the next ID comes after the floor, not the previous record" \
 	"$(build_record "$(jq -c '.id_floor = {F: 9, L: 4}' <<<"$meta")" "$one" "$r1" |
 		jq -c '[.findings[0].id, .last_ids]')" '["F10",{"F":10,"L":4}]'
 
-ok_block() { jq -c -L "$LIB_DIR" 'include "records"; map(findings_block_ok)' <<<"$1"; }
+# ── recover_details ─────────────────────────────────────────────────────────
+# Round 3's marker left out F1's file and title and F2's title; earlier rounds had them. The newest one wins.
+history=$(jq -nc '[{findings: [{id: "F1", file: "old.ts", line: 1, title: "first title"}, {id: "F2", title: "two"}]},
+	{findings: [{id: "F1", file: "a.ts", line: 3, title: "thing breaks"}]},
+	{findings_dropped: true},
+	{findings: [{id: "F1", severity: "important", line: 7}, {id: "F2", file: "c.ts", line: 9}, {id: "F9"}]}]')
+check "recover_details: missing details from the newest earlier round with the ID" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; .[-1] | recover_details($h) | [.findings[] | [.id, .file, .line, .title]]' \
+		--argjson h "$history" <<<"$history")" \
+	'[["F1","a.ts",7,"thing breaks"],["F2","c.ts",9,"two"],["F9",null,null,null]]'
+check "recover_details: no history, no change" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; recover_details(null) | .findings' <<<'{"findings":[{"id":"F1"}]}')" '[{"id":"F1","file":null,"line":null,"title":null}]'
+
+ok_block() { # <blocks> [known ids]
+	jq -c -L "$LIB_DIR" --argjson ids "${2:-[]}" 'include "records"; map(findings_block_ok($ids))' <<<"$1"
+}
 check "findings_block_ok: good blocks" "$(ok_block '[[], [{"severity":"Critical","title":"t","file":null,"line":null}],
 	[{"severity":"minor","title":"t","file":"a.js","line":3}, {"severity":"important","title":"u"}]]')" \
 	"[true,true,true]"
+check "findings_block_ok: an earlier ID may give only its status" \
+	"$(ok_block '[[{"id":"F3","status":"fixed"}], [{"id":"F3","status":"open","severity":"critical"}], [{"id":null,"status":"new","title":"t"}], [{"status":"new","severity":"minor"}], [{"id":" F3 ","status":"fixed"}]]' '["F1","F3"]')" \
+	"[true,true,false,false,true]"
+# An ID the last code review does not have is a new finding: without a severity and a title, the Markdown decides.
+check "findings_block_ok: an unknown ID must be a whole new finding" \
+	"$(ok_block '[[{"id":"F999","status":"open","title":"Nil dereference"}], [{"id":"F2","status":"fixed"}],
+	[{"id":"F999","status":"open","severity":"critical","title":"Nil dereference"}]]' '["F1"]')" "[false,false,true]"
+check "findings_block_ok: round 1 knows no ID" "$(ok_block '[[{"id":"F1","status":"fixed"}]]')" "[false]"
+check "known_ids: the last code review's IDs, none without its list" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; map(known_ids)' <<<"[null, $prev2, $(jq -c '.findings_dropped = true' <<<"$prev2")]")" \
+	'[[],["F1","F2","F3","F4","F5"],[]]'
+# Round 1 with an invented ID and no severity: the block is not usable, so the Markdown's Critical is the record's.
+printf '#### 🚨 Critical\n\n- **`n.go:4` — Nil dereference.**\n' >"$tmp/invented.md"
+if jq -e -L "$LIB_DIR" 'include "records"; findings_block_ok(null | known_ids)' \
+	<<<'[{"id":"F999","status":"open","title":"Nil dereference"}]' >/dev/null; then
+	f='[{"id":"F999","status":"open","title":"Nil dereference"}]'
+else f=$(parse_findings "$tmp/invented.md"); fi
+check "invented ID: the record has the Critical from the Markdown" \
+	"$(build_record "$meta" "$f" null | jq -c '[.counts.critical, .findings[0].id, .findings[0].file]')" '[1,"F1","n.go"]'
+
 check "findings_block_ok: one bad entry spoils the block" "$(ok_block '[{}, [{"level":"critical","title":"t"}],
 	[{"severity":"nit","title":"t"}], [{"severity":"minor"}], [{"severity":"minor","title":"t","line":"3"}],
 	[{"severity":"minor","title":"t","file":3}], [{"severity":"minor","title":"t"}, "F2"]]')" \
 	"[false,false,false,false,false,false,false]"
 
+# A round 1 block, judged as round 1 stores it (stored_findings without a last code review: every entry is new).
 covers() { # block parsed -> block_covers_markdown
-	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson p "$2" 'include "records"; $b | block_covers_markdown($p)'
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson p "$2" 'include "records"; $b | block_covers_markdown($p; null; null)'
 }
 crit='[{"severity":"critical","title":"t"}]'
 check "block_covers_markdown: [] next to a Critical bullet does not cover it" "$(covers '[]' "$crit")" false
@@ -159,8 +392,8 @@ check "block_covers_markdown: a Critical covers an Important" \
 	"$(covers '[{"severity":"critical","title":"x"}]' '[{"severity":"important","title":"t"}]')" true
 check "block_covers_markdown: a downgrade to minor does not cover an Important" \
 	"$(covers '[{"severity":"minor","title":"x"}]' '[{"severity":"important","title":"t"}]')" false
-# This version stores every entry as new (stored_status): a block's fixed, declined or later entry is open.
-check "block_covers_markdown: fixed, declined and later entries are judged as stored: open" \
+# Round 1 stores every entry as new (entry_outcome): a block's fixed, declined or later entry is open.
+check "block_covers_markdown: round 1 fixed, declined and later entries are judged as stored: open" \
 	"$(covers '[{"severity":"critical","status":"fixed"}]' "$crit"),$(covers '[{"severity":"critical","status":"declined"}]' "$crit"),$(covers '[{"severity":"critical","later":true}]' "$crit")" true,true,true
 check "block_covers_markdown: open, regressed and status-less entries are" \
 	"$(covers '[{"severity":"critical","status":"open"},{"severity":"important","status":"regressed"},{"severity":"important"}]' \
@@ -179,7 +412,7 @@ check "block_covers_markdown: two bullets at one location need two entries there
 check "block_covers_markdown: entries and bullets without a location take no part" \
 	"$(covers '[{"severity":"critical","title":"x"},{"severity":"critical","file":"z.go"}]' \
 		'[{"severity":"critical","file":"a.go","line":null},{"severity":"critical","file":null,"line":null}]')" true
-check "block_covers_markdown: a fixed entry at the location is stored as new: it covers it" \
+check "block_covers_markdown: a round 1 fixed entry at the location is stored as new: it covers it" \
 	"$(covers '[{"severity":"critical","file":"a.go","line":10,"status":"fixed"}]' \
 		'[{"severity":"critical","file":"a.go","line":10}]')" true
 
@@ -224,7 +457,10 @@ check "parse_findings: the same lines are no findings" \
 	"$(printf '#### 🚨 Critical\n- None.\n#### ⚠️ Important\n- *(none found)*\n1. None.\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings')" '[]'
 # Severity headings count only in the Issues section, and a folded <details> list is no section's.
 f=$(parse_findings "$fixtures/approach-context.md")
-check "parse_findings: bullets under an approach heading named Important context are no findings" "$f" '[]'
+check "parse_findings: bullets under an approach heading named Important context are no findings" \
+	"$(jq -c 'map(select(.severity))' <<<"$f")" '[]'
+check "parse_findings: the folded Fixed list of that review gives its IDs as fixed" \
+	"$(jq -c 'map(.id + " " + .status)' <<<"$f")" '["F1 fixed","F2 fixed"]'
 check "empty_severities: so every severity of that review is empty" \
 	"$(jq -c -Rs -L "$LIB_DIR" 'include "records"; empty_severities' "$fixtures/approach-context.md")" '["critical","important","minor"]'
 check "parse_findings: the same heading in a body without an Issues heading still counts" \
@@ -243,29 +479,93 @@ check "empty_severities: a Minor section holding only a <details> list is empty"
 check "parse_findings: a fenced <details> example in a fold does not keep the fold open past its </details>" \
 	"$(printf '### Issues\n#### Minor\n<details><summary>Fixed (1)</summary>\n\n- x\n  ```html\n  <details>\n  ```\n</details>\n#### Critical\n- boom\n' |
 		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.severity + " " + .title)')" '["critical boom"]'
-check "parse_findings: a fixed item quoting </details> in code does not close the fold" \
+check "parse_findings: a fixed item quoting </details> in code does not close the fold: F1 and F2 stay fixed" \
 	"$(printf '### Issues\n#### Critical\n<details><summary>Fixed (2)</summary>\n\n- **F1** — closes with `</details>`.\n- **F2** — other.\n</details>\n- c\n' |
-		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["c"]'
+		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title // "\(.id) \(.status)")')" '["F1 fixed","F2 fixed","c"]'
 # A heading may start with up to 3 spaces (CommonMark), for the Issues section and its end alike.
 check "parse_findings: an indented Issues heading and an indented closing heading bound the section" \
 	"$(printf '#### Important context\n- ctx\n  ### Issues\n   #### Important\n- a\n ### Notes\n#### Minor\n- b\n' |
 		jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a"]'
 check "parse_findings: 4 spaces are no heading" \
 	"$(printf '### Issues\n#### Minor\n- a\n    ### Notes\n- b\n' | jq -c -Rs -L "$LIB_DIR" 'include "records"; parse_findings | map(.title)')" '["a","b"]'
-respects() { jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"])'; }
+respects() { # round 1 block -> block_respects_empty, judged as stored
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" 'include "records"; $b | block_respects_empty(["critical"]; []; null; null)'
+}
 check "block_respects_empty: an open Critical where the Markdown has none" "$(respects '[{"severity":"Critical","title":"x"}]')" false
-check "block_respects_empty: fixed, declined and later Criticals are stored as new: open" \
+check "block_respects_empty: round 1 fixed, declined and later Criticals are stored as new: open" \
 	"$(respects '[{"severity":"critical","status":"fixed"}]'),$(respects '[{"severity":"critical","status":"declined"}]'),$(respects '[{"severity":"critical","later":true}]')" \
 	false,false,false
 check "block_respects_empty: other severities are fine" "$(respects '[{"severity":"important"},{"severity":"minor"}]')" true
-# Writing from the model's block stores every entry as new (block_*), so fixed and declined entries are judged open.
+# Writing from the model's block in round 1 stores every entry as new (block_*: entry_outcome), so fixed and declined
+# entries are judged open.
 fixed_crit='[{"severity":"critical","status":"fixed","file":"a.go","line":10},{"severity":"critical","status":"declined"}]'
 check "block_*: fixed and declined entries from the model's block are judged open" \
-	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | [block_respects_empty(["critical"]), block_covers_markdown([{severity: "critical", file: "a.go", line: 10}])]')" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson b "$fixed_crit" 'include "records"; $b | [block_respects_empty(["critical"]; []; null; null), block_covers_markdown([{severity: "critical", file: "a.go", line: 10}]; null; null)]')" \
 	'[false,true]'
 stored=$(build_record '{"round":1,"code_review":true}' '[{"severity":"critical","status":"fixed","later":true,"title":"x"}]' null)
 check "build_record: stores a fixed, later entry as the checks judge it: new and open" \
 	"$(jq -c '[.findings[0].status, .counts.open_blocking, .later]' <<<"$stored")" '["new",1,[]]'
+# From round 2 the block is judged as entry_outcome stores it: an earlier Critical marked fixed, or declined with a
+# reason, is not open.
+for st in '"status":"fixed"' '"status":"declined","reason":"by design"'; do
+	check "block checks: round 3, F1 {$st} is not open" \
+		"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" --argjson b "[{\"id\":\"F1\",$st}]" 'include "records";
+			$b | [block_covers_markdown([{severity: "critical"}]; $base; null), block_respects_empty(["critical"]; []; $base; null)]')" \
+		'[false,true]'
+done
+
+# Round 3 on prev2, delta t.ts: an Important marked Later in t.ts is promoted to a finding. Under an empty Important
+# section, the Later list showing it (same file, the same line or a range holding it, or no line on either side) is
+# no contradiction; one that shows another file or line is.
+promoted='[{"severity":"important","title":"x","file":"t.ts","line":7,"later":true}]'
+later_md() { printf '### Issues\n#### Important\n*(none found)*\n\n<details><summary>Later (1)</summary>\n\n- **`%s`** — x.\n\n</details>\n' "$1"; }
+respects_later() { # <Later item> -> block_respects_empty for the promoted entry
+	later_md "$1" | jq -c -Rs -L "$LIB_DIR" --argjson b "$promoted" --argjson base "$prev2" --argjson meta "$meta2" 'include "records";
+		. as $md | $b | block_respects_empty($md | empty_severities; $md | later_items; $base; later_files($meta.mode; $meta.delta_files))'
+}
+check "later_items: the Later list's items, with a range's end" \
+	"$(later_md 't.ts:5–9' | jq -c -Rs -L "$LIB_DIR" 'include "records"; later_items')" '[{"file":"t.ts","line":5,"line_end":9}]'
+check "block_respects_empty: a promoted entry the Later list shows (t.ts:7, t.ts:5–9, t.ts) is no contradiction" \
+	"$(respects_later t.ts:7),$(respects_later 't.ts:5–9'),$(respects_later t.ts)" true,true,true
+check "block_respects_empty: a promoted entry the Later list does not show (t.ts:8, u.ts:7) is one" \
+	"$(respects_later t.ts:8),$(respects_later u.ts:7)" false,false
+check "block_promotes: a Later entry in a touched file, not one outside it, nor a status-only earlier ID" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" --argjson meta "$meta2" 'include "records";
+		later_files($meta.mode; $meta.delta_files) as $l
+		| [([{severity: "important", title: "x", file: "t.ts", later: true}] | block_promotes($base; $l)),
+			([{severity: "important", title: "x", file: "z.ts", later: true}] | block_promotes($base; $l)),
+			([{id: "F1", status: "open", later: true}] | block_promotes($base; $l))]')" '[true,false,false]'
+
+# ── entry_outcome: one decision for the record builder and the block checks ────────────────────────────────
+# Round 3 on prev2 (F1 Critical open, a.ts:1), incremental, delta t.ts: stored_findings says what build_record stores.
+judged() { # <block> -> [status, severity] per stored entry, then the record's [status, severity] per block entry
+	jq -c -n -L "$LIB_DIR" --argjson b "$1" --argjson base "$prev2" --argjson meta "$meta2" 'include "records";
+		[$b | stored_findings($base; later_files($meta.mode; $meta.delta_files))[] | [.status, .severity]],
+		# The record: the findings from the block (new, or an ID the block gives), not the carried ones.
+		(build_record($meta; $b; $base) | [(.findings[] | select(.status == "new" or (.id as $id | [$b[].id] | index([$id])))
+			| [.status, .severity]), (.later[] | ["later", .severity])])' |
+		paste -sd' ' -
+}
+check "entry_outcome: declined with a reason is declined, for both" \
+	"$(judged '[{"id":"F1","status":"declined","reason":"by design"}]')" '[["declined","critical"]] [["declined","critical"]]'
+check "entry_outcome: declined without a reason is open and keeps its severity, for both" \
+	"$(judged '[{"id":"F1","status":"declined","severity":"minor"}]')" '[["open","critical"]] [["open","critical"]]'
+check "entry_outcome: a Later Critical is new, for both" \
+	"$(judged '[{"severity":"critical","title":"x","file":"z.ts","later":true}]')" '[["new","critical"]] [["new","critical"]]'
+check "entry_outcome: a Later Minor outside the delta is Later, left out of the stored findings" \
+	"$(judged '[{"severity":"minor","title":"x","file":"z.ts","later":true}]')" '[] [["later","minor"]]'
+check "entry_outcome: no Later in a full round" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" 'include "records";
+		[{severity: "minor", title: "x", file: "z.ts", later: true}] | stored_findings($base; later_files("full"; ["t.ts"]))
+		| map(.status)')" '["new"]'
+check "entry_outcome: a status-only entry takes the base's severity and location" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" 'include "records";
+		[{id: "F1", status: "open"}] | stored_findings($base; null) | map([.status, .severity, .file, .line])')" \
+	'[["open","critical","a.ts",1]]'
+check "entry_outcome: the first entry for an ID is the one stored" \
+	"$(jq -c -n -L "$LIB_DIR" --argjson base "$prev2" 'include "records";
+		[{id: "F1", status: "fixed"}, {id: "F1", status: "open"}] | stored_findings($base; null) | map(.status)')" \
+	'["fixed"]'
 
 # ── normalize_ready ─────────────────────────────────────────────────────────
 for pair in "Yes=yes" "yes.=yes" "Yes with fixes=yes-with-fixes" "Yes, with fixes=yes-with-fixes" \
@@ -414,6 +714,17 @@ check "marker cap: no room even for the minimal marker, no marker" "$(marker_lin
 check "marker cap: round.json keeps everything" "$(jq -c '[(.findings | length), (.later | length)]' "$tmp/big.json")" \
 	"[4,1]"
 
+# A record with an unknown blocker count (null counts, as a round whose record could not be built posts) keeps that
+# signal in its minimal marker; one with a known count, or a Rethink, does not.
+jq -c '.counts.open_blocking = null' "$tmp/big.json" >"$tmp/unknown.json"
+pad_to 59780
+check "marker cap: an unknown count stays in the minimal marker" \
+	"$(marker_record "$(generated "$(marker_line "$tmp/unknown.json" "$tmp/body.md")")")" \
+	'{"schema":1,"round":2,"findings_dropped":true,"last_ids":{"F":4,"L":0},"counts":{"open_blocking":null}}'
+check "marker_counts_unknown: an explicit null count only" \
+	"$(jq -c -L "$LIB_DIR" 'include "records"; map(marker_counts_unknown)' <<<'[{"counts": {"open_blocking": null}},
+		{"counts": {"open_blocking": 0}}, {"counts": {}}, {}, {"counts": null}]')" '[true,false,false,false,false]'
+
 # A marker is read as it is only with the full counts every marker_line step but the minimal one writes.
 check "complete_marker: a Rethink and full counts; not partial, inconsistent or minimal ones" \
 	"$(jq -c -L "$LIB_DIR" 'include "records"; map(complete_marker)' <<<'[{"code_review": false},
@@ -421,6 +732,52 @@ check "complete_marker: a Rethink and full counts; not partial, inconsistent or 
 		{"counts": {"critical": 0, "important": 1, "minor": 0}}, {"counts": {"open_blocking": 1, "critical": 0, "important": 1}},
 		{"counts": {"open_blocking": 2, "critical": 0, "important": 1, "minor": 0}}, {"schema": 1, "round": 2, "findings_dropped": true}]')" \
 	'[true,true,false,false,false,false]'
+
+build_record "$meta2" "$reply" "$prev2" >"$tmp/round3.json"
+# The posted review shows every title and file, so the marker keeps them all.
+body3=$(jq -r '[.findings[], .later[] | (.file // empty), (.title // empty)] | join("\n")' "$tmp/round3.json")
+line=$(marker_line "$tmp/round3.json" "$body3")
+check "marker: statuses and later round trip" "$(marker_record "$(generated "$line")" | jq -S .)" \
+	"$(jq -S . "$tmp/round3.json")"
+check "marker: no -- with statuses" "$(grep -c -- '--' <<<"${line:4:${#line}-8}" || true)" 0
+line=$(marker_line "$tmp/round3.json" "$body3$(head -c 59000 /dev/zero | tr '\0' x)")
+check "marker: near the cap, last ids and counts stay" \
+	"$(marker_record "$(generated "$line")" | jq -c '[.last_ids, .counts.unverified, has("later")]')" '[{"F":7,"L":7},1,false]'
+
+# ── progress_line ───────────────────────────────────────────────────────────
+dec='{"label":"converging"}'
+check "progress: all counts" "$(progress_line "$(cat "$tmp/round3.json")" "$prev2" "$dec")" \
+	"### Round 3 · since round 2
+1 fixed · 1 still open · 1 regressed · 2 new (1 in the new commits) · 1 declined · 1 for later · 1 not re-checked \
+· open blocking: 4 (was 3) · loop: converging"
+rec=$(r3 '[{"id":"F1","status":"fixed"},{"id":"F4","status":"open"},{"id":"F5","status":"open"},
+	{"severity":"minor","title":"n"}]')
+check "progress: zero counts dropped" "$(progress_line "$rec" "$(jq -c 'del(.counts)' <<<"$prev2")" \
+	'{"label":"nit-loop"}' | tail -n 1)" "1 fixed · 2 still open · 1 new · open blocking: 1 · loop: nit loop"
+check "progress: unverified, no label" "$(progress_line "$(r3 '[]')" "$prev2" '{"label":null}' | tail -n 1)" \
+	"3 not re-checked · open blocking: 2 (was 3)"
+check "progress: still open excludes unverified" "$(progress_line "$(r3 '[{"id":"F1","status":"open"}]')" "$prev2" \
+	"$dec" | tail -n 1)" "1 still open · 2 not re-checked · open blocking: 2 (was 3) · loop: converging"
+rec=$(build_record "$(jq -c '.mode = "full" | .mode_reason = "the previous head is gone"' <<<"$meta2")" \
+	'[{"id":"F1","status":"fixed"},{"id":"F4","status":"fixed"},{"id":"F5","status":"fixed"}]' "$prev2")
+check "progress: full with a reason" "$(progress_line "$rec" "$prev2" '{"label":"ready"}' | tail -n 1)" \
+	"3 fixed · open blocking: 0 (was 3) · loop: ready · full review (the previous head is gone)"
+check "progress: full without a reason" "$(progress_line "$(jq -c '.mode_reason = null' <<<"$rec")" "$prev2" \
+	'{"label":"ready"}' | tail -n 1)" "3 fixed · open blocking: 0 (was 3) · loop: ready · full review"
+check "progress: no previous record, nothing" "$(progress_line "$rec" null "$dec")" ""
+# A later round parsed from a Markdown with no severity section: its counts are null, so the line says unknown, and
+# the reader takes no blocker count from it.
+rec=$(build_record "$(jq -c '.unknown_counts = true' <<<"$meta2")" '[]' "$prev2")
+unknown_line=$(progress_line "$rec" "$prev2" '{"label":"unknown"}')
+check "progress: no severity section, open blocking unknown, never 0" \
+	"$(tail -n 1 <<<"$unknown_line")" "3 not re-checked · open blocking: unknown (was 3) · loop: unknown"
+check "progress: an unknown count reads back as none" \
+	"$(printf '%s\n\nLooks fine.\n' "$unknown_line" | jq -c -Rs -L "$LIB_DIR" 'include "records"; [later_round_body, progress_blocking]')" \
+	'[true,null]'
+rec=$(build_record "$(jq -c '.code_review = false | .approach = "rethink"' <<<"$meta2")" '[]' "$prev2")
+check "progress: rethink" "$(progress_line "$rec" "$prev2" "$dec")" \
+	"### Round 3 · since round 2
+code review skipped: the approach needs a rethink"
 
 # ── backfill_record ─────────────────────────────────────────────────────────
 pr='{"host":"github.com","owner":"o","repo":"r","number":7}'
@@ -488,6 +845,60 @@ check "empty_severities: a last section with only none found stays empty: the fo
 		<<<"$boundary"$'\n### Issues\n#### 🚨 Critical\n*(none found)*\n\n'"$tool_footer")" '["critical"]'
 
 rec=$(backfill_record "$(review bullets.md)" null 1 "$pr")
+rec2=$(backfill_record "$(review numbered.md)" "$rec" 2 "$pr")
+check "backfill after backfill: counts its own findings only, nothing carried" \
+	"$(jq -c '[.counts.open_blocking, .counts.unverified, ([.findings[] | select(.unverified)] | length)]' <<<"$rec2")" "[4,0,0]"
+check "backfill after backfill: IDs continue, previous head kept" \
+	"$(jq -r '[.findings[0].id == "F\($n + 1)", .previous_head_sha == $h] | all' --argjson n "$(jq '[.findings[].id[1:] | tonumber] | max' <<<"$rec")" \
+		--arg h "$(jq -r .head_sha <<<"$rec")" <<<"$rec2")" true
 check "backfill bullets: ready" "$(jq -r .ready <<<"$rec")" yes-with-fixes
+has_list() { jq -L "$LIB_DIR" 'include "records"; has_findings_list' <<<"$1"; }
+check "backfill: a standalone review keeps its findings list" "$(has_list "$rec")" true
 
+# A later round posted without its marker: its record carried an Important finding the body does not show (omitted
+# by the model, so not re-checked). Read back from the Markdown alone, it must not look like a verified empty list.
+prev1=$(jq -nc '{round: 1, head_sha: "aaa", counts: {open_blocking: 1}, findings: [{id: "F1", severity: "important",
+	status: "new", first_round: 1, file: "a.ts", line: 1, title: "one"}]}')
+r2=$(build_record "$(jq -c '.round = 2 | .mode = "incremental" | .ready = "yes"' <<<"$meta")" \
+	'[{"severity":"minor","file":"m.ts","line":2,"title":"Tiny nit"}]' "$prev1")
+check "later round without marker: setup, the record carries F1" \
+	"$(jq -c '[.counts.open_blocking, .counts.unverified, .last_ids.F]' <<<"$r2")" '[1,1,2]'
+later_body() { # <filler length>: the round 2 body as posted, with a filler paragraph before the Assessment
+	echo '<!-- gh-pr-review generated -->'
+	progress_line "$r2" "$prev1" '{"label":"early"}'
+	printf '\n### Issues\n\n#### 🚨 Critical (Must Fix Before Merge)\n\n*(none found)*\n\n'
+	printf '#### ⚠️ Important (Should Fix)\n\n*(none found)*\n\n#### 💡 Minor (Nice to Have)\n\n'
+	printf -- '- **F2 · `m.ts:2`** — Tiny nit.\n\n'
+	head -c "$1" /dev/zero | tr '\0' x
+	printf '\n\n### Assessment\n\n**Ready to merge?** Yes\n'
+}
+printf '%s\n' "$r2" >"$tmp/r2.json"
+# The review's case, 59,776 characters: only the minimal marker fits, and it says the findings list is gone.
+later_body $((59776 - $(later_body 1 | jq -Rs length) + 1)) >"$tmp/later-padded.md"
+check "later round, 59,776 characters: setup" "$(jq -Rs length "$tmp/later-padded.md")" 59776
+tail -n +2 "$tmp/later-padded.md" >"$tmp/r2-review.md"
+line=$(marker_line "$tmp/r2.json" "$tmp/r2-review.md")
+check "later round, 59,776 characters: the minimal marker, findings dropped" \
+	"$(marker_record "$(generated "$line")" | jq -c '[.round, .findings_dropped, has("findings")]')" '[2,true,false]'
+# Bigger still, no marker fits at all: the round is read back from its Markdown.
+later_body $((59960 - $(later_body 1 | jq -Rs length) + 1)) >"$tmp/later-padded.md"
+check "later round without marker: setup, a 59,960-character body" "$(jq -Rs length "$tmp/later-padded.md")" 59960
+tail -n +2 "$tmp/later-padded.md" >"$tmp/r2-review.md"
+line=$(marker_line "$tmp/r2.json" "$(head -c 300 "$tmp/r2-review.md")")
+check "later round without marker: setup, the marker fits a short review" "${line:0:24}" "<!-- gh-pr-review:round "
+check "later round without marker: setup, no room for any marker" "$(marker_line "$tmp/r2.json" "$tmp/r2-review.md")" ""
+rec=$(backfill_record "$(jq -n --rawfile body "$tmp/later-padded.md" '{body: $body, commit_id: "bbb",
+	submitted_at: "2026-01-03T00:00:00Z", user: {login: "rev"}, state: "APPROVED"}')" "$prev1" 2 "$pr")
+check "later round without marker: no findings list" "$(has_list "$rec")" false
+check "later round without marker: the blocking count of the progress line, IDs covered" \
+	"$(jq -c '[.findings_dropped, .counts.open_blocking, .ready_overridden, .last_ids.F, has("findings")]' <<<"$rec")" \
+	'[true,1,true,2,false]'
+check "later round without marker: the next round carries nothing it cannot know" \
+	"$(build_record "$meta2" '[]' "$rec" | jq -c '[.findings, .counts.open_blocking]')" '[[],0]'
+printf '### Issues\n\n- **`a.ts:1`** — x\n\n<details><summary>Later (1)</summary>\n\n- **[e.ts:5]** — slow.\n\n</details>\n' \
+	>"$tmp/folded.md"
+rec=$(backfill_record "$(jq -n --rawfile body "$tmp/folded.md" '{body: $body}')" null 2 "$pr")
+check "later round without marker: a folded Later section is enough" "$(has_list "$rec")" false
+
+finished=true
 exit "$fail"

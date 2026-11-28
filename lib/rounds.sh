@@ -54,7 +54,10 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 				# (findings_dropped), and the IDs the marker held kept as the ID floor. A marker with last_ids that
 				# claims its own position wrote that floor itself: it is the round's (never below the history's), and
 				# counts.new is the marker's. Otherwise every finding the Markdown shows takes a new ID
-				# (backfill_record), and reconcile_record numbers a round two runs claimed after the floor.
+				# (backfill_record), and reconcile_record numbers a round two runs claimed after the floor. The L floor
+				# is the marker's and the backfill's, which reserves an L ID per item of a later round's Later list.
+				# A marker that says its blocker count is unknown (marker_counts_unknown) gets null counts: its
+				# Markdown may show fewer blockers than the round had.
 				record=$(printf '%s\n%s\n%s\n' "$records" "$record" "$marker" |
 					jq -cs -L "${LIB_DIR:?}" --argjson round "$round" 'include "records";
 						.[0] as $earlier | .[2] as $m
@@ -63,7 +66,9 @@ fetch_round_records() { # <host> <owner> <repo> <N> [<me>] [<ignored-out>]
 						| {F: ($from | map(_last_number("F")) | max), L: (.[1:] | map(_last_number("L")) | max)} as $ids
 						| .[1] + ($m | del(.source, .findings, .later, .counts)) + {findings_dropped: true, last_ids: $ids}
 						| del(.findings)
-						| if $own then .counts.new = (($m.counts.new? | numbers) // null) else . end') || return 1
+						| if $own then .counts.new = (($m.counts.new? | numbers) // null) else . end
+						| if $m | marker_counts_unknown then .counts |= map_values(null) | .ready_overridden = false
+						else . end') || return 1
 			fi
 		fi
 		facts=$(jq -c '({posted_at: .submitted_at, head_sha: .commit_id, reviewer: .user.login}

@@ -52,6 +52,30 @@ def _finding($severity):
 def _none_line:
 	sub("^\\s*([-*+]|\\d+\\.)\\s+"; "") | ascii_downcase | gsub("[*_()`.\\s]"; "") | . == "none" or . == "nonefound";
 
+# A later-round item that names an earlier finding: "**F1 · [a.ts:1]** — …" (the ID inside the bold) or
+# "**F1** · `a.ts:1` — …". Out: {id, line: the item without its ID, for _finding, after: the text after the bold},
+# or null.
+def _id_item:
+	sub("^([-*+]|\\d+\\.)\\s+"; "") as $rest
+	| ([$rest | capture("^\\*\\*(?<id>F\\d+)\\s*·\\s*(?<r>.*)$")] | .[0]) as $in
+	| ([$rest | capture("^\\*\\*(?<id>F\\d+)\\*\\*[\\s·:]*(?<r>.*)$")] | .[0]) as $out
+	| if $in != null then {id: $in.id, line: ("- **" + $in.r), after: ($in.r | sub("^.*?\\*\\*"; ""))}
+	elif $out != null then {id: $out.id, line: ("- " + $out.r), after: $out.r}
+	else null end;
+
+# An item of the folded "Fixed since the last round" section: {id, status: "fixed"}, or {id, status: "declined",
+# reason} for "**F5** — declined: "the quoted reason"" (reason null when nothing follows). Null without an ID.
+def _fixed_item:
+	_id_item as $i
+	| if $i == null then null
+	else ([$i.after | capture("^[\\s·:—–-]*declined\\b[\\s:—–-]*(?<r>.*)$"; "i")] | .[0]) as $d
+		| if $d == null then {id: $i.id, status: "fixed"}
+		else {id: $i.id, status: "declined", reason: ($d.r | _trim | if . == "" then null else . end)} end
+	end;
+
+# The folded section a "<details>" or "<summary>" line opens: fixed, later, or other.
+def _folded: ascii_downcase | if test("fixed") then "fixed" elif test("later") then "later" else "other" end;
+
 # The line the writer posts right before the code review (assemble_review): an invisible boundary between the approach
 # and the code review. A body without a code review (a Rethink) has none.
 def code_review_boundary: "<!-- gh-pr-review:code-review -->";
@@ -82,17 +106,25 @@ def code_review_part:
 # titled "Issues" to the next heading of the same or a higher level; a body without one is read whole. Lines from a
 # line starting with <details to the line starting with </details (a folded Fixed or Later list; 0–3 spaces first,
 # outside fenced code) are in no section. Fenced code is tracked inside folds too, and belongs to the section it is in.
+# A line of a fold's own content (not nested in another fold, not in fenced code) names its fold in f: "fixed",
+# "later" or "other" (_folded of its <summary>), under the same Issues rule; null for every other line.
 def _lines:
 	def fence: test("^\\s*(```|~~~)");
 	def opens: test("^ {0,3}<details\\b"; "i");
 	def closes: test("^ {0,3}</details\\b"; "i") or (opens and test("</details\\s*>\\s*$"; "i"));
-	reduce (split("\n")[] | sub("\r$"; "")) as $l ({fence: false, details: 0, s: null, i: null, issues: null, has: false, out: []};
+	reduce (split("\n")[] | sub("\r$"; "")) as $l ({fence: false, details: 0, fold: null, s: null, i: null, issues: null,
+		has: false, out: []};
 		if .fence or ($l | fence) then
 			(if ($l | fence) then .fence |= not else . end)
 			| .out += [if .details > 0 then {l: $l, s: null, i: null} else {l: $l, s, i, code: true} end]
 		elif .details > 0 or ($l | opens) then
-			.details = ([.details + (if $l | opens then 1 else 0 end) - (if $l | closes then 1 else 0 end), 0] | max)
-			| .out += [{l: $l, s: null, i: null}]
+			(if .details == 1 and ($l | opens | not) then
+				(if $l | test("^\\s*<summary"; "i") then .fold = ($l | _folded) else . end)
+				| .out += [{l: $l, s: null, i: null, f: .fold, in: (.issues != null)}]
+			else .out += [{l: $l, s: null, i: null}] end)
+			| (if .details == 0 then .fold = (if $l | test("<summary"; "i") then $l | _folded else "other" end) else . end)
+			| .details = ([.details + (if $l | opens then 1 else 0 end) - (if $l | closes then 1 else 0 end), 0] | max)
+			| if .details == 0 then .fold = null else . end
 		elif ($l | test("^ {0,3}#{1,6}\\s")) then
 			($l | capture("^ {0,3}(?<level>#+)\\s+(?<title>.*)$")) as $h
 			| ($l | _severity) as $sev
@@ -102,14 +134,26 @@ def _lines:
 			| .s = $sev | .i = (if .issues != null then $sev else null end)
 			| .out += [{l: $l, s, i, h: true}]
 		else .out += [{l: $l, s, i}] end)
-	| .has as $has | .out | map({l, s: (if $has then .i else .s end), h: (.h == true), code: (.code == true)});
+	| .has as $has
+	| .out
+	| map({l, s: (if $has then .i else .s end), h: (.h == true), code: (.code == true),
+		f: (if $has and (.in | not) then null else .f end)});
 
 # Markdown in, findings out: the top-level "- ", "* ", "+ " and "<n>. " items, bold or plain, in each severity section
 # (_lines; "- None." is not one). Fenced code is skipped. A location given as a range keeps its last line in line_end
-# (the record itself keeps line only: normalize_findings drops it).
+# (the record itself keeps line only: normalize_findings drops it). Round 2 and later: an item that starts with an
+# earlier ID ("**F1 · …") keeps it, as open; the folded <details> sections are in no severity section: the Fixed one
+# is read here, line by line (f), and gives its IDs as fixed (or declined, with the quoted reason); the Later one is
+# left out (its items carry no severity).
 def parse_findings:
-	[_lines[] | select(.s != null and (.h or .code | not)) | .s as $s | .l
-		| select(test("^([-*+]|\\d+\\.)\\s+\\S") and (_none_line | not)) | _finding($s)];
+	def item: test("^([-*+]|\\d+\\.)\\s+\\S") and (_none_line | not);
+	[_lines[]
+		| if .f == "fixed" then .l | select(item) | _fixed_item | select(. != null)
+		elif .s != null and (.h or .code | not) then
+			.s as $s | .l | select(item)
+			| _id_item as $i
+			| if $i != null then ($i.line | _finding($s)) + {id: $i.id, status: "open"} else _finding($s) end
+		else empty end];
 
 # The severity sections of a review's Markdown (_lines), in order: {severity, lines (the non-blank lines up to the
 # next heading), closed (another heading follows)}. Fenced code belongs to the section it is in.
@@ -138,9 +182,11 @@ def normalize_findings:
 			| select(.severity == "critical" or .severity == "important" or .severity == "minor"))
 	else [] end;
 
-# The checks below judge the model's findings block (stored_findings) before a record is written from it:
-# block_respects_empty and block_covers_markdown. A record posted on GitHub is never judged by its list: it is read
-# as it is when its marker is complete (complete_marker), and from its review's Markdown otherwise.
+# The checks below judge the model's findings block before a record is written from it: stored_findings($base;
+# $later_files), which decides each entry's status with entry_outcome, block_covers_markdown, block_respects_empty and
+# findings_block_ok. They are defined below, after the record builder's helpers they need. A record posted on GitHub
+# is never judged by its list: it is read as it is when its marker is complete (complete_marker), and from its
+# review's Markdown otherwise.
 
 # True for an entry that is still open: not fixed or declined.
 def _open: .status | . != "fixed" and . != "declined";
@@ -148,7 +194,7 @@ def _open: .status | . != "fixed" and . != "declined";
 # False when the list ({severity, status, file, line}) has an open entry of a severity the Markdown says it has none of
 # ($empty: empty_severities): what the reader sees wins.
 def _respects_empty($empty):
-	all(.[] | select(_open); .severity as $s | all($empty[]; . != $s));
+	all(.[] | select(_open); (.severity | strings | ascii_downcase) as $s | all($empty[]; . != $s));
 
 # True when the list ({severity, status, file, line}) reports at least the blockers the review's Markdown shows
 # ($parsed: parse_findings of the posted body): as many open Critical entries, and as many open Critical and Important
@@ -172,7 +218,7 @@ def _covers_markdown($parsed):
 				| if $i == null then .ok = false else .free |= del(.[$i]) end
 			else . end)
 		| .ok);
-	def open($sev): [.[] | select(.severity == $sev)] | length;
+	def open($sev): [.[] | select((.severity | strings | ascii_downcase) == $sev)] | length;
 	def shown($sev): [($parsed // [])[]? | objects | select(.severity == $sev)] | length;
 	[.[] | select(_open)]
 	| [.[] | select(blocking) | location] as $have
@@ -180,40 +226,6 @@ def _covers_markdown($parsed):
 	| open("critical") >= shown("critical")
 		and open("critical") + open("important") >= shown("critical") + shown("important")
 		and ($seen | matched($have));
-
-# ── Writing: the model's findings block ──
-
-# The status a findings entry from the model is stored with. This version has no statuses across rounds: every entry
-# is stored as a new, open finding, so an entry marked fixed, declined or later is new too. The one place that
-# decides it.
-def stored_status: "new";
-
-# The model's findings as the record will store them: normalized, each entry with its stored_status. The record
-# builder stores these, and the block checks (block_respects_empty, block_covers_markdown) judge these, so they never
-# disagree about which entries are open.
-def stored_findings:
-	if type == "array" then [.[] | objects | stored_status as $status | ([.] | normalize_findings)[] + {status: $status}]
-	else [] end;
-
-# False when the model's block has an open entry, as stored (stored_findings), of a severity the Markdown says it has
-# none of ($empty: empty_severities): the round is parsed instead.
-def block_respects_empty($empty): stored_findings | _respects_empty($empty);
-
-# True when the model's findings block can be used as it is: an array whose every entry is an object with a known
-# severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
-# back to the Markdown, so normalize_findings never drops a finding the reader can see.
-def findings_block_ok:
-	type == "array"
-	and all(.[]; type == "object"
-		and (.severity | type == "string" and (ascii_downcase | . == "critical" or . == "important" or . == "minor"))
-		and (.title | type == "string")
-		and (.file | . == null or type == "string")
-		and (.line | . == null or type == "number"));
-
-# True when the model's findings block, as stored (stored_findings: in this version all of it is open), shows every
-# blocker the review's Markdown does ($parsed: parse_findings of the posted body; _covers_markdown). Otherwise the
-# round is parsed instead.
-def block_covers_markdown($parsed): stored_findings | _covers_markdown($parsed);
 
 # ── Reading: a record posted on GitHub ──
 
@@ -227,12 +239,192 @@ def complete_marker:
 		and .open_blocking == .critical + .important);
 
 # The highest "<prefix><n>" ID in a record's findings, its later list and its last_ids, or 0. last_ids keeps the
-# highest numbers even when the lists are empty (a Rethink) or cut from the marker, so an ID is never given twice.
+# highest numbers even when the lists are empty (a Rethink), cut from the marker, or not carried (fixed, declined,
+# Later), so an ID is never given twice.
 def _last_number($prefix):
 	[((.findings // [])[]?, (.later // [])[]?) | objects | .id | strings
 		| capture("^" + $prefix + "(?<n>\\d+)$").n | tonumber]
 	+ [(.last_ids // {})[$prefix]? | numbers]
 	| max // 0;
+
+def _severity_ok: . == "critical" or . == "important" or . == "minor";
+
+# One entry of the model's array, typed: id and status as given (strings or null), the rest as normalize_findings.
+def _entry:
+	{id: (.id | _str | if . then _trim else null end), status: (.status | if type == "string" then ascii_downcase | _trim
+		else null end), severity: (.severity | if type == "string" then ascii_downcase | _trim else null end),
+		file: (.file | _str), line: (.line | _num), title: (.title | _str | _title100), in_delta: (.in_delta == true),
+		later: (.later == true), reason: (.reason | _str)};
+
+# True when a record still has its findings list. A marker cut to fit GitHub's size cap can keep the counts but drop
+# the list (findings_dropped): an empty list is a round with no findings, a missing one is unknown.
+def has_findings_list: type == "object" and (.findings | type) == "array" and .findings_dropped != true;
+
+# The finding IDs a record knows, for findings_block_ok: none without its findings list (or without a record).
+def known_ids: if has_findings_list then [.findings[] | objects | .id | strings] else [] end;
+
+# ── Writing: the model's findings block ──
+
+# The files Later may apply outside of: in an incremental or rebased round ($mode), the files the delta touched
+# ($delta_files), when that list is known (an array). Else null: Later does not apply.
+def later_files($mode; $delta_files):
+	if ($mode == "incremental" or $mode == "rebased") and ($delta_files | type) == "array" then $delta_files
+	else null end;
+
+# A record's findings by ID, the first one for each; none without its findings list (has_findings_list).
+def _known_findings($record):
+	if $record | has_findings_list then
+		reduce ($record.findings[] | objects | select(.id | type == "string")) as $f ({};
+			if has($f.id) then . else .[$f.id] = $f end)
+	else {} end;
+
+# The model's array as typed entries (_entry), the first one for each ID only: the record builder ignores the rest.
+def _block_entries:
+	reduce ((if type == "array" then .[] else empty end) | objects | _entry) as $e ({seen: {}, out: []};
+		if $e.id == null then .out += [$e]
+		elif .seen[$e.id] then .
+		else .seen[$e.id] = true | .out += [$e] end)
+	| .out;
+
+# What a block entry (_entry) is stored as: the one place that decides it, for the record builder (_track) and the
+# block checks (stored_findings). $known: _known_findings of the last code review. $later_files: later_files of the
+# round. Out: {status, severity, file, line, title} (and unverified: true), or null for a new entry without a known
+# severity. An entry with a known ID keeps the model's status when it is fixed, or declined with a reason; open or
+# regressed is regressed on an ID last marked fixed (or regressed and still said regressed), else open; anything else
+# (declined without a reason, no status, another status) is open and unverified, with the previous severity: it
+# cannot downgrade a blocker. What it leaves out comes from the previous finding. Any other entry is new, or later:
+# an Important or Minor finding marked later, not in the delta, with a file outside $later_files. A Critical one, one
+# marked in the delta, one in a touched file, one without a file, and any when Later does not apply stay new.
+def entry_outcome($known; $later_files):
+	if .id != null and $known[.id] != null then
+		$known[.id] as $p
+		| (if .status == "fixed" or .status == "declined" and .reason != null then {status: .status}
+			elif .status == "open" or .status == "regressed" then
+				{status: (if $p.status == "fixed" or $p.status == "regressed" and .status == "regressed"
+					then "regressed" else "open" end)}
+			else {status: "open", unverified: true} end) as $s
+		| {status: $s.status,
+			severity: (if (.severity | _severity_ok) and ($s.unverified | not) then .severity else $p.severity end),
+			file: (.file // $p.file), line: (.line // $p.line), title: (.title // $p.title)}
+			+ (if $s.unverified then {unverified: true} else {} end)
+	elif (.severity | _severity_ok) | not then null
+	elif .later and (.severity == "important" or .severity == "minor") and (.in_delta | not)
+		and ($later_files | type) == "array" and (.file | type) == "string"
+		and (.file as $file | $later_files | index([$file | ltrimstr("./")]) == null) then
+		{status: "later", severity, file, line, title}
+	else {status: "new", severity, file, line, title} end;
+
+# stored_findings, each entry the model marked Later but entry_outcome stores as a finding (a Later that does not
+# apply: a file the delta touched, a Critical, no file, a full round) with promoted: true.
+def _stored($base; $later_files):
+	_known_findings($base) as $known
+	| [_block_entries[] | .later as $later | entry_outcome($known; $later_files)
+		| select(. != null and .status != "later")
+		| if $later and .status == "new" then . + {promoted: true} else . end];
+
+# A model's findings block as the record stores it (entry_outcome), for the block checks (block_covers_markdown,
+# block_respects_empty), so they never disagree with the record about which entries are open: its findings, without
+# the Later ones (the record keeps those apart). $base: the last code review (null in round 1: every entry is new).
+# The findings a round carries (left out of the block, unverified) are not part of it.
+def stored_findings($base; $later_files): _stored($base; $later_files) | map(del(.promoted));
+
+# True when the model's block ($base, $later_files: as for stored_findings) has an entry it marked Later that the
+# record stores as a finding (promoted, _stored). When such a block is rejected, the Markdown, which shows that
+# finding in its Later list, gives no blocker count: the round's count is unknown.
+def block_promotes($base; $later_files): any(_stored($base; $later_files)[]; .promoted == true);
+
+# The items of a review's folded Later list (_lines), as the reader sees them: {file, line, line_end}.
+def later_items:
+	[_lines[] | select(.f == "later") | .l | select(test("^([-*+]|\\d+\\.)\\s+\\S") and (_none_line | not))
+		| _finding(null) | {file, line, line_end}];
+
+# True for a promoted entry the Markdown shows in its Later list ($items: later_items): an item in the same file, at
+# the same line (or a range holding it) when both have one.
+def _shown_later($items):
+	.file as $f | .line as $l
+	| ($f | type) == "string"
+	and any($items[]; .file == $f and (.line == null or $l == null or .line == $l
+		or (.line_end != null and $l >= .line and $l <= .line_end)));
+
+# False when the model's block ($base, $later_files: as for stored_findings) has an open entry, as stored, of a
+# severity the Markdown says it has none of ($empty: empty_severities): the round is parsed instead. A promoted entry
+# the Markdown shows in its Later list ($later: later_items) is no contradiction: the record keeps it as a finding.
+def block_respects_empty($empty; $later; $base; $later_files):
+	_stored($base; $later_files) | map(select((.promoted == true and _shown_later($later)) | not))
+	| _respects_empty($empty);
+
+# True when the model's block ($base, $later_files: as for stored_findings), as stored, shows every blocker the
+# review's Markdown does ($parsed: parse_findings of the posted body; _covers_markdown). Otherwise the round is parsed
+# instead.
+def block_covers_markdown($parsed; $base; $later_files): stored_findings($base; $later_files) | _covers_markdown($parsed);
+
+# True when the model's findings block can be used as it is: an array whose every entry is an object with a known
+# severity, a string title, a file string or null and a line number or null. One bad entry and the whole round falls
+# back to the Markdown, so normalize_findings never drops a finding the reader can see. $ids: the IDs of the last
+# code review (known_ids; [] in round 1). Only an entry with one of them may give just its status, the rest coming
+# from that record: any other ID is a new finding to the record builder, and needs a severity and a title.
+def findings_block_ok($ids):
+	def severity_ok: type == "string" and (ascii_downcase | . == "critical" or . == "important" or . == "minor");
+	type == "array"
+	and all(.[]; type == "object"
+		and ((.id | type == "string" and (_trim as $id | $ids | index([$id]) != null)) as $known
+			| (.severity | severity_ok or ($known and . == null))
+			and (.title | type == "string" or ($known and . == null)))
+		and (.file | . == null or type == "string")
+		and (.line | . == null or type == "number"));
+
+# The findings of a code-review round, from the model's array and the previous record's findings.
+# Out: {findings, later, last_ids}. Each entry is stored as entry_outcome decides, the first entry for an ID only:
+# known IDs keep their ID and first round; new entries get F<n>, or L<n> when Later applies (later_files of $mode
+# and $delta_files, the files the delta touched). Previous open, new or regressed findings the reply leaves out are
+# carried, unverified. A previous record without its findings list (has_findings_list) knows no ID and carries
+# nothing. New IDs start after $floor ({F, L}: the highest numbers in the whole history) and the previous record's.
+def _track($findings; $prev; $round; $mode; $floor; $delta_files):
+	(if $prev | has_findings_list then $prev.findings | map(objects | select(.id | type == "string")) else [] end)
+	as $old
+	| _known_findings($prev) as $known
+	| later_files($mode; $delta_files) as $later_files
+	| ($findings | _block_entries) as $entries
+	| (reduce $entries[] as $e ({}; if $e.id != null then .[$e.id] = true else . end)) as $seen
+	| reduce $entries[] as $e (
+		{findings: [], later: [],
+			f: ([($prev // {}) | _last_number("F"), (($floor // {}).F | numbers)] | max),
+			l: ([($prev // {}) | _last_number("L"), (($floor // {}).L | numbers)] | max)};
+		($e | entry_outcome($known; $later_files)) as $o
+		| if $o == null then .
+		elif $o.status == "later" then
+			.l += 1
+			| .later += [{id: "L\(.l)", severity: $o.severity, file: $o.file, line: $o.line, title: $o.title}]
+		elif $o.status == "new" then
+			.f += 1
+			| .findings += [{id: "F\(.f)", severity: $o.severity, status: "new", first_round: $round,
+				in_delta: $e.in_delta, file: $o.file, line: $o.line, title: $o.title}]
+		else
+			.findings += [{id: $e.id, severity: $o.severity, status: $o.status,
+				first_round: ($known[$e.id].first_round // $round), in_delta: $e.in_delta,
+				file: $o.file, line: $o.line, title: $o.title} + (if $o.unverified then {unverified: true} else {} end)]
+		end)
+	| {findings: (.findings + [$old[] | select(.status == "open" or .status == "new" or .status == "regressed")
+			| select($seen[.id] | not)
+			| {id, severity, status: "open", first_round, in_delta: false, file, line, title, unverified: true}]
+			| reduce .[] as $f ({ids: {}, out: []}; if .ids[$f.id] then . else .ids[$f.id] = true | .out += [$f] end)
+			| .out),
+		later: .later, last_ids: {F: .f, L: .l}};
+
+# A record whose findings miss a file, line or title (a marker leaves out what its review does not show, such as a
+# finding the model left out and the round carried) gets them back from the newest record in $history (an array of
+# records, oldest first) that has the same ID with that detail.
+def recover_details($history):
+	([($history // [])[] | objects | (.findings // [])[]? | objects | select(.id | type == "string")] | reverse)
+	as $earlier
+	| if (.findings | type) == "array" then
+		.findings |= map(if type == "object" and (.id | type == "string") then
+			.id as $id | [$earlier[] | select(.id == $id)] as $same
+			| .file = (.file // first($same[] | .file | strings) // null)
+			| .line = (.line // first($same[] | .line | numbers) // null)
+			| .title = (.title // first($same[] | .title | strings) // null)
+		else . end)
+	else . end;
 
 # The ID floor of a history (an array of records): the highest F and L numbers any round used. Older markers have
 # no last_ids: their findings and later IDs seed it.
@@ -263,25 +455,38 @@ def reconcile_record($earlier; $position):
 		| .last_ids = {F: ([_last_number("F"), $floor.F] | max), L: ([_last_number("L"), $floor.L] | max)}
 	else . end;
 
-# round.json from the run's facts, the findings (block or parser) and the previous record (or null). New findings
-# are numbered after $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record. A code
-# review read from a Markdown with no severity section ($meta.no_sections: true) does not say how many blockers it
-# has: its counts are null, so its blocking is unknown, never 0.
+# round.json from the run's facts, the findings (block or parser) and the previous record (or null). Round 1
+# findings carry no id or status: all are new. From round 2, see _track. New findings are numbered after
+# $meta.id_floor ({F, L}, from id_floor over the whole history) and the previous record. $meta.delta_files: the paths
+# the delta touched (changed_files), for Later. A code review whose blocker count is unknown ($meta.unknown_counts:
+# true; one read from a Markdown with no severity section, say) gets null counts, so its blocking is unknown, never 0.
 def build_record($meta; $findings; $prev):
 	($meta.code_review != false) as $code_review
 	| ([($meta.id_floor // {}).F | numbers] + [($prev // {}) | _last_number("F")] | max) as $last
 	| ([($meta.id_floor // {}).L | numbers] + [($prev // {}) | _last_number("L")] | max) as $last_later
 	| ($meta.round | _num) as $round
-	| (if $code_review then $findings | stored_findings else [] end) as $found
-	| ($found | to_entries | map({id: "F\(.key + $last + 1)", severity: .value.severity, status: .value.status,
-		first_round: $round, in_delta: false, file: .value.file, line: .value.line, title: .value.title})) as $items
-	| def count($s): $items | map(select(.severity == $s)) | length;
-	{
+	| (if $code_review then _track($findings; $prev; $round; $meta.mode; {F: $last, L: $last_later}; $meta.delta_files)
+		else {findings: [], later: [], last_ids: {F: $last, L: $last_later}} end) as $t
+	| $t.findings as $items
+	| def open: select(.status == "open" or .status == "new" or .status == "regressed");
+	def count($s): [$items[] | open | select(.severity == $s)] | length;
+	def status($s): [$items[] | select(.status == $s)] | length;
+	(if $code_review and $meta.unknown_counts != true then
+		{open_blocking: (count("critical") + count("important")), critical: count("critical"),
+			important: count("important"), minor: count("minor"), new: status("new"), fixed: status("fixed"),
+			declined: status("declined"), regressed: status("regressed"), later: ($t.later | length),
+			unverified: ([$items[] | select(.unverified == true)] | length)}
+	else
+		{open_blocking: null, critical: null, important: null, minor: null, new: null,
+			fixed: null, declined: null, regressed: null, later: null, unverified: null}
+	end) as $counts
+	| {
 		schema: 1,
 		source: $meta.source,
 		pr: ($meta.pr | if type == "object" then {host, owner, repo, number: (.number | _num)} else null end),
 		round: $round,
 		mode: $meta.mode,
+		mode_reason: ($meta.mode_reason | _str),
 		reviewer: $meta.reviewer,
 		model: $meta.model,
 		posted_at: $meta.posted_at,
@@ -290,27 +495,72 @@ def build_record($meta; $findings; $prev):
 		previous_head_sha: ($meta.previous_head_sha // ($prev // {}).head_sha),
 		approach: $meta.approach,
 		ready: $meta.ready,
+		ready_overridden: ($code_review and ($meta.ready == "yes" or $meta.ready == "yes-with-fixes")
+			and $counts.open_blocking > 0),
 		decision: $meta.decision,
 		preview: ($meta.preview == true),
 		code_review: $code_review,
 		findings: $items,
-		later: [],
-		last_ids: {F: ($last + ($items | length)), L: $last_later},
-		counts: (if $code_review and $meta.no_sections != true then
-			{open_blocking: (count("critical") + count("important")), critical: count("critical"),
-				important: count("important"), minor: count("minor"), new: ($items | length),
-				fixed: 0, declined: 0, regressed: 0}
-		else
-			{open_blocking: null, critical: null, important: null, minor: null, new: null,
-				fixed: null, declined: null, regressed: null}
-		end)
+		later: $t.later,
+		last_ids: $t.last_ids,
+		counts: $counts
 	};
+
+# The progress line that opens a round 2 or later body, for a person. $prev: the previous code-review record, or
+# null (no line). $decision: loop_decide over the history with this record, so its label is this round's.
+#   ### Round 3 · since round 2
+#   4 fixed · 2 still open · 3 new (1 in the new commits) · open blocking: 5 (was 6) · loop: converging
+def progress_line($prev; $decision):
+	. as $r
+	| if $prev == null then empty
+	else "### Round \($r.round) · since round \($prev.round)",
+		if $r.code_review == false then "code review skipped: the approach needs a rethink"
+		else ($r.findings // []) as $f
+			| def n($s): [$f[] | select(.status == $s and (.unverified != true))] | length;
+			def part($n; $text): if $n > 0 then ["\($n) \($text)"] else [] end;
+			([$f[] | select(.status == "new" and .in_delta == true)] | length) as $delta
+			| ([$f[] | select(.unverified == true)] | length) as $unverified
+			| (part(n("fixed"); "fixed") + part(n("open"); "still open") + part(n("regressed"); "regressed")
+				+ (if n("new") > 0 then ["\(n("new")) new" + (if $delta > 0 then " (\($delta) in the new commits)"
+					else "" end)] else [] end)
+				+ part(n("declined"); "declined") + part(($r.later // []) | length; "for later")
+				+ part($unverified; "not re-checked")
+				# "was" only when the previous findings were there to re-check: else the two counts measure different things.
+				# An unknown count (no severity section: null) says so, never 0, so the reader never reads it as 0.
+				+ ["open blocking: " + ($r.counts.open_blocking | if type == "number" then tostring else "unknown" end)
+					+ (if ($prev.counts.open_blocking? | type) == "number" and ($prev | has_findings_list)
+					then " (was \($prev.counts.open_blocking))" else "" end)]
+				+ (if ($decision.label? | type) == "string"
+					then ["loop: " + (if $decision.label == "nit-loop" then "nit loop" else $decision.label end)]
+					else [] end)
+				+ (if $r.mode == "full" then ["full review" + (if ($r.mode_reason | type) == "string"
+					then " (\($r.mode_reason))" else "" end)] else [] end))
+			| join(" · ")
+		end
+	end;
+
+# True when a review body is a round 2 or later review: a progress line ("### Round 3 · since round 2") near the top,
+# or a folded Fixed since / Later section. Its Markdown leaves out what it did not re-check, so it is no findings list.
+def later_round_body:
+	(split("\n") | map(sub("\r$"; ""))) as $lines
+	| ($lines[0:8] | any(test("^###\\s+Round\\s+\\d+\\s+·\\s+since\\s+round\\s+\\d+\\s*$"; "i")))
+		or ($lines | any(test("<summary>\\s*(fixed since|later\\b)"; "i")));
+
+# The open blocking count of a round 2 or later body's progress line ("· open blocking: 3 (was 4) ·"), or null. It
+# counts every open blocker, also the carried ones its Markdown leaves out.
+def progress_blocking:
+	if later_round_body then [split("\n")[0:8][] | capture("open blocking: (?<n>\\d+)").n | tonumber] | first // null
+	else null end;
 
 # A record rebuilt from an old review (GitHub REST review object). The caller reads the verdict lines. Its findings
 # and sections come from the code-review part (code_review_part), the text the writer read: a code review whose part
-# has no severity section (_sections) gets null counts (build_record).
+# has no severity section (_sections) gets null counts (build_record). A later-round body that lost its marker
+# (later_round_body, read on the whole body: its progress line comes before the code review) gives no findings list
+# (findings_dropped, so the next round is full), the open blocking count of its progress line, and last_ids that
+# cover the IDs it shows and reserve one L ID per item of its folded Later list.
 def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review):
 	($review.body // "") as $body
+	| ($code_review and ($body | later_round_body)) as $later_round
 	| build_record({
 		source: "backfill",
 		pr: $pr,
@@ -325,8 +575,27 @@ def backfill_record($review; $prev; $round; $pr; $approach; $ready; $code_review
 			| .[$review.state | strings] // null),
 		posted_at: $review.submitted_at,
 		code_review: $code_review,
-		no_sections: ($body | code_review_part | _sections | length == 0)
-	}; (if $code_review then $body | code_review_part | parse_findings else [] end); $prev);
+		unknown_counts: ($body | code_review_part | _sections | length == 0)
+	}; (if $code_review then $body | code_review_part | parse_findings else [] end);
+		# An old review says nothing about which earlier findings were fixed: the previous record only numbers the IDs,
+		# so a backfilled round counts what it found, never carries the round before.
+		(if $prev == null then null
+		else {round: $prev.round, head_sha: $prev.head_sha,
+			last_ids: {F: ($prev | _last_number("F")), L: ($prev | _last_number("L"))}} end))
+	| if $later_round | not then .
+	else ([$body | code_review_part | parse_findings[] | .id | strings | capture("^F(?<n>\\d+)$").n | tonumber] | max // 0)
+		as $shown
+		| ($body | progress_blocking) as $blocking
+		# Each item of its folded Later list reserves an L ID, as each finding it shows takes an F ID.
+		| ([$body | code_review_part | _lines[] | select(.f == "later") | .l
+			| select(test("^([-*+]|\\d+\\.)\\s+\\S") and (_none_line | not))] | length) as $later
+		| del(.findings, .later) | .findings_dropped = true
+		| .last_ids.F = ([.last_ids.F, $shown] | max)
+		| .last_ids.L += $later
+		| if $blocking == null then .
+		else .counts.open_blocking = $blocking
+			| .ready_overridden = ((.ready == "yes" or .ready == "yes-with-fixes") and $blocking > 0) end
+	end;
 
 # The first line of every body gh-pr-review posts.
 def generated_header: "<!-- gh-pr-review generated -->";
@@ -338,6 +607,11 @@ def _visible: gsub("[*`]"; "") | gsub("\\s+"; " ") | _trim;
 # A string as a regex that matches it literally.
 def _re_literal: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}/-])"; "\\\(.c)");
 
+# True for a marker that says its round's blocker count is unknown: counts holds open_blocking, and it is null. The
+# reader honours it: the round read back has null counts, whatever its Markdown shows (fetch_round_records). A round
+# whose record could not be built posts such a marker (minimal: no findings list either).
+def marker_counts_unknown: (.counts | type) == "object" and (.counts | has("open_blocking")) and .counts.open_blocking == null;
+
 # The marker line for a record, posted right below the generated header and above $body, the exact review text.
 # One HTML comment: every "--" in the JSON is written "-\u002d". The marker never publishes text the review does not
 # show. A file stays only when $body shows that exact path, as a whole path: the whole content of a code span, less
@@ -348,7 +622,8 @@ def _re_literal: gsub("(?<c>[\\\\^$.|?*+()\\[\\]{}/-])"; "\\\(.c)");
 # The whole body (header, newline, marker, newline, review) must fit in 60,000 characters, under GitHub's 65,536: it
 # drops titles, then file, line, first_round and in_delta, then later, then findings (findings_dropped: true; counts
 # and last_ids stay). When even that does not fit: a minimal marker, {schema, round, findings_dropped: true} and
-# last_ids if it fits, so a later round knows the baseline is missing. Nothing when even that does not fit.
+# last_ids if it fits, so a later round knows the baseline is missing, with {counts: {open_blocking: null}} for a code
+# review whose blocker count is unknown (marker_counts_unknown). Nothing when even that does not fit.
 def marker_line($body):
 	($body | _visible) as $seen
 	| ($body | [scan("`([^`\n]+)`") | .[0] | sub(":\\d+.*$"; "") | _trim]) as $spans
@@ -373,7 +648,8 @@ def marker_line($body):
 		.later[]?.file, .later[]?.line, .later[]?.first_round, .later[]?.in_delta) end
 	| if fits then . else del(.later) end
 	| if fits then . else del(.findings) | .findings_dropped = true end
-	| if fits then . else {schema: 1, round, findings_dropped: true} + (if .last_ids then {last_ids} else {} end) end
+	| if fits then . else {schema: 1, round, findings_dropped: true} + (if .last_ids then {last_ids} else {} end)
+		+ (if marker_counts_unknown and .code_review != false then {counts: {open_blocking: null}} else {} end) end
 	| if fits then . else del(.last_ids) end
 	| if fits then line else empty end;
 

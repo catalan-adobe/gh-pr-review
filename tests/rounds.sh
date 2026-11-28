@@ -5,6 +5,9 @@
 set -euo pipefail
 root=$(cd "$(dirname "$0")/.." && pwd)
 stub=$(mktemp -d)
+# The script must reach its end: Bash 3.2 can stop on an error inside an EXIT trap with status 0.
+finished=false
+trap '[[ $finished == true ]] || { echo "FAIL stopped before the end"; exit 1; }' EXIT
 fail=0
 
 nl=$'\n'
@@ -209,6 +212,15 @@ out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
 expect "approach bullets under Important context, no marker: 0 blockers" \
 	'[[ $rc == 0 && $(jq -c "[.records[0].source, .records[0].counts.open_blocking, .decision.label]" <<<"$out") == "[\"backfill\",0,\"ready\"]" ]]'
 minimal='{"schema":1,"round":1,"findings_dropped":true,"last_ids":{"F":0,"L":0}}'
+# A later round's Markdown leaves out the findings it carried: with a minimal marker, its blocking count is the
+# progress line's (backfill_record), not the Markdown's.
+later_md="### Round 2 · since round 1${nl}1 still open · 1 not re-checked · open blocking: 2 (was 2)${nl}${nl}#### 🚨 Critical${nl}*(none found)*${nl}"
+later_md+="#### ⚠️ Important${nl}- **F1 · \`a.js:1\`** — boom.${nl}${nl}**Ready to merge?** No"
+jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${minimal/\"round\":1/\"round\":2} -->${nl}${later_md}" \
+	'[{body: $b, commit_id: "c2", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
+out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+expect "a minimal marker on a later round: blocking from its progress line, not the Markdown" \
+	'[[ $rc == 0 && $(jq -c ".records[0] | [.counts.open_blocking, .findings_dropped]" <<<"$out") == "[2,true]" ]]'
 jq -n --arg b "<!-- gh-pr-review generated -->${nl}<!-- gh-pr-review:round ${minimal} -->${nl}### Approach${nl}**Approach:** Rethink" \
 	'[{body: $b, commit_id: "c1", submitted_at: "2026-03-01T00:00:00Z", user: {login: "me"}}]' >"$stub/reviews.json"
 out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
@@ -258,6 +270,61 @@ del(.counts.minor)~[3,0,"","nit-loop",30]
 .counts.open_blocking = 2~[3,0,"","nit-loop",30]
 del(.last_ids) | .counts = {critical: 0, important: 5}~[3,0,"","nit-loop",32]
 del(.last_ids, .counts) | .findings |= map(if .id == "F28" then .status = "fixed" else . end)~[3,0,"","nit-loop",32]
+T
+
+# A later round's marker (#9). Round 2 stored F1 (Critical) as fixed and F2 as declined with a reason: not open. F3
+# (Important) and F4 (Critical) are carried, open and unverified: the Markdown leaves them out (its Critical section
+# says none), yet they still count.
+r1_marker='{"schema":1,"round":1,"code_review":true,"approach":"sound","ready":"no","last_ids":{"F":4,"L":0},
+	"counts":{"open_blocking":4,"critical":2,"important":2,"minor":0,"new":4,"fixed":0,"declined":0,"regressed":0}}'
+r2_marker='{"schema":1,"round":2,"mode":"incremental","code_review":true,"approach":"sound","ready":"no","findings":[
+	{"id":"F1","severity":"critical","status":"fixed","first_round":1,"in_delta":false,"file":"a.go","line":1},
+	{"id":"F2","severity":"important","status":"declined","first_round":1,"in_delta":false,"file":"b.go","line":2},
+	{"id":"F3","severity":"important","status":"open","first_round":1,"in_delta":false,"file":"c.go","line":3,"unverified":true},
+	{"id":"F4","severity":"critical","status":"open","first_round":1,"in_delta":false,"file":"d.go","line":4,"unverified":true},
+	{"id":"F5","severity":"important","status":"new","first_round":2,"in_delta":true,"file":"e.go","line":5}],
+	"later":[{"id":"L1","severity":"minor","file":"z.go","line":9}],"last_ids":{"F":5,"L":1},
+	"counts":{"open_blocking":3,"critical":1,"important":2,"minor":0,"new":1,"fixed":1,"declined":1,"regressed":0,"later":1,"unverified":2}}'
+r2_md="### Round 2 · since round 1${nl}1 fixed · 1 new · 1 declined · 1 for later · 2 not re-checked · open blocking: 3 (was 4)"
+r2_md+=" · loop: converging${nl}${nl}### Issues${nl}${nl}#### 🚨 Critical (Must Fix Before Merge)${nl}*(none found)*${nl}${nl}"
+r2_md+="#### ⚠️ Important (Should Fix)${nl}${nl}- **\`e.go:5\`** — five.${nl}${nl}#### 💡 Minor (Nice to Have)${nl}"
+r2_md+="*(none found)*${nl}${nl}<details><summary>Fixed since the last round (2)</summary>${nl}${nl}- **F1** — fixed.${nl}"
+r2_md+="- **F2** — declined: \"by design\"${nl}${nl}</details>${nl}${nl}<details><summary>Later (1)</summary>${nl}${nl}"
+r2_md+="- **\`z.go:9\`** — later.${nl}${nl}</details>${nl}${nl}**Ready to merge?** No"
+later2() { # jq filter on round 2's marker -> reviews.json: round 1 (4 blockers), then round 2
+	jq -n --argjson m1 "$r1_marker" --argjson m2 "$(jq -c "$1" <<<"$r2_marker")" --arg md "$r2_md" '
+		def review($m; $md; $c; $t): {commit_id: $c, submitted_at: $t, user: {login: "me"},
+			body: ("<!-- gh-pr-review generated -->\n<!-- gh-pr-review:round " + ($m | tojson) + " -->\n" + $md)};
+		[review($m1; "x"; "c1"; "2026-03-01T00:00:00Z"), review($m2; $md; "c2"; "2026-03-02T00:00:00Z")]' \
+		>"$stub/reviews.json"
+}
+round2() { # [open_blocking, critical, important, fixed, declined, findings_dropped, statuses F1–F5, last_ids.L, floor]
+	jq -c -L "$root/lib" 'include "records"; [.records[1] | .counts.open_blocking, .counts.critical, .counts.important,
+		.counts.fixed, .counts.declined, (.findings_dropped // false), ([.findings[]?.status] | join(" ")), .last_ids.L]
+		+ [(.records | id_floor | [.F, .L])]' <<<"$out"
+}
+# The full marker is read as it is. Any partial marker (complete_marker) is read from the Markdown: 1 Important (F5,
+# new), and the progress line's open blocking count, 3, so the carried F3 and F4 still count; F1 and F2 are not open,
+# and a partial marker's fixed and declined history is not kept. The list is dropped, and its F and L IDs stay (in
+# last_ids, from the later list, or, with neither, the Later item shown in the Markdown reserves L1). Each line: the
+# marker filter, "~", then round2's output.
+while IFS='~' read -r filter want; do
+	later2 "$filter"
+	out=$(rounds https://h/o/r/pull/1 --json) && rc=0 || rc=$?
+	expect "later round 2, $filter: $want" '[[ $rc == 0 && $(round2) == "$want" ]]'
+done <<'T'
+.~[3,1,2,1,1,false,"fixed declined open open new",1,[5,1]]
+del(.counts)~[3,0,1,0,0,true,"",1,[5,1]]
+del(.counts.open_blocking)~[3,0,1,0,0,true,"",1,[5,1]]
+.counts = {critical: 0, important: 1}~[3,0,1,0,0,true,"",1,[5,1]]
+.counts.open_blocking = 1~[3,0,1,0,0,true,"",1,[5,1]]
+del(.counts, .last_ids)~[3,0,1,0,0,true,"",1,[5,1]]
+del(.counts) | .findings |= map(select(.unverified | not))~[3,0,1,0,0,true,"",1,[5,1]]
+del(.counts, .last_ids) | .findings |= map(select(.unverified | not))~[3,0,1,0,0,true,"",1,[5,1]]
+del(.counts, .later) | .findings |= map(select(.unverified | not))~[3,0,1,0,0,true,"",1,[5,1]]
+.counts = {critical: 0, important: 1} | .findings = []~[3,0,1,0,0,true,"",1,[5,1]]
+{schema: 1, round, findings_dropped: true, last_ids}~[3,0,1,0,0,true,"",1,[5,1]]
+{schema: 1, round, findings_dropped: true}~[3,0,1,0,0,true,"",1,[5,1]]
 T
 # The same round under every marker shape marker_line emits, each the largest that fits as the review grows: full,
 # without titles, without locations, without the Later list, without findings, minimal. Each reads back with the full
@@ -411,4 +478,5 @@ echo '[]' >"$stub/comments.json"
 
 out=$(rounds) && rc=0 || rc=$?
 expect "rounds: a PR is required" '[[ $rc != 0 && $out == *Usage* ]]'
+finished=true
 exit "$fail"
