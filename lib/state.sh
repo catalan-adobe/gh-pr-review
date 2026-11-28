@@ -61,12 +61,12 @@ pr_unlock() {
 	rm -rf "$lock"
 }
 
-# Prints the value of <key> in <PR_STATE_DIR>/pr.json (a string raw), or nothing when it is not there. An invalid
+# Prints the value of <key> in <PR_STATE_DIR>/pr.json (a string raw, anything else as compact JSON), or nothing when it is not there. An invalid
 # file is an error that names it.
 pr_json_get() { # <key>
 	local file="${PR_STATE_DIR:?}/pr.json"
 	[[ -e "$file" ]] || return 0
-	jq -er --arg k "$1" 'if type == "object" then .[$k] | select(. != null) else error end' "$file" 2>/dev/null ||
+	jq -erc --arg k "$1" 'if type == "object" then .[$k] | select(. != null) else error end' "$file" 2>/dev/null ||
 		jq -e 'type == "object"' "$file" >/dev/null 2>&1 || {
 		echo "Error: invalid PR state file: $file" >&2
 		return 1

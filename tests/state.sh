@@ -137,6 +137,10 @@ eq "pr_json_get: a value" "$(pr_json_get clone)" "/repos/r2"
 eq "pr_json_get: another value" "$(pr_json_get worktree)" "/repos/r.reviews/h/42"
 eq "pr_json_get: a missing key, nothing" "$(pr_json_get head_branch)" ""
 eq "pr_json_set: one object" "$(jq -c 'keys' "$PR_STATE_DIR/pr.json")" '["clone","worktree"]'
+jq '.loop = {"rounds": [1, 2]} | .draft = false' "$PR_STATE_DIR/pr.json" >"$tmp/pr.json"
+mv "$tmp/pr.json" "$PR_STATE_DIR/pr.json"
+eq "pr_json_get: an object, compact" "$(pr_json_get loop)" '{"rounds":[1,2]}'
+eq "pr_json_get: false is a value" "$(pr_json_get draft)" "false"
 echo 'not json' >"$PR_STATE_DIR/pr.json"
 got=$(pr_json_get clone 2>&1) && rc=0 || rc=$?
 eq "pr_json_get: an invalid file is an error" "$rc $got" "1 Error: invalid PR state file: $PR_STATE_DIR/pr.json"
