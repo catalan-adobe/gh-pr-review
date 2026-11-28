@@ -30,23 +30,30 @@ unset XDG_CONFIG_HOME XDG_STATE_HOME GH_PR_REVIEW_STATE
 # ── config ──
 eq "config: no file, the default" "$(config_get '.roots[0]' repos)" repos
 mkdir -p "$HOME/.config/gh-pr-review"
-echo '{"roots": ["src"], "stale_days": 7, "loop": {"min_rounds": 3}, "off": false}' \
+echo '{"roots": ["src"], "stale_days": 7, "loop": {"min_rounds": 3}, "off": false, "editor": ""}' \
 	>"$HOME/.config/gh-pr-review/config.json"
 eq "config: a string" "$(config_get '.roots[0]' repos)" src
 eq "config: a number" "$(config_get '.stale_days' 30)" "7"
 eq "config: an object, compact" "$(config_get '.loop' '{}')" '{"min_rounds":3}'
 eq "config: false is a value" "$(config_get '.off' true)" "false"
 eq "config: a missing key, the default" "$(config_get '.clones' '{}')" "{}"
+eq "config: an empty string, the default" "$(config_get '.editor' vi)" "vi"
 export XDG_CONFIG_HOME="$tmp/xdg-config"
 eq "config: XDG_CONFIG_HOME wins" "$(config_get '.stale_days' 30)" "30"
 mkdir -p "$XDG_CONFIG_HOME/gh-pr-review"
 echo '{"stale_days": ' >"$XDG_CONFIG_HOME/gh-pr-review/config.json"
 got=$(config_get '.stale_days' 30 2>&1) && rc=0 || rc=$?
 eq "config: an invalid file is an error that names it" "$rc $got" \
-	"1 Error: invalid config file (not one JSON value): $XDG_CONFIG_HOME/gh-pr-review/config.json"
+	"1 Error: invalid config file (not one JSON object): $XDG_CONFIG_HOME/gh-pr-review/config.json"
 : >"$XDG_CONFIG_HOME/gh-pr-review/config.json"
 config_get '.stale_days' 30 >/dev/null 2>&1 && rc=0 || rc=$?
 eq "config: an empty file is invalid" "$rc" 1
+for bad in '["src"]' '"src"'; do
+	echo "$bad" >"$XDG_CONFIG_HOME/gh-pr-review/config.json"
+	got=$(config_get '.stale_days' 30 2>&1) && rc=0 || rc=$?
+	eq "config: $bad is an error that names the file" "$rc $got" \
+		"1 Error: invalid config file (not one JSON object): $XDG_CONFIG_HOME/gh-pr-review/config.json"
+done
 unset XDG_CONFIG_HOME
 
 # ── paths ──
