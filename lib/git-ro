@@ -10,12 +10,15 @@ if [[ -z "$real" || ! -x "$real" ]]; then
 	exit 1
 fi
 
-# The subcommand: the first argument after the global options.
+# The subcommand: the first argument after the global options. Any other option before it is refused.
 i=1 sub=""
 while [[ $i -le $# ]]; do
 	case "${!i}" in
-	-C | -c) i=$((i + 2)) ;;
-	--no-pager | -P | --git-dir=* | --work-tree=*) i=$((i + 1)) ;;
+	-C | -c | --git-dir | --work-tree) i=$((i + 2)) ;;
+	--no-pager | -P | -p | --paginate | --no-optional-locks | --literal-pathspecs | --no-replace-objects | \
+		--git-dir=* | --work-tree=*)
+		i=$((i + 1))
+		;;
 	*)
 		sub=${!i}
 		break

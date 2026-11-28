@@ -54,15 +54,21 @@ ro() { # git args... (through the wrapper on pi's PATH, from the repo)
 	(cd "$repo" && pi_env "$t/bin" git "$@") >"$t/ro.out" 2>&1
 }
 for args in "log --oneline" "diff" "-C $repo show --stat" "-c core.quotepath=off status" "--version" \
-	"range-diff HEAD~2 HEAD~1 HEAD" "--no-pager log -1" "rev-parse HEAD"; do
+	"range-diff HEAD~2 HEAD~1 HEAD" "--no-pager log -1" "rev-parse HEAD" \
+	"-p log -1" "--paginate log -1" "--no-optional-locks status" "--literal-pathspecs log -1" \
+	"--no-replace-objects log -1" "--git-dir $repo/.git log -1" "--git-dir=$repo/.git log -1" \
+	"--work-tree $repo --git-dir $repo/.git status" "--work-tree=$repo status"; do
 	expect "git-ro passes: $args" "ro $args"
 done
 before=$(state "$repo")
 for args in "commit -qam x" "checkout -b evil" "branch -D side" "push origin main" "stash" "worktree add ../wt" \
-	"fetch origin" "-C $repo reset --hard" "-c core.pager=cat --no-pager tag v1"; do
-	sub=${args##*-pager }
-	sub=${sub##*"$repo" }
-	sub=${sub%% *}
+	"fetch origin" "-C $repo reset --hard" "-c core.pager=cat --no-pager tag v1" "-p commit -qam x" \
+	"--paginate commit -qam x" "--no-optional-locks commit -qam x" "--literal-pathspecs commit -qam x" \
+	"--no-replace-objects commit -qam x" "--git-dir $repo/.git commit -qam x" "--work-tree $repo commit -qam x" \
+	"--git-dir=$repo/.git commit -qam x" "--work-tree=$repo commit -qam x"; do
+	for sub in $args; do
+		case $sub in commit | checkout | branch | push | stash | worktree | fetch | reset | tag) break ;; esac
+	done
 	expect "git-ro refuses: $args" \
 		"! ro $args && [[ \$(cat \"\$t/ro.out\") == 'git $sub is not allowed in a read-only review' ]]"
 done
