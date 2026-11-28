@@ -95,7 +95,7 @@ check "config: a shallow entry is skipped" "$(pick h o r)" "scan $HOME/repos/for
 check "config: the skip names the reason" "$(grep -c "skipping the configured clone $HOME/repos/shallow: shallow clone" "$t/notes")" 1
 echo '{' >"$XDG_CONFIG_HOME/gh-pr-review/config.json"
 check "config: an invalid file is an error" "$(pick h o r)" error
-check "config: the error names the file" "$(grep -c "invalid config file: $XDG_CONFIG_HOME/gh-pr-review/config.json" "$t/notes")" 1
+check "config: the error names the file" "$(grep -c "invalid config file (not one JSON value): $XDG_CONFIG_HOME/gh-pr-review/config.json" "$t/notes")" 1
 
 clone "$t/old-partial"
 git -C "$t/old-partial" config extensions.partialClone origin
@@ -108,6 +108,8 @@ check "a missing folder is not a repo" "$(clone_problem "$t/nope")" "not a git r
 rm "$XDG_CONFIG_HOME/gh-pr-review/config.json"
 CLONE_OVERRIDE="$HOME/repos/a/r/"
 check "override wins" "$(pick h o r)" "override $HOME/repos/a/r"
+check "override: a matching remote, no note" "$(cat "$t/notes")" ""
+check "override: another repo, with a note" "$(pick h o x) $(grep -c "no remote of $HOME/repos/a/r points at h/o/x" "$t/notes")" "override $HOME/repos/a/r 1"
 export CLONE_OVERRIDE="$HOME/repos/shallow"
 check "override: a shallow clone is an error" "$(pick h o r)" error
 check "override: the error says why" "$(grep -c "shallow clone" "$t/notes")" 1

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Find the local clone of a repo, or make a cache clone. Functions only.
-# Uses config_json and expand_home (lib/config.sh) and state_root (lib/state.sh).
+# Uses config_get (lib/config.sh) and state_root (lib/state.sh).
 
 # Git against a clone, with the clone's hooks off. rgit_net adds GIT_AUTH, the per-command credential helper
 # that the review run defines (unset: no extra options, as with file:// remotes in the tests).
@@ -9,6 +9,16 @@ rgit() {
 }
 rgit_net() {
 	git -c core.hooksPath=/dev/null ${GIT_AUTH[@]+"${GIT_AUTH[@]}"} "$@"
+}
+
+# "~" and "~/x" in config paths and --clone, relative to $HOME.
+expand_home() { # <path>
+	# shellcheck disable=SC2088 # matching a literal ~, not expanding it
+	case "$1" in
+	"~") printf '%s\n' "$HOME" ;;
+	"~/"*) printf '%s/%s\n' "$HOME" "${1#\~/}" ;;
+	*) printf '%s\n' "$1" ;;
+	esac
 }
 
 # host/owner/repo, lowercase, for https://h/o/r(.git), git@h:o/r(.git) and ssh://git@h(:port)/o/r(.git).
@@ -32,16 +42,16 @@ clone_matches() { # <dir> <host/owner/repo, lowercase>
 	local _name url
 	while read -r _name url; do
 		[[ "$(normalize_remote "$url" || true)" == "$2" ]] && return 0
-	done < <(git -C "$1" config --get-regexp '^remote\..*\.url$' 2>/dev/null || true)
+	done < <(rgit -C "$1" config --get-regexp '^remote\..*\.url$' 2>/dev/null || true)
 	return 1
 }
 
 # Why a folder cannot serve as the review clone, or nothing. Shallow and partial clones fetch on demand
 # from inside `git show`, which needs the credentials that the reviewer's sandbox removes.
 clone_problem() { # <dir>
-	if [[ ! -d "$1" ]] || ! git -C "$1" rev-parse --git-dir >/dev/null 2>&1; then
+	if [[ ! -d "$1" ]] || ! rgit -C "$1" rev-parse --git-dir >/dev/null 2>&1; then
 		echo "not a git repository"
-	elif [[ "$(git -C "$1" rev-parse --is-shallow-repository)" == true ]]; then
+	elif [[ "$(rgit -C "$1" rev-parse --is-shallow-repository)" == true ]]; then
 		echo "shallow clone"
 	elif is_partial_clone "$1"; then
 		echo "partial clone"
@@ -56,7 +66,7 @@ is_partial_clone() { # <dir>
 		extensions.partialclone | remote.*.partialclonefilter) [[ -n "$value" ]] && return 0 ;;
 		remote.*.promisor) [[ "$value" == true ]] && return 0 ;;
 		esac
-	done < <(git -C "$1" config --get-regexp '^(extensions\.partialclone|remote\..*\.(promisor|partialclonefilter))$' || true)
+	done < <(rgit -C "$1" config --get-regexp '^(extensions\.partialclone|remote\..*\.(promisor|partialclonefilter))$' || true)
 	return 1
 }
 
@@ -79,7 +89,7 @@ remember_clone() { # <host/owner/repo> <dir>
 # Notes go to stderr. Globals, not output, because the run needs both values.
 # shellcheck disable=SC2034 # the globals are the result, read by the caller
 find_clone() { # <host> <owner> <repo>
-	local key json path problem root gitdir dir time best="" best_time=-1
+	local key clones roots path problem root gitdir dir time best="" best_time=-1
 	key=$(tr '[:upper:]' '[:lower:]' <<<"$1/$2/$3")
 	CLONE_DIR=""
 	CLONE_KIND=""
@@ -93,12 +103,15 @@ find_clone() { # <host> <owner> <repo>
 		fi
 		CLONE_DIR=$(cd "$path" && pwd)
 		CLONE_KIND=override
+		clone_matches "$CLONE_DIR" "$key" || echo "Note: no remote of $CLONE_DIR points at $key" >&2
 		return 0
 	fi
 
-	json=$(config_json) || return 1
-	path=$(jq -r --arg k "$key" \
-		'(.clones // {}) | to_entries[] | select((.key | ascii_downcase) == $k) | .value' <<<"$json" | head -n1)
+	# A value of the wrong type prints nothing: no clones, no roots.
+	clones=$(config_get '.clones | objects' '{}') || return 1
+	roots=$(config_get '.roots | if type == "string" then [.] else arrays end' '["~/repos"]') || return 1
+	path=$(jq -r --arg k "$key" 'to_entries[] | select((.key | ascii_downcase) == $k) | .value | strings' \
+		<<<"${clones:-"{}"}" | head -n1)
 	if [[ -n "$path" ]]; then
 		path=$(expand_home "$path")
 		problem=$(clone_problem "$path")
@@ -137,7 +150,7 @@ find_clone() { # <host> <owner> <repo>
 			fi
 		done < <(find "$root" -maxdepth 5 \( -name node_modules -o -name '*.reviews' \) -prune \
 			-o -type d -name .git -print -prune 2>/dev/null | LC_ALL=C sort)
-	done < <(jq -r '(.roots // ["~/repos"]) | if type == "array" then .[] else . end' <<<"$json")
+	done < <(jq -r '.[] | strings' <<<"${roots:-"[]"}")
 	if [[ -n "$best" ]]; then
 		CLONE_DIR=$(cd "$best" && pwd)
 		CLONE_KIND=scan
@@ -149,7 +162,7 @@ find_clone() { # <host> <owner> <repo>
 	if [[ ! -d "$path" ]]; then
 		echo "Note: no local clone of $key; making a cache clone: $path" >&2
 		mkdir -p "$(dirname "$path")"
-		rgit_net clone --bare --quiet "https://$1/$2/$3.git" "$path" || {
+		rgit_net clone --bare --quiet --end-of-options "https://$1/$2/$3.git" "$path" || {
 			echo "Error: could not clone https://$1/$2/$3.git (check gh auth and network)." >&2
 			return 1
 		}
